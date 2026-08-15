@@ -430,8 +430,8 @@ async function handleFailure<S extends string, V extends Values>(
 
 function failed(key: string, error: Error, from?: Error): EkmanError {
   // A constraint refusal that nothing recovered keeps its own code all the way to the
-  // sender. Rewrapping it as a generic handler failure would throw away the one thing
-  // §5.3-style classification exists to carry.
+  // sender. Rewrapping it as a generic handler failure would throw away the classification
+  // at exactly the boundary where a caller wants to branch on it.
   if (from === undefined && isConstraintViolation(error)) {
     return error;
   }
