@@ -23,7 +23,17 @@ import type { DoSpec, EntitySpec, Given, StateSpec } from "./scenario";
 export function buildEntity(spec: EntitySpec): AnyEntityDefinition {
   const states = statesFromEntries(
     spec.name,
-    spec.states.map((state) => [state.state, compileState(state)] as const)
+    spec.states.map(
+      (state) =>
+        [
+          state.state,
+          // A state declaring a policy compiles to the object form, which is the same
+          // choice an application author makes when a state needs its own policy.
+          state.policy === undefined
+            ? compileState(state)
+            : { handler: compileState(state), ...state.policy },
+        ] as const
+    )
   );
 
   return defineEntity(spec.name, {
@@ -32,6 +42,7 @@ export function buildEntity(spec: EntitySpec): AnyEntityDefinition {
     ...(spec.values === undefined ? {} : { values: spec.values }),
     ...(spec.unknown === undefined ? {} : { unknown: spec.unknown }),
     ...(spec.triggers === undefined ? {} : { triggers: spec.triggers }),
+    ...(spec.policy === undefined ? {} : { policy: spec.policy }),
   }) as AnyEntityDefinition;
 }
 
@@ -57,11 +68,15 @@ export function buildClock(given: Given): (() => number) | undefined {
 }
 
 function compileState(spec: StateSpec): Handler {
-  return async (instance, trigger) => {
+  return async (instance, trigger, ctx) => {
+    // Every declared condition must match. `attempt` is what lets a scenario say
+    // "fail the first time, commit the second", which is the whole of retry behaviour.
     const matched = spec.cases?.find(
       (candidate) =>
-        candidate.when?.trigger === undefined ||
-        candidate.when.trigger === trigger.type
+        (candidate.when?.trigger === undefined ||
+          candidate.when.trigger === trigger.type) &&
+        (candidate.when?.attempt === undefined ||
+          candidate.when.attempt === ctx.attempt)
     );
 
     const action = matched?.do ?? spec.else;

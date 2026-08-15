@@ -1,0 +1,90 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/111-zombie-commit-fenced",
+  "name": "a timed-out handler's late result is refused at commit and the instance is unchanged",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "pending",
+        "states": [
+          {
+            "state": "pending",
+            "policy": {
+              "timeoutMs": 10
+            },
+            "else": {
+              "result": "transitionTo",
+              "to": "shipped",
+              "delayMs": 40,
+              "values": {
+                "shipped": true
+              }
+            }
+          },
+          {
+            "state": "shipped",
+            "else": {
+              "result": "stay"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "orders:1",
+        "trigger": {
+          "type": "ship"
+        }
+      }
+    },
+    {
+      "wait": 120
+    }
+  ],
+  "then": {
+    "sends": [
+      {
+        "outcome": "rejected",
+        "code": "HANDLER_TIMEOUT"
+      }
+    ],
+    "telemetry": [
+      {
+        "type": "handler.timedOut",
+        "key": "orders:1",
+        "attempt": 1,
+        "timeoutMs": 10
+      },
+      {
+        "type": "commit.fenced",
+        "key": "orders:1",
+        "attempt": 1,
+        "reason": "timeout",
+        "tokenSeq": 0,
+        "currentSeq": 0
+      }
+    ],
+    "events": {
+      "orders:1": [
+        {
+          "type": "transition",
+          "from": null,
+          "to": "pending",
+          "seq": 0
+        }
+      ]
+    },
+    "state": {
+      "orders:1": {
+        "state": "pending",
+        "seq": 0,
+        "values": {}
+      }
+    }
+  }
+}

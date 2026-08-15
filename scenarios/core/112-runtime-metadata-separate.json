@@ -1,0 +1,125 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/112-runtime-metadata-separate",
+  "name": "attempt count is runtime metadata: visible in telemetry, absent from state and history",
+  "level": "core",
+  "given": {
+    "runtime": {
+      "execution": {
+        "maxAttempts": 2,
+        "backoff": {
+          "kind": "fixed",
+          "delayMs": 1
+        }
+      }
+    },
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "pending",
+        "values": {
+          "total": 3
+        },
+        "states": [
+          {
+            "state": "pending",
+            "cases": [
+              {
+                "when": {
+                  "attempt": 1
+                },
+                "do": {
+                  "result": "fail",
+                  "error": "transient"
+                }
+              },
+              {
+                "do": {
+                  "result": "transitionTo",
+                  "to": "shipped",
+                  "values": {
+                    "total": {
+                      "$values": "total"
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "state": "shipped",
+            "else": {
+              "result": "stay"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "orders:1",
+        "trigger": {
+          "type": "ship"
+        }
+      }
+    }
+  ],
+  "then": {
+    "sends": [
+      {
+        "outcome": "committed",
+        "state": "shipped",
+        "seq": 1,
+        "values": {
+          "total": 3
+        }
+      }
+    ],
+    "telemetry": [
+      {
+        "type": "handler.retried",
+        "attempt": 1,
+        "maxAttempts": 2
+      },
+      {
+        "type": "handler.settled",
+        "attempt": 2,
+        "durationMs": "$number",
+        "outcome": "committed"
+      }
+    ],
+    "events": {
+      "orders:1": [
+        {
+          "type": "transition",
+          "from": null,
+          "to": "pending",
+          "seq": 0,
+          "values": {
+            "total": 3
+          }
+        },
+        {
+          "type": "transition",
+          "from": "pending",
+          "to": "shipped",
+          "seq": 1,
+          "values": {
+            "total": 3
+          }
+        }
+      ]
+    },
+    "state": {
+      "orders:1": {
+        "state": "shipped",
+        "seq": 1,
+        "values": {
+          "total": 3
+        }
+      }
+    }
+  }
+}

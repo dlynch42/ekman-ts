@@ -21,8 +21,23 @@ export interface Given {
   readonly runtime?: {
     readonly clock?: { readonly start: number; readonly stepMs: number };
     readonly inbox?: InboxSpec;
+    readonly execution?: PolicySpec;
   };
   readonly entities: readonly EntitySpec[];
+}
+
+/** Execution policy, at whichever level it is declared. */
+export interface PolicySpec {
+  readonly maxAttempts?: number;
+  readonly timeoutMs?: number;
+  readonly backoff?:
+    | { readonly kind: "fixed"; readonly delayMs: number }
+    | {
+        readonly kind: "exponential";
+        readonly baseMs: number;
+        readonly factor?: number;
+        readonly maxDelayMs?: number;
+      };
 }
 
 export interface InboxSpec {
@@ -37,6 +52,8 @@ export interface EntitySpec {
   readonly values?: Record<string, unknown>;
   readonly unknown?: "reject";
   readonly triggers?: readonly string[];
+  /** Entity-wide execution policy, over the runtime's and under any state's. */
+  readonly policy?: PolicySpec;
   readonly states: readonly StateSpec[];
 }
 
@@ -44,10 +61,16 @@ export interface StateSpec {
   readonly state: string;
   readonly cases?: readonly CaseSpec[];
   readonly else?: DoSpec;
+  /** Execution policy for this state alone, over the entity's and the runtime's. */
+  readonly policy?: PolicySpec;
 }
 
 export interface CaseSpec {
-  readonly when?: { readonly trigger?: string };
+  /**
+   * All declared conditions must match. `attempt` is what makes retry behaviour
+   * expressible: "fail on attempt 1, commit on attempt 2".
+   */
+  readonly when?: { readonly trigger?: string; readonly attempt?: number };
   readonly do: DoSpec;
 }
 
@@ -66,7 +89,12 @@ export type Step =
       readonly send: { readonly key: string; readonly trigger: TriggerSpec };
       readonly await?: boolean;
     }
-  | { readonly drain: true };
+  | { readonly drain: true }
+  /**
+   * Wall-clock pause. For work the runtime is still doing after every send has settled,
+   * which is exactly the case a fenced zombie exercises.
+   */
+  | { readonly wait: number };
 
 export interface TriggerSpec {
   readonly type: string;
@@ -109,6 +137,12 @@ export function isSendStep(
   step: Step
 ): step is Extract<Step, { send: unknown }> {
   return "send" in step;
+}
+
+export function isWaitStep(
+  step: Step
+): step is Extract<Step, { wait: number }> {
+  return "wait" in step;
 }
 
 /** The scenarios directory, resolved relative to this file so the cwd does not matter. */

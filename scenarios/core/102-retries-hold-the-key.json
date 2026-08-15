@@ -1,0 +1,157 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/102-retries-hold-the-key",
+  "name": "a trigger arriving during a retry waits, and never bypasses the attempt in flight",
+  "level": "core",
+  "given": {
+    "runtime": {
+      "execution": {
+        "maxAttempts": 2,
+        "backoff": {
+          "kind": "fixed",
+          "delayMs": 20
+        }
+      }
+    },
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "a",
+        "states": [
+          {
+            "state": "a",
+            "cases": [
+              {
+                "when": {
+                  "trigger": "retried",
+                  "attempt": 1
+                },
+                "do": {
+                  "result": "fail",
+                  "error": "first attempt fails"
+                }
+              },
+              {
+                "when": {
+                  "trigger": "retried"
+                },
+                "do": {
+                  "result": "stay",
+                  "values": {
+                    "last": "retried"
+                  }
+                }
+              },
+              {
+                "when": {
+                  "trigger": "queued"
+                },
+                "do": {
+                  "result": "stay",
+                  "values": {
+                    "last": "queued"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "orders:1",
+        "trigger": {
+          "type": "retried"
+        }
+      },
+      "await": false
+    },
+    {
+      "send": {
+        "key": "orders:1",
+        "trigger": {
+          "type": "queued"
+        }
+      },
+      "await": false
+    },
+    {
+      "drain": true
+    }
+  ],
+  "then": {
+    "sends": [
+      {
+        "outcome": "committed",
+        "seq": 1,
+        "values": {
+          "last": "retried"
+        }
+      },
+      {
+        "outcome": "committed",
+        "seq": 2,
+        "values": {
+          "last": "queued"
+        }
+      }
+    ],
+    "telemetry": [
+      {
+        "type": "handler.started",
+        "attempt": 1,
+        "trigger": {
+          "id": "t1"
+        }
+      },
+      {
+        "type": "handler.retried",
+        "attempt": 1,
+        "trigger": {
+          "id": "t1"
+        }
+      },
+      {
+        "type": "handler.settled",
+        "attempt": 2,
+        "outcome": "committed",
+        "trigger": {
+          "id": "t1"
+        }
+      },
+      {
+        "type": "handler.started",
+        "attempt": 1,
+        "trigger": {
+          "id": "t2"
+        }
+      }
+    ],
+    "events": {
+      "orders:1": [
+        {
+          "type": "transition",
+          "from": null,
+          "seq": 0
+        },
+        {
+          "type": "transition",
+          "seq": 1,
+          "values": {
+            "last": "retried"
+          }
+        },
+        {
+          "type": "transition",
+          "seq": 2,
+          "values": {
+            "last": "queued"
+          }
+        }
+      ]
+    }
+  }
+}

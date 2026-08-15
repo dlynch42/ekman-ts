@@ -1,0 +1,92 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/101-retries-exhausted",
+  "name": "exhausted attempts take the fail path and leave state and values untouched",
+  "level": "core",
+  "given": {
+    "runtime": {
+      "execution": {
+        "maxAttempts": 3,
+        "backoff": {
+          "kind": "fixed",
+          "delayMs": 1
+        }
+      }
+    },
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "pending",
+        "values": {
+          "total": 7
+        },
+        "states": [
+          {
+            "state": "pending",
+            "else": {
+              "result": "fail",
+              "error": "carrier unavailable"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "orders:1",
+        "trigger": {
+          "type": "ship"
+        }
+      }
+    }
+  ],
+  "then": {
+    "sends": [
+      {
+        "outcome": "rejected",
+        "code": "HANDLER_FAILED"
+      }
+    ],
+    "telemetry": [
+      {
+        "type": "handler.retried",
+        "attempt": 1,
+        "maxAttempts": 3
+      },
+      {
+        "type": "handler.retried",
+        "attempt": 2,
+        "maxAttempts": 3
+      },
+      {
+        "type": "handler.settled",
+        "attempt": 3,
+        "outcome": "failed"
+      }
+    ],
+    "events": {
+      "orders:1": [
+        {
+          "type": "transition",
+          "from": null,
+          "to": "pending",
+          "seq": 0,
+          "values": {
+            "total": 7
+          }
+        }
+      ]
+    },
+    "state": {
+      "orders:1": {
+        "state": "pending",
+        "seq": 0,
+        "values": {
+          "total": 7
+        }
+      }
+    }
+  }
+}

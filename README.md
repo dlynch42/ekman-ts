@@ -31,7 +31,8 @@ export const deployments = defineEntity("deployments", {
   initial: "pending",
   states: {
     pending:   handlePending,
-    deploying: handleDeploying,
+    // A state that talks to something flaky can carry its own execution policy
+    deploying: { handler: handleDeploying, maxAttempts: 5, timeoutMs: 30_000 },
     failed:    handleFailed,
   },
   onError: { unauthorized: handleUnauthorized },
@@ -43,6 +44,7 @@ export const ekman = new Ekman({
   entities: [deployments],
   memory:   { maxBytes: 32 * MB, eviction: { policy: "lru", snapshotOnEvict: true } },
   inbox:    { capacity: 128, overflow: "reject" },   // 128 triggers waiting per key, not bytes
+  execution: { maxAttempts: 3, timeoutMs: 10_000, backoff: { kind: "exponential", baseMs: 50 } },
   store:    [memoryStore(), redisStore(url), postgresStore(dsn)],
   audit:    [kafkaSink("state-transitions")],
   telemetry: {
@@ -63,6 +65,10 @@ ekman.history("deployments:abc123")
 Every instance gets a human-readable key, its own state and values, a bounded inbox that serializes its triggers, and an append-only transition history. Unknown states and triggers fail loudly. Constraints (transition graphs, guards, invariants, time-in-state bounds) are opt-in, each with a `reject` / `warn` / `off` dial.
 
 The inbox is bounded in **triggers, not bytes**: `capacity` is how many triggers may wait behind the one being handled, and is unrelated to `memory`, which is the byte budget. A `capacity` of 0 means one at a time with no backlog. When it fills, the overflow policy decides, and the sender always finds out. `reject` is backpressure (`INBOX_OVERFLOW`, the trigger did not land); `drop-newest` and `drop-oldest` are shedding (`TRIGGER_DROPPED`, the trigger is gone on purpose). Overflow is always visible in telemetry, and never in the transition history unless you ask for it with `recordOverflow`.
+
+Retries, timeouts, and backoff are the runtime's job, not your handler's. Configure them once on the runtime, override them per entity or per state, and write handlers that do the work and nothing else. During retries the key stays occupied, so a queued trigger can never slip past an attempt in flight.
+
+A running JavaScript function cannot be stopped, so a timeout does two things: it aborts `ctx.signal` for handlers that watch it, and it invalidates the attempt's commit token for those that do not. The abandoned handler keeps running, eventually tries to commit, and is refused. That is what makes a zombie harmless rather than merely unlikely.
 
 Telemetry is a separate stream from history, by design. Queue depth, handler duration, drops, and retries are Ekman's business; your transition history stays domain-only. Handlers are keyed by event name with `"*"` as the catch-all, so there is no event union to narrow.
 
@@ -86,8 +92,8 @@ The server runtime is the reference target. The behavioral contract is written s
 
 ## Roadmap
 
-- **v0.1**: TypeScript reference implementation. Entities, dispatch, per-key inbox, memory budget, memory/file stores, transition history.
-- **v0.2**: Redis adapter, query API, retries/timeouts, constraints (graph + guards).
+- **v0.1**: TypeScript reference implementation. Entities, dispatch, per-key inbox, retries/timeouts/fencing, memory budget, memory/file stores, transition history.
+- **v0.2**: Redis adapter, query API, constraints (graph + guards).
 - **v0.3**: Postgres adapter, invariants, temporal constraints, optimistic concurrency, Kafka adapters.
 - **v0.4**: Go implementation against the conformance spec.
 

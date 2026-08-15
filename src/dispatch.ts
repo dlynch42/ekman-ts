@@ -199,7 +199,6 @@ async function attemptLoop<S extends string, V extends Values>(
         at: telemetryNow(),
       });
 
-      // biome-ignore lint/performance/noAwaitInLoops: the backoff is the point; the key stays occupied while it elapses
       await wait(delayMs);
     }
   }

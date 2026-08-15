@@ -48,6 +48,8 @@ describe("EkmanError", () => {
       "HANDLER_FAILED",
       "INBOX_OVERFLOW",
       "TRIGGER_DROPPED",
+      "HANDLER_TIMEOUT",
+      "COMMIT_FENCED",
       "DUPLICATE_ENTITY",
       "DUPLICATE_STATE_HANDLER",
       "MISSING_INITIAL_STATE",

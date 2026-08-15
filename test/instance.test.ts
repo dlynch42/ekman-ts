@@ -12,6 +12,17 @@ const deps: RuntimeDeps = {
   inbox: resolveInboxConfig(undefined),
 };
 
+/**
+ * Commit the way dispatch does: through a token issued for the attempt.
+ *
+ * The fence is not optional, so a test cannot commit without one either. That is the
+ * point of putting the check inside `commit` rather than beside it.
+ */
+const commit = (
+  instance: InstanceRecord<string, Record<string, unknown>>,
+  next: Parameters<InstanceRecord<string, Record<string, unknown>>["commit"]>[0]
+) => instance.commit(next, instance.issueToken(1));
+
 const make = (values: Record<string, unknown> = {}) =>
   // Widened on purpose: these tests commit to states beyond the initial one.
   new InstanceRecord<string, Record<string, unknown>>({
@@ -55,13 +66,13 @@ describe("InstanceRecord", () => {
   it("advances the sequence by exactly one per commit", () => {
     const instance = make();
 
-    instance.commit({
+    commit(instance, {
       state: "approved",
       values: {},
       at: 2000,
       cause: { type: "approve", id: "t2" },
     });
-    instance.commit({
+    commit(instance, {
       state: "shipped",
       values: {},
       at: 3000,
@@ -74,7 +85,7 @@ describe("InstanceRecord", () => {
 
   it("applies state, values, sequence and event together", () => {
     const instance = make();
-    const event = instance.commit({
+    const event = commit(instance, {
       state: "approved",
       values: Object.freeze({ by: "amy" }),
       at: 2000,
@@ -89,7 +100,7 @@ describe("InstanceRecord", () => {
 
   it("records the state it moved from", () => {
     const instance = make();
-    const event = instance.commit({
+    const event = commit(instance, {
       state: "approved",
       values: {},
       at: 2000,
@@ -100,7 +111,7 @@ describe("InstanceRecord", () => {
 
   it("records a rejection without advancing the sequence", () => {
     const instance = make();
-    instance.commit({
+    commit(instance, {
       state: "approved",
       values: {},
       at: 2000,
@@ -130,7 +141,7 @@ describe("InstanceRecord", () => {
       at: 1,
       cause: { type: "x", id: "t2" },
     });
-    instance.commit({
+    commit(instance, {
       state: "approved",
       values: {},
       at: 2,
@@ -150,7 +161,7 @@ describe("InstanceRecord", () => {
 
   it("leaves only transition events for replay", () => {
     const instance = make();
-    instance.commit({
+    commit(instance, {
       state: "approved",
       values: {},
       at: 2,
@@ -180,7 +191,7 @@ describe("InstanceRecord", () => {
       { type: "go", id: "t1" },
       async () => {
         await held;
-        return instance.commit({
+        return commit(instance, {
           state: "approved",
           values: {},
           at: 2000,

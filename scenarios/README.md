@@ -95,6 +95,27 @@ producer should slow down; `TRIGGER_DROPPED` is shedding, meaning the trigger is
 purpose and should not be retried. `drop-oldest` with a `capacity` of 0 has no waiting
 trigger to drop, so it drops the arriving one.
 
+```json
+{ "execution": { "maxAttempts": 3, "timeoutMs": 500,
+                 "backoff": { "kind": "fixed", "delayMs": 10 } } }
+```
+
+`execution` is optional and sets the default execution policy for every handler.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `maxAttempts` | 1 | Total attempts including the first. 1 means no retries. |
+| `timeoutMs` | none | How long one attempt may take before it is abandoned and fenced. |
+| `backoff` | exponential, 50ms base, factor 2, 30s ceiling | Wait between attempts. Only consulted when `maxAttempts` is above 1. |
+
+Backoff is `{ "kind": "fixed", "delayMs": N }` or
+`{ "kind": "exponential", "baseMs": N, "factor": F, "maxDelayMs": M }`. There is no jitter:
+a shared suite cannot assert on a randomized delay.
+
+The same shape may be declared on an entity (`policy`) and on a single state
+(`states[].policy`). The three levels are layered field by field, narrowest winning, so a
+state that sets only `timeoutMs` keeps the wider `maxAttempts`.
+
 ### `given.entities`
 
 An array of entity specifications.
@@ -117,6 +138,7 @@ An array of entity specifications.
 | `values` | no | Declared initial values. Omitted means `{}`. |
 | `unknown` | no | Unknown policy. Defaults to `reject`. |
 | `triggers` | no | Recognized trigger types. Omitted means every type is recognized. |
+| `policy` | no | Execution policy for this entity, over the runtime's and under any state's. |
 | `states` | yes | Handler specifications, one per state. |
 
 ### `given.entities[].states[]`
@@ -155,7 +177,21 @@ Exactly one of `result` or `throw`.
 | `error` | `fail` | Error message. |
 | `errorName` | `fail`, `throw` | Error name, used for error-handler classification. Defaults to `Error`. |
 | `throw` | all | Throw instead of returning. The message. Exercises the thrown-error path. |
-| `delayMs` | all | Await this many milliseconds before producing the result. Drives ordering scenarios. |
+| `delayMs` | all | Await this many milliseconds before producing the result. Drives ordering and timeout scenarios. |
+
+A case's `when` may also match on `attempt`, the 1-based attempt number. Every declared
+condition must match. This is what makes retry behaviour expressible:
+
+```json
+{
+  "state": "pending",
+  "policy": { "maxAttempts": 3 },
+  "cases": [
+    { "when": { "attempt": 1 }, "do": { "result": "fail", "error": "transient" } },
+    { "do": { "result": "transitionTo", "to": "shipped" } }
+  ]
+}
+```
 
 ### Value expressions
 
@@ -192,6 +228,11 @@ An ordered array of steps.
 |---|---|
 | `send` | Deliver a trigger to a key. `await` defaults to `true`, meaning the runner waits for the send to settle before the next step. |
 | `drain` | Wait for every outstanding send to settle. |
+| `wait` | Pause this many milliseconds. |
+
+`wait` exists for work the runtime is still doing after every send has settled. A handler
+abandoned at its timeout keeps running and eventually tries to commit; `drain` will not
+wait for it, because its sender was told the outcome long before.
 
 `"await": false` leaves the send in flight, which is how ordering and concurrency
 scenarios overlap work on one key. A scenario that uses it should end with
@@ -263,8 +304,11 @@ Each matcher is a subset match, like an event assertion.
 | `inbox.enqueued` | A trigger is accepted into an inbox. | `depth`, `capacity`, `trigger` |
 | `inbox.rejected` | A trigger is refused by the `reject` policy. | `depth`, `capacity`, `overflow`, `trigger` |
 | `inbox.dropped` | A trigger is dropped by a drop policy. | `dropped` (`newest`/`oldest`), `trigger` |
-| `handler.started` | A handler attempt begins. | `state`, `attempt`, `depth` |
-| `handler.settled` | A trigger finishes being processed. | `outcome`, `durationMs`, `attempt` |
+| `handler.started` | A handler attempt begins. Once per attempt. | `state`, `attempt`, `depth` |
+| `handler.settled` | A trigger finishes being processed. Once per trigger. | `outcome`, `durationMs`, `attempt` |
+| `handler.retried` | An attempt failed and another will follow. | `attempt`, `maxAttempts`, `delayMs`, `error` |
+| `handler.timedOut` | An attempt ran past its timeout and was abandoned. | `attempt`, `timeoutMs` |
+| `commit.fenced` | A superseded attempt tried to commit and was refused. | `attempt`, `reason`, `tokenSeq`, `currentSeq` |
 
 `handler.settled.outcome` is `committed`, `failed`, or `refused`. `refused` means the
 trigger never reached a handler.
@@ -315,6 +359,8 @@ Stable across implementations. A runner asserts on these strings, never on messa
 | `HANDLER_FAILED` | The handler produced `fail`, or threw. |
 | `INBOX_OVERFLOW` | The inbox was full and the overflow policy is `reject`. |
 | `TRIGGER_DROPPED` | The inbox was full and a drop policy discarded this trigger. |
+| `HANDLER_TIMEOUT` | An attempt ran past its configured timeout. |
+| `COMMIT_FENCED` | A commit was refused because its attempt had been superseded. |
 | `DUPLICATE_ENTITY` | Two entities registered with the same name. |
 | `DUPLICATE_STATE_HANDLER` | Two handlers for one state. |
 | `MISSING_INITIAL_STATE` | No initial state declared. |
@@ -322,7 +368,7 @@ Stable across implementations. A runner asserts on these strings, never on messa
 | `INVALID_CONFIG` | Configuration is recognized but cannot be satisfied, and is refused rather than adjusted. |
 | `NOT_IMPLEMENTED` | Configuration is recognized but unimplemented at this phase. |
 
-Later phases add codes for fencing and timeouts.
+Later phases add codes for constraint violations and store conflicts.
 
 ## Determinism
 
@@ -354,6 +400,8 @@ Anything that cannot be made deterministic must not be asserted.
    | `07x` | definition-time validation |
    | `08x` | inbox capacity and overflow policies |
    | `09x` | telemetry |
+   | `10x` | execution policy: retries and backoff |
+   | `11x` | timeouts and commit fencing |
 
 3. Assert the narrowest thing that proves the requirement. Over-asserting makes the suite
    brittle for the next port.

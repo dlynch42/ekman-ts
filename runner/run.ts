@@ -7,7 +7,7 @@ import type {
   StateExpectation,
   Step,
 } from "./scenario";
-import { isSendStep } from "./scenario";
+import { isSendStep, isWaitStep } from "./scenario";
 
 export interface ScenarioResult {
   readonly scenario: Scenario;
@@ -86,12 +86,13 @@ async function execute(scenario: Scenario, failures: string[]): Promise<void> {
 
 function buildRuntime(scenario: Scenario, telemetry: TelemetryEvent[]): Ekman {
   const now = buildClock(scenario.given);
-  const { inbox } = scenario.given.runtime ?? {};
+  const { inbox, execution } = scenario.given.runtime ?? {};
 
   return new Ekman({
     entities: buildEntities(scenario.given),
     ...(now === undefined ? {} : { now }),
     ...(inbox === undefined ? {} : { inbox }),
+    ...(execution === undefined ? {} : { execution }),
     // Capture everything. A scenario asserts a subsequence of what lands here.
     telemetry: { "*": (event) => telemetry.push(event) },
     // A scenario asserts on outcomes, so a stray post() failure must not print noise.
@@ -108,8 +109,13 @@ async function deliver(
   let index = 0;
 
   for (const step of steps) {
+    if (isWaitStep(step)) {
+      // biome-ignore lint/performance/noAwaitInLoops: the pause is the step
+      await new Promise((done) => setTimeout(done, step.wait));
+      continue;
+    }
+
     if (!isSendStep(step)) {
-      // biome-ignore lint/performance/noAwaitInLoops: a barrier step means everything delivered so far settles before the next send
       await Promise.all(inFlight);
       continue;
     }

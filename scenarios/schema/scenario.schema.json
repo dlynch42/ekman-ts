@@ -4,7 +4,12 @@
   "title": "Ekman conformance scenario",
   "description": "One conformance scenario. See scenarios/README.md for prose documentation.",
   "type": "object",
-  "required": ["id", "name", "level", "given"],
+  "required": [
+    "id",
+    "name",
+    "level",
+    "given"
+  ],
   "additionalProperties": false,
   "properties": {
     "$schema": {
@@ -19,7 +24,11 @@
       "minLength": 1
     },
     "level": {
-      "enum": ["core", "durable", "coordinated"]
+      "enum": [
+        "core",
+        "durable",
+        "coordinated"
+      ]
     },
     "given": {
       "$ref": "#/$defs/given"
@@ -37,7 +46,9 @@
   "$defs": {
     "given": {
       "type": "object",
-      "required": ["entities"],
+      "required": [
+        "entities"
+      ],
       "additionalProperties": false,
       "properties": {
         "runtime": {
@@ -46,7 +57,10 @@
           "properties": {
             "clock": {
               "type": "object",
-              "required": ["start", "stepMs"],
+              "required": [
+                "start",
+                "stepMs"
+              ],
               "additionalProperties": false,
               "properties": {
                 "start": {
@@ -69,12 +83,20 @@
                   "minimum": 0
                 },
                 "overflow": {
-                  "enum": ["reject", "drop-newest", "drop-oldest"]
+                  "enum": [
+                    "reject",
+                    "drop-newest",
+                    "drop-oldest"
+                  ]
                 },
                 "recordOverflow": {
                   "type": "boolean"
                 }
               }
+            },
+            "execution": {
+              "description": "Default execution policy for every handler in the runtime.",
+              "$ref": "#/$defs/policy"
             }
           }
         },
@@ -88,7 +110,11 @@
     },
     "entity": {
       "type": "object",
-      "required": ["name", "initial", "states"],
+      "required": [
+        "name",
+        "initial",
+        "states"
+      ],
       "additionalProperties": false,
       "properties": {
         "name": {
@@ -103,13 +129,19 @@
           "type": "object"
         },
         "unknown": {
-          "enum": ["reject"]
+          "enum": [
+            "reject"
+          ]
         },
         "triggers": {
           "type": "array",
           "items": {
             "type": "string"
           }
+        },
+        "policy": {
+          "description": "Entity-wide policy, over the runtime's and under any state's.",
+          "$ref": "#/$defs/policy"
         },
         "states": {
           "type": "array",
@@ -121,7 +153,9 @@
     },
     "stateSpec": {
       "type": "object",
-      "required": ["state"],
+      "required": [
+        "state"
+      ],
       "additionalProperties": false,
       "properties": {
         "state": {
@@ -132,7 +166,9 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["do"],
+            "required": [
+              "do"
+            ],
             "additionalProperties": false,
             "properties": {
               "when": {
@@ -141,6 +177,11 @@
                 "properties": {
                   "trigger": {
                     "type": "string"
+                  },
+                  "attempt": {
+                    "description": "Matches the 1-based attempt number, so a case can fail once then commit.",
+                    "type": "integer",
+                    "minimum": 1
                   }
                 }
               },
@@ -152,6 +193,10 @@
         },
         "else": {
           "$ref": "#/$defs/do"
+        },
+        "policy": {
+          "description": "Policy for this state alone, over the entity's and the runtime's.",
+          "$ref": "#/$defs/policy"
         }
       }
     },
@@ -160,7 +205,11 @@
       "additionalProperties": false,
       "properties": {
         "result": {
-          "enum": ["transitionTo", "stay", "fail"]
+          "enum": [
+            "transitionTo",
+            "stay",
+            "fail"
+          ]
         },
         "to": {
           "type": "string",
@@ -183,10 +232,14 @@
       },
       "anyOf": [
         {
-          "required": ["result"]
+          "required": [
+            "result"
+          ]
         },
         {
-          "required": ["throw"]
+          "required": [
+            "throw"
+          ]
         }
       ],
       "allOf": [
@@ -197,15 +250,21 @@
                 "const": "transitionTo"
               }
             },
-            "required": ["result"]
+            "required": [
+              "result"
+            ]
           },
           "then": {
-            "required": ["to"]
+            "required": [
+              "to"
+            ]
           }
         },
         {
           "if": {
-            "required": ["to"]
+            "required": [
+              "to"
+            ]
           },
           "then": {
             "properties": {
@@ -224,7 +283,10 @@
       "properties": {
         "send": {
           "type": "object",
-          "required": ["key", "trigger"],
+          "required": [
+            "key",
+            "trigger"
+          ],
           "additionalProperties": false,
           "properties": {
             "key": {
@@ -232,7 +294,9 @@
             },
             "trigger": {
               "type": "object",
-              "required": ["type"],
+              "required": [
+                "type"
+              ],
               "properties": {
                 "type": {
                   "type": "string"
@@ -249,14 +313,23 @@
         },
         "drain": {
           "const": true
+        },
+        "wait": {
+          "description": "Pause this many milliseconds, for work still in flight after every send has settled.",
+          "type": "integer",
+          "minimum": 0
         }
       },
       "oneOf": [
         {
-          "required": ["send"]
+          "required": [
+            "send"
+          ]
         },
         {
-          "required": ["drain"]
+          "required": [
+            "drain"
+          ]
         }
       ]
     },
@@ -268,11 +341,16 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["outcome"],
+            "required": [
+              "outcome"
+            ],
             "additionalProperties": false,
             "properties": {
               "outcome": {
-                "enum": ["committed", "rejected"]
+                "enum": [
+                  "committed",
+                  "rejected"
+                ]
               },
               "state": {
                 "type": "string"
@@ -298,10 +376,18 @@
               "type": "object",
               "properties": {
                 "type": {
-                  "enum": ["transition", "rejected", "violation", "restore"]
+                  "enum": [
+                    "transition",
+                    "rejected",
+                    "violation",
+                    "restore"
+                  ]
                 },
                 "from": {
-                  "type": ["string", "null"]
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "to": {
                   "type": "string"
@@ -328,7 +414,9 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["type"],
+            "required": [
+              "type"
+            ],
             "properties": {
               "type": {
                 "enum": [
@@ -336,7 +424,10 @@
                   "inbox.rejected",
                   "inbox.dropped",
                   "handler.started",
-                  "handler.settled"
+                  "handler.settled",
+                  "handler.retried",
+                  "handler.timedOut",
+                  "commit.fenced"
                 ]
               }
             }
@@ -345,7 +436,10 @@
         "state": {
           "type": "object",
           "additionalProperties": {
-            "type": ["object", "null"],
+            "type": [
+              "object",
+              "null"
+            ],
             "additionalProperties": false,
             "properties": {
               "state": {
@@ -363,7 +457,9 @@
         },
         "buildError": {
           "type": "object",
-          "required": ["code"],
+          "required": [
+            "code"
+          ],
           "additionalProperties": false,
           "properties": {
             "code": {
@@ -382,6 +478,8 @@
         "HANDLER_FAILED",
         "INBOX_OVERFLOW",
         "TRIGGER_DROPPED",
+        "HANDLER_TIMEOUT",
+        "COMMIT_FENCED",
         "DUPLICATE_ENTITY",
         "DUPLICATE_STATE_HANDLER",
         "MISSING_INITIAL_STATE",
@@ -389,6 +487,53 @@
         "INVALID_CONFIG",
         "NOT_IMPLEMENTED"
       ]
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxAttempts": {
+          "description": "Total attempts including the first. 1 means no retries.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "timeoutMs": {
+          "description": "How long one attempt may take. Omit for no timeout.",
+          "type": "integer",
+          "exclusiveMinimum": 0
+        },
+        "backoff": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": [
+                "fixed",
+                "exponential"
+              ]
+            },
+            "delayMs": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "baseMs": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "factor": {
+              "type": "number",
+              "minimum": 1
+            },
+            "maxDelayMs": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
+      }
     }
   }
 }
