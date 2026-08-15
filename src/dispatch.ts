@@ -110,11 +110,8 @@ async function handleFailure<S extends string, V extends Values>(
       throw failed(instance.key, error, toError(thrown))
     }
 
-    if (isHandlerResult(recovery) && recovery.kind !== "fail") {
-      return commit(instance, recovery, deps, cause)
-    }
-
-    if (isHandlerResult(recovery) && recovery.kind === "fail") {
+    if (isHandlerResult(recovery)) {
+      if (recovery.kind !== "fail") return commit(instance, recovery, deps, cause)
       throw failed(instance.key, error, recovery.error)
     }
   }

@@ -1,0 +1,75 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/010-initialization",
+  "name": "the first trigger observes the declared initial state and empty values",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "pending",
+        "states": [
+          {
+            "state": "pending",
+            "else": {
+              "result": "stay",
+              "values": {
+                "seen": {
+                  "$values": ""
+                }
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "orders:1",
+        "trigger": {
+          "type": "look"
+        }
+      }
+    }
+  ],
+  "then": {
+    "sends": [
+      {
+        "outcome": "committed",
+        "state": "pending",
+        "seq": 1,
+        "values": {
+          "seen": {}
+        }
+      }
+    ],
+    "events": {
+      "orders:1": [
+        {
+          "type": "transition",
+          "from": null,
+          "to": "pending",
+          "seq": 0,
+          "values": {},
+          "cause": {
+            "type": "init"
+          }
+        },
+        {
+          "type": "transition",
+          "from": "pending",
+          "to": "pending",
+          "seq": 1
+        }
+      ]
+    },
+    "state": {
+      "orders:1": {
+        "state": "pending",
+        "seq": 1
+      }
+    }
+  }
+}

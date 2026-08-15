@@ -1,0 +1,105 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/061-cross-key-independence",
+  "name": "a slow instance does not block a different key",
+  "level": "core",
+  "given": {
+    "runtime": {
+      "clock": {
+        "start": 1000,
+        "stepMs": 1000
+      }
+    },
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "a",
+        "states": [
+          {
+            "state": "a",
+            "cases": [
+              {
+                "when": {
+                  "trigger": "slow"
+                },
+                "do": {
+                  "result": "stay",
+                  "delayMs": 20
+                }
+              },
+              {
+                "when": {
+                  "trigger": "fast"
+                },
+                "do": {
+                  "result": "stay"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "orders:slow",
+        "trigger": {
+          "type": "slow"
+        }
+      },
+      "await": false
+    },
+    {
+      "send": {
+        "key": "orders:fast",
+        "trigger": {
+          "type": "fast"
+        }
+      },
+      "await": false
+    },
+    {
+      "drain": true
+    }
+  ],
+  "then": {
+    "sends": [
+      {
+        "outcome": "committed",
+        "seq": 1
+      },
+      {
+        "outcome": "committed",
+        "seq": 1
+      }
+    ],
+    "events": {
+      "orders:slow": [
+        {
+          "type": "transition",
+          "seq": 0,
+          "at": 1000
+        },
+        {
+          "type": "transition",
+          "seq": 1,
+          "at": 4000
+        }
+      ],
+      "orders:fast": [
+        {
+          "type": "transition",
+          "seq": 0,
+          "at": 2000
+        },
+        {
+          "type": "transition",
+          "seq": 1,
+          "at": 3000
+        }
+      ]
+    }
+  }
+}

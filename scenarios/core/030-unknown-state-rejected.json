@@ -1,0 +1,84 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/030-unknown-state-rejected",
+  "name": "a trigger arriving in a state with no handler is refused and recorded",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "pending",
+        "states": [
+          {
+            "state": "pending",
+            "else": {
+              "result": "transitionTo",
+              "to": "archived"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "orders:1",
+        "trigger": {
+          "type": "archive"
+        }
+      }
+    },
+    {
+      "send": {
+        "key": "orders:1",
+        "trigger": {
+          "type": "poke"
+        }
+      }
+    }
+  ],
+  "then": {
+    "sends": [
+      {
+        "outcome": "committed",
+        "state": "archived",
+        "seq": 1
+      },
+      {
+        "outcome": "rejected",
+        "code": "UNKNOWN_STATE"
+      }
+    ],
+    "events": {
+      "orders:1": [
+        {
+          "type": "transition",
+          "from": null,
+          "to": "pending",
+          "seq": 0
+        },
+        {
+          "type": "transition",
+          "from": "pending",
+          "to": "archived",
+          "seq": 1
+        },
+        {
+          "type": "rejected",
+          "seq": 1,
+          "code": "UNKNOWN_STATE",
+          "cause": {
+            "type": "poke"
+          }
+        }
+      ]
+    },
+    "state": {
+      "orders:1": {
+        "state": "archived",
+        "seq": 1
+      }
+    }
+  }
+}

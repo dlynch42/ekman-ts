@@ -1,0 +1,40 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/051-key-names-unregistered-entity",
+  "name": "a key whose first segment names no registered entity is refused",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "pending",
+        "states": [
+          {
+            "state": "pending",
+            "else": {
+              "result": "stay"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "invoices:1",
+        "trigger": {
+          "type": "go"
+        }
+      }
+    }
+  ],
+  "then": {
+    "sends": [
+      {
+        "outcome": "rejected",
+        "code": "UNKNOWN_ENTITY"
+      }
+    ]
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/022-fail-keeps-state",
+  "name": "a fail result leaves state, values and seq exactly as they were",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "pending",
+        "states": [
+          {
+            "state": "pending",
+            "else": {
+              "result": "fail",
+              "error": "not approvable"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "orders:1",
+        "trigger": {
+          "type": "approve"
+        }
+      }
+    }
+  ],
+  "then": {
+    "sends": [
+      {
+        "outcome": "rejected",
+        "code": "HANDLER_FAILED"
+      }
+    ],
+    "events": {
+      "orders:1": [
+        {
+          "type": "transition",
+          "from": null,
+          "to": "pending",
+          "seq": 0
+        }
+      ]
+    },
+    "state": {
+      "orders:1": {
+        "state": "pending",
+        "seq": 0,
+        "values": {}
+      }
+    }
+  }
+}

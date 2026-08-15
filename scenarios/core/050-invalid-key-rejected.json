@@ -1,0 +1,64 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/050-invalid-key-rejected",
+  "name": "a malformed key is refused before any instance is touched",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "pending",
+        "states": [
+          {
+            "state": "pending",
+            "else": {
+              "result": "stay"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "orders:bad key",
+        "trigger": {
+          "type": "go"
+        }
+      }
+    },
+    {
+      "send": {
+        "key": "orders",
+        "trigger": {
+          "type": "go"
+        }
+      }
+    },
+    {
+      "send": {
+        "key": "orders::1",
+        "trigger": {
+          "type": "go"
+        }
+      }
+    }
+  ],
+  "then": {
+    "sends": [
+      {
+        "outcome": "rejected",
+        "code": "INVALID_KEY"
+      },
+      {
+        "outcome": "rejected",
+        "code": "INVALID_KEY"
+      },
+      {
+        "outcome": "rejected",
+        "code": "INVALID_KEY"
+      }
+    ]
+  }
+}

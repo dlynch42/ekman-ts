@@ -1,0 +1,74 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/011-declared-initial-values",
+  "name": "an entity that declares initial values starts every instance with them",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "carts",
+        "initial": "open",
+        "values": {
+          "total": 0,
+          "currency": "usd"
+        },
+        "states": [
+          {
+            "state": "open",
+            "else": {
+              "result": "stay",
+              "values": {
+                "$values": ""
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "carts:1",
+        "trigger": {
+          "type": "look"
+        }
+      }
+    }
+  ],
+  "then": {
+    "sends": [
+      {
+        "outcome": "committed",
+        "seq": 1,
+        "values": {
+          "total": 0,
+          "currency": "usd"
+        }
+      }
+    ],
+    "events": {
+      "carts:1": [
+        {
+          "type": "transition",
+          "from": null,
+          "to": "open",
+          "seq": 0,
+          "values": {
+            "total": 0,
+            "currency": "usd"
+          }
+        },
+        {
+          "type": "transition",
+          "to": "open",
+          "seq": 1,
+          "values": {
+            "total": 0,
+            "currency": "usd"
+          }
+        }
+      ]
+    }
+  }
+}

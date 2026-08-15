@@ -1,0 +1,122 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/040-seq-monotonic",
+  "name": "the sequence advances exactly once per commit, with no gaps",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "counter",
+        "initial": "a",
+        "states": [
+          {
+            "state": "a",
+            "else": {
+              "result": "stay",
+              "values": {
+                "tick": {
+                  "$trigger": "n"
+                }
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "counter:1",
+        "trigger": {
+          "type": "tick",
+          "n": 1
+        }
+      }
+    },
+    {
+      "send": {
+        "key": "counter:1",
+        "trigger": {
+          "type": "tick",
+          "n": 2
+        }
+      }
+    },
+    {
+      "send": {
+        "key": "counter:1",
+        "trigger": {
+          "type": "tick",
+          "n": 3
+        }
+      }
+    },
+    {
+      "send": {
+        "key": "counter:1",
+        "trigger": {
+          "type": "tick",
+          "n": 4
+        }
+      }
+    }
+  ],
+  "then": {
+    "sends": [
+      {
+        "outcome": "committed",
+        "seq": 1
+      },
+      {
+        "outcome": "committed",
+        "seq": 2
+      },
+      {
+        "outcome": "committed",
+        "seq": 3
+      },
+      {
+        "outcome": "committed",
+        "seq": 4
+      }
+    ],
+    "events": {
+      "counter:1": [
+        {
+          "type": "transition",
+          "from": null,
+          "seq": 0
+        },
+        {
+          "type": "transition",
+          "seq": 1,
+          "values": {
+            "tick": 1
+          }
+        },
+        {
+          "type": "transition",
+          "seq": 2,
+          "values": {
+            "tick": 2
+          }
+        },
+        {
+          "type": "transition",
+          "seq": 3,
+          "values": {
+            "tick": 3
+          }
+        },
+        {
+          "type": "transition",
+          "seq": 4,
+          "values": {
+            "tick": 4
+          }
+        }
+      ]
+    }
+  }
+}

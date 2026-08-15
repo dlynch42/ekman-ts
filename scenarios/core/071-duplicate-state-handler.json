@@ -1,0 +1,34 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/071-duplicate-state-handler",
+  "name": "two handlers for one state are refused at definition",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "pending",
+        "states": [
+          {
+            "state": "pending",
+            "else": {
+              "result": "stay"
+            }
+          },
+          {
+            "state": "pending",
+            "else": {
+              "result": "fail",
+              "error": "second"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "then": {
+    "buildError": {
+      "code": "DUPLICATE_STATE_HANDLER"
+    }
+  }
+}

@@ -1,0 +1,117 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/060-per-key-fifo",
+  "name": "overlapping triggers for one key run in order, each on the previous commit",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "a",
+        "states": [
+          {
+            "state": "a",
+            "else": {
+              "result": "stay",
+              "delayMs": 5,
+              "values": {
+                "last": {
+                  "$trigger": "n"
+                }
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "orders:1",
+        "trigger": {
+          "type": "go",
+          "n": 1
+        }
+      },
+      "await": false
+    },
+    {
+      "send": {
+        "key": "orders:1",
+        "trigger": {
+          "type": "go",
+          "n": 2
+        }
+      },
+      "await": false
+    },
+    {
+      "send": {
+        "key": "orders:1",
+        "trigger": {
+          "type": "go",
+          "n": 3
+        }
+      },
+      "await": false
+    },
+    {
+      "drain": true
+    }
+  ],
+  "then": {
+    "sends": [
+      {
+        "outcome": "committed",
+        "seq": 1
+      },
+      {
+        "outcome": "committed",
+        "seq": 2
+      },
+      {
+        "outcome": "committed",
+        "seq": 3
+      }
+    ],
+    "events": {
+      "orders:1": [
+        {
+          "type": "transition",
+          "from": null,
+          "seq": 0
+        },
+        {
+          "type": "transition",
+          "seq": 1,
+          "values": {
+            "last": 1
+          }
+        },
+        {
+          "type": "transition",
+          "seq": 2,
+          "values": {
+            "last": 2
+          }
+        },
+        {
+          "type": "transition",
+          "seq": 3,
+          "values": {
+            "last": 3
+          }
+        }
+      ]
+    },
+    "state": {
+      "orders:1": {
+        "seq": 3,
+        "values": {
+          "last": 3
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,66 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/020-transition-to",
+  "name": "a transitionTo result commits state, values and seq, and appends one event",
+  "level": "core",
+  "given": {
+    "runtime": { "clock": { "start": 1000, "stepMs": 1000 } },
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "pending",
+        "states": [
+          {
+            "state": "pending",
+            "cases": [
+              {
+                "when": { "trigger": "approve" },
+                "do": {
+                  "result": "transitionTo",
+                  "to": "approved",
+                  "values": { "by": { "$trigger": "actor" }, "note": "literal" }
+                }
+              }
+            ],
+            "else": { "result": "fail", "error": "not approvable" }
+          },
+          { "state": "approved", "else": { "result": "stay" } }
+        ]
+      }
+    ]
+  },
+  "when": [{ "send": { "key": "orders:1", "trigger": { "type": "approve", "actor": "amy" } } }],
+  "then": {
+    "sends": [
+      {
+        "outcome": "committed",
+        "state": "approved",
+        "seq": 1,
+        "values": { "by": "amy", "note": "literal" }
+      }
+    ],
+    "events": {
+      "orders:1": [
+        {
+          "type": "transition",
+          "from": null,
+          "to": "pending",
+          "seq": 0,
+          "values": {},
+          "cause": { "type": "init" }
+        },
+        {
+          "type": "transition",
+          "from": "pending",
+          "to": "approved",
+          "seq": 1,
+          "values": { "by": "amy", "note": "literal" },
+          "cause": { "type": "approve", "id": "t1" }
+        }
+      ]
+    },
+    "state": {
+      "orders:1": { "state": "approved", "values": { "by": "amy", "note": "literal" }, "seq": 1 }
+    }
+  }
+}

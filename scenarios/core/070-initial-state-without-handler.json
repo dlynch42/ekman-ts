@@ -1,0 +1,27 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/070-initial-state-without-handler",
+  "name": "an entity whose initial state has no handler is refused at definition",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "shipped",
+        "states": [
+          {
+            "state": "pending",
+            "else": {
+              "result": "stay"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "then": {
+    "buildError": {
+      "code": "INITIAL_STATE_NOT_IN_STATES"
+    }
+  }
+}

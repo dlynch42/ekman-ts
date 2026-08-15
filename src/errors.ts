@@ -59,8 +59,25 @@ export class EkmanError extends Error {
     // `name` is a class field, so it is assigned after super() and after Error's own
     // stack capture. Re-capture so the stack header reads "EkmanError", not "Error".
     if (Error.captureStackTrace) Error.captureStackTrace(this, EkmanError)
-    else this.stack = `${this.name}: ${message}\n${this.stack ?? ""}`
+    else this.stack = composeStack(this.name, message, this.stack)
   }
+}
+
+/**
+ * Build a stack string headed by the error's own name, for engines that lack V8's
+ * `Error.captureStackTrace`.
+ *
+ * Pulled out of the constructor because the absent-stack case cannot be produced from
+ * inside one: V8 always populates `stack`, so the branch would be permanently untested
+ * sitting inline. As a pure function it is exercised directly.
+ */
+export function composeStack(
+  name: string,
+  message: string,
+  existing: string | undefined,
+): string {
+  const header = `${name}: ${message}`
+  return existing === undefined ? header : `${header}\n${existing}`
 }
 
 /** Narrowing helper for callers that catch broadly. */

@@ -1,0 +1,67 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/031-unknown-trigger-rejected",
+  "name": "an undeclared trigger type is refused without reaching a handler",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "pending",
+        "triggers": [
+          "approve"
+        ],
+        "states": [
+          {
+            "state": "pending",
+            "else": {
+              "result": "stay"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "orders:1",
+        "trigger": {
+          "type": "sneak"
+        }
+      }
+    }
+  ],
+  "then": {
+    "sends": [
+      {
+        "outcome": "rejected",
+        "code": "UNKNOWN_TRIGGER"
+      }
+    ],
+    "events": {
+      "orders:1": [
+        {
+          "type": "transition",
+          "from": null,
+          "to": "pending",
+          "seq": 0
+        },
+        {
+          "type": "rejected",
+          "seq": 0,
+          "code": "UNKNOWN_TRIGGER",
+          "cause": {
+            "type": "sneak"
+          }
+        }
+      ]
+    },
+    "state": {
+      "orders:1": {
+        "state": "pending",
+        "seq": 0
+      }
+    }
+  }
+}

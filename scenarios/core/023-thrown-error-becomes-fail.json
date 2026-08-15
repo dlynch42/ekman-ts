@@ -1,0 +1,57 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/023-thrown-error-becomes-fail",
+  "name": "a handler that throws is treated exactly like a fail result",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "pending",
+        "states": [
+          {
+            "state": "pending",
+            "else": {
+              "throw": "boom",
+              "errorName": "RangeError"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "orders:1",
+        "trigger": {
+          "type": "approve"
+        }
+      }
+    }
+  ],
+  "then": {
+    "sends": [
+      {
+        "outcome": "rejected",
+        "code": "HANDLER_FAILED"
+      }
+    ],
+    "events": {
+      "orders:1": [
+        {
+          "type": "transition",
+          "from": null,
+          "to": "pending",
+          "seq": 0
+        }
+      ]
+    },
+    "state": {
+      "orders:1": {
+        "state": "pending",
+        "seq": 0
+      }
+    }
+  }
+}

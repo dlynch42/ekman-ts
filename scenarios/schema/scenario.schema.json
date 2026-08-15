@@ -1,0 +1,420 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ekman.dev/schema/scenario.schema.json",
+  "title": "Ekman conformance scenario",
+  "description": "One conformance scenario. See scenarios/README.md for prose documentation.",
+  "type": "object",
+  "required": [
+    "id",
+    "name",
+    "level",
+    "given"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^(core|durable|coordinated)/[a-z0-9-]+$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "level": {
+      "enum": [
+        "core",
+        "durable",
+        "coordinated"
+      ]
+    },
+    "given": {
+      "$ref": "#/$defs/given"
+    },
+    "when": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/step"
+      }
+    },
+    "then": {
+      "$ref": "#/$defs/then"
+    }
+  },
+  "$defs": {
+    "given": {
+      "type": "object",
+      "required": [
+        "entities"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "runtime": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "clock": {
+              "type": "object",
+              "required": [
+                "start",
+                "stepMs"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "start": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "stepMs": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          }
+        },
+        "entities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/entity"
+          }
+        }
+      }
+    },
+    "entity": {
+      "type": "object",
+      "required": [
+        "name",
+        "initial",
+        "states"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[^:\\s]+$"
+        },
+        "initial": {
+          "type": "string",
+          "minLength": 1
+        },
+        "values": {
+          "type": "object"
+        },
+        "unknown": {
+          "enum": [
+            "reject"
+          ]
+        },
+        "triggers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "states": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/stateSpec"
+          }
+        }
+      }
+    },
+    "stateSpec": {
+      "type": "object",
+      "required": [
+        "state"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cases": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "do"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "when": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "trigger": {
+                    "type": "string"
+                  }
+                }
+              },
+              "do": {
+                "$ref": "#/$defs/do"
+              }
+            }
+          }
+        },
+        "else": {
+          "$ref": "#/$defs/do"
+        }
+      }
+    },
+    "do": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "result": {
+          "enum": [
+            "transitionTo",
+            "stay",
+            "fail"
+          ]
+        },
+        "to": {
+          "type": "string",
+          "minLength": 1
+        },
+        "values": {},
+        "error": {
+          "type": "string"
+        },
+        "errorName": {
+          "type": "string"
+        },
+        "throw": {
+          "type": "string"
+        },
+        "delayMs": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "result"
+          ]
+        },
+        {
+          "required": [
+            "throw"
+          ]
+        }
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "result": {
+                "const": "transitionTo"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          },
+          "then": {
+            "required": [
+              "to"
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "to"
+            ]
+          },
+          "then": {
+            "properties": {
+              "result": {
+                "const": "transitionTo"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "send": {
+          "type": "object",
+          "required": [
+            "key",
+            "trigger"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "trigger": {
+              "type": "object",
+              "required": [
+                "type"
+              ],
+              "properties": {
+                "type": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "await": {
+          "type": "boolean"
+        },
+        "drain": {
+          "const": true
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "send"
+          ]
+        },
+        {
+          "required": [
+            "drain"
+          ]
+        }
+      ]
+    },
+    "then": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sends": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "outcome"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "committed",
+                  "rejected"
+                ]
+              },
+              "state": {
+                "type": "string"
+              },
+              "seq": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "values": {
+                "type": "object"
+              },
+              "code": {
+                "$ref": "#/$defs/errorCode"
+              }
+            }
+          }
+        },
+        "events": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "enum": [
+                    "transition",
+                    "rejected",
+                    "violation",
+                    "restore"
+                  ]
+                },
+                "from": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "to": {
+                  "type": "string"
+                },
+                "seq": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "at": {
+                  "type": "integer"
+                },
+                "cause": {
+                  "type": "object"
+                },
+                "values": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "state": {
+          "type": "object",
+          "additionalProperties": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "state": {
+                "type": "string"
+              },
+              "values": {
+                "type": "object"
+              },
+              "seq": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
+        },
+        "buildError": {
+          "type": "object",
+          "required": [
+            "code"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "$ref": "#/$defs/errorCode"
+            }
+          }
+        }
+      }
+    },
+    "errorCode": {
+      "enum": [
+        "INVALID_KEY",
+        "UNKNOWN_ENTITY",
+        "UNKNOWN_STATE",
+        "UNKNOWN_TRIGGER",
+        "HANDLER_FAILED",
+        "DUPLICATE_ENTITY",
+        "DUPLICATE_STATE_HANDLER",
+        "MISSING_INITIAL_STATE",
+        "INITIAL_STATE_NOT_IN_STATES",
+        "NOT_IMPLEMENTED"
+      ]
+    }
+  }
+}
