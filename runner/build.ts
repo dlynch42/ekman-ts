@@ -1,13 +1,18 @@
-import { defineEntity, statesFromEntries } from "../src/index"
-import { fail, stay, transitionTo } from "../src/index"
 import type {
   AnyEntityDefinition,
   Handler,
   HandlerResult,
   InstanceSnapshot,
   Trigger,
-} from "../src/index"
-import type { DoSpec, EntitySpec, Given, StateSpec } from "./scenario"
+} from "../src/index";
+import {
+  defineEntity,
+  fail,
+  statesFromEntries,
+  stay,
+  transitionTo,
+} from "../src/index";
+import type { DoSpec, EntitySpec, Given, StateSpec } from "./scenario";
 
 /**
  * Compile a scenario's declarative entity spec into a real entity definition.
@@ -18,8 +23,8 @@ import type { DoSpec, EntitySpec, Given, StateSpec } from "./scenario"
 export function buildEntity(spec: EntitySpec): AnyEntityDefinition {
   const states = statesFromEntries(
     spec.name,
-    spec.states.map((state) => [state.state, compileState(state)] as const),
-  )
+    spec.states.map((state) => [state.state, compileState(state)] as const)
+  );
 
   return defineEntity(spec.name, {
     initial: spec.initial,
@@ -27,11 +32,11 @@ export function buildEntity(spec: EntitySpec): AnyEntityDefinition {
     ...(spec.values === undefined ? {} : { values: spec.values }),
     ...(spec.unknown === undefined ? {} : { unknown: spec.unknown }),
     ...(spec.triggers === undefined ? {} : { triggers: spec.triggers }),
-  }) as AnyEntityDefinition
+  }) as AnyEntityDefinition;
 }
 
 export function buildEntities(given: Given): AnyEntityDefinition[] {
-  return given.entities.map(buildEntity)
+  return given.entities.map(buildEntity);
 }
 
 /**
@@ -39,72 +44,99 @@ export function buildEntities(given: Given): AnyEntityDefinition[] {
  * assert on event timestamps.
  */
 export function buildClock(given: Given): (() => number) | undefined {
-  const clock = given.runtime?.clock
-  if (clock === undefined) return undefined
+  const clock = given.runtime?.clock;
+  if (clock === undefined) {
+    return;
+  }
 
-  let current = clock.start - clock.stepMs
-  return () => (current += clock.stepMs)
+  let current = clock.start - clock.stepMs;
+  return () => {
+    current += clock.stepMs;
+    return current;
+  };
 }
 
 function compileState(spec: StateSpec): Handler {
   return async (instance, trigger) => {
     const matched = spec.cases?.find(
       (candidate) =>
-        candidate.when?.trigger === undefined || candidate.when.trigger === trigger.type,
-    )
+        candidate.when?.trigger === undefined ||
+        candidate.when.trigger === trigger.type
+    );
 
-    const action = matched?.do ?? spec.else
+    const action = matched?.do ?? spec.else;
     // No case matched and no `else`: ordinary handler logic that changes nothing.
-    if (action === undefined) return stay()
+    if (action === undefined) {
+      return stay();
+    }
 
     if (action.delayMs !== undefined && action.delayMs > 0) {
-      await new Promise((resolve) => setTimeout(resolve, action.delayMs))
+      await new Promise((done) => setTimeout(done, action.delayMs));
     }
 
     if (action.throw !== undefined) {
-      throw named(new Error(action.throw), action.errorName)
+      throw named(new Error(action.throw), action.errorName);
     }
 
-    return toResult(action, instance, trigger)
-  }
+    return toResult(action, instance, trigger);
+  };
 }
 
-function toResult(action: DoSpec, instance: InstanceSnapshot, trigger: Trigger): HandlerResult {
-  const context = { trigger, values: instance.values, key: instance.key }
+function toResult(
+  action: DoSpec,
+  instance: InstanceSnapshot,
+  trigger: Trigger
+): HandlerResult {
+  const context = { trigger, values: instance.values, key: instance.key };
 
   switch (action.result) {
     case "transitionTo": {
-      const target = action.to as string
+      const target = action.to as string;
       return action.values === undefined
         ? transitionTo(target)
-        : transitionTo(target, resolveValues(action.values, context))
+        : transitionTo(target, resolveValues(action.values, context));
     }
     case "stay":
-      return action.values === undefined ? stay() : stay(resolveValues(action.values, context))
+      return action.values === undefined
+        ? stay()
+        : stay(resolveValues(action.values, context));
     case "fail":
-      return fail(named(new Error(action.error ?? "failed"), action.errorName))
+      return fail(named(new Error(action.error ?? "failed"), action.errorName));
     default:
-      throw new Error(`scenario declares no result and no throw: ${JSON.stringify(action)}`)
+      throw new Error(
+        `scenario declares no result and no throw: ${JSON.stringify(action)}`
+      );
   }
 }
 
 function named(error: Error, name: string | undefined): Error {
-  if (name !== undefined) error.name = name
-  return error
+  if (name !== undefined) {
+    error.name = name;
+  }
+  return error;
 }
 
 interface ResolveContext {
-  trigger: Trigger
-  values: Readonly<Record<string, unknown>>
-  key: string
+  trigger: Trigger;
+  values: Readonly<Record<string, unknown>>;
+  key: string;
 }
 
-function resolveValues(expr: unknown, context: ResolveContext): Record<string, unknown> {
-  const resolved = resolve(expr, context)
-  if (typeof resolved !== "object" || resolved === null || Array.isArray(resolved)) {
-    throw new Error(`values expression must resolve to an object, got ${JSON.stringify(resolved)}`)
+function resolveValues(
+  expr: unknown,
+  context: ResolveContext
+): Record<string, unknown> {
+  const resolved = resolve(expr, context);
+  if (
+    typeof resolved !== "object" ||
+    resolved === null ||
+    Array.isArray(resolved)
+  ) {
+    throw new Error(
+      `values expression must resolve to an object, got ${JSON.stringify(resolved)}`
+    );
   }
-  return resolved as Record<string, unknown>
+  return resolved as Record<string, unknown>;
 }
 
 /**
@@ -112,39 +144,53 @@ function resolveValues(expr: unknown, context: ResolveContext): Record<string, u
  * reference into the current dispatch; everything else is a literal.
  */
 export function resolve(expr: unknown, context: ResolveContext): unknown {
-  if (Array.isArray(expr)) return expr.map((item) => resolve(item, context))
-  if (typeof expr !== "object" || expr === null) return expr
-
-  const entries = Object.entries(expr as Record<string, unknown>)
-  const [first] = entries
-
-  if (entries.length === 1 && first !== undefined && first[0].startsWith("$")) {
-    return dereference(first[0], String(first[1]), context)
+  if (Array.isArray(expr)) {
+    return expr.map((item) => resolve(item, context));
+  }
+  if (typeof expr !== "object" || expr === null) {
+    return expr;
   }
 
-  return Object.fromEntries(entries.map(([key, value]) => [key, resolve(value, context)]))
+  const entries = Object.entries(expr as Record<string, unknown>);
+  const [first] = entries;
+
+  if (entries.length === 1 && first !== undefined && first[0].startsWith("$")) {
+    return dereference(first[0], String(first[1]), context);
+  }
+
+  return Object.fromEntries(
+    entries.map(([key, value]) => [key, resolve(value, context)])
+  );
 }
 
-function dereference(reference: string, path: string, context: ResolveContext): unknown {
+function dereference(
+  reference: string,
+  path: string,
+  context: ResolveContext
+): unknown {
   switch (reference) {
     case "$trigger":
-      return read(context.trigger, path)
+      return read(context.trigger, path);
     case "$values":
-      return read(context.values, path)
+      return read(context.values, path);
     case "$key":
-      return path === "" ? context.key : read({ key: context.key }, path)
+      return path === "" ? context.key : read({ key: context.key }, path);
     default:
-      throw new Error(`unknown value reference "${reference}"`)
+      throw new Error(`unknown value reference "${reference}"`);
   }
 }
 
 function read(source: unknown, path: string): unknown {
-  if (path === "") return source
-
-  let current = source
-  for (const segment of path.split(".")) {
-    if (typeof current !== "object" || current === null) return undefined
-    current = (current as Record<string, unknown>)[segment]
+  if (path === "") {
+    return source;
   }
-  return current
+
+  let current = source;
+  for (const segment of path.split(".")) {
+    if (typeof current !== "object" || current === null) {
+      return;
+    }
+    current = (current as Record<string, unknown>)[segment];
+  }
+  return current;
 }

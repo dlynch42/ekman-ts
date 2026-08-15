@@ -29,7 +29,14 @@
       }
     ]
   },
-  "when": [{ "send": { "key": "orders:1", "trigger": { "type": "approve", "actor": "amy" } } }],
+  "when": [
+    {
+      "send": {
+        "key": "orders:1",
+        "trigger": { "type": "approve", "actor": "amy" }
+      }
+    }
+  ],
   "then": {
     "sends": [
       {
@@ -60,7 +67,11 @@
       ]
     },
     "state": {
-      "orders:1": { "state": "approved", "values": { "by": "amy", "note": "literal" }, "seq": 1 }
+      "orders:1": {
+        "state": "approved",
+        "values": { "by": "amy", "note": "literal" },
+        "seq": 1
+      }
     }
   }
 }

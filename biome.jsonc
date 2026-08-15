@@ -1,0 +1,18 @@
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  "extends": ["ultracite/biome/core"],
+  "assist": {
+    "actions": {
+      "source": {
+        // Declaration order in this codebase is deliberate: type fields, object
+        // properties and scenario JSON keys read top to bottom as documentation.
+        // Import sorting stays on.
+        "useSortedKeys": "off",
+        "useSortedProperties": "off",
+        "useSortedTypeFields": "off",
+        "useSortedInterfaceMembers": "off",
+        "useSortedPackageJson": "off"
+      }
+    }
+  }
+}

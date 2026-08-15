@@ -8,9 +8,7 @@
       {
         "name": "orders",
         "initial": "pending",
-        "triggers": [
-          "approve"
-        ],
+        "triggers": ["approve"],
         "states": [
           {
             "state": "pending",

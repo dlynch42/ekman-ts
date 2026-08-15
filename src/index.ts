@@ -17,28 +17,27 @@
  * ```
  */
 
-export { Ekman } from "./ekman"
-export { defineEntity, statesFromEntries } from "./entity"
-export { fail, stay, transitionTo } from "./results"
-export { EkmanError, ERROR_CODES, isEkmanError } from "./errors"
-export { isTransitionEvent } from "./events"
-export { buildKey, parseKey, KEY_SEPARATOR } from "./key"
-export { ERROR_FALLBACK } from "./types"
-
-export type { ErrorCode, EkmanErrorOptions } from "./errors"
+// biome-ignore lint/performance/noBarrelFile: this is the package entry point declared in `exports`, so one public surface is the point
+export { Ekman } from "./ekman";
+export { defineEntity, statesFromEntries } from "./entity";
+export type { EkmanErrorOptions, ErrorCode } from "./errors";
+export { EkmanError, ERROR_CODES, isEkmanError } from "./errors";
 export type {
   EkmanEvent,
   EventCause,
   RejectedEvent,
   TransitionEvent,
-} from "./events"
-export type { ParsedKey } from "./key"
+} from "./events";
+export { isTransitionEvent } from "./events";
+export type { ParsedKey } from "./key";
+export { buildKey, KEY_SEPARATOR, parseKey } from "./key";
 export type {
   FailResult,
   HandlerResult,
   StayResult,
   TransitionToResult,
-} from "./results"
+} from "./results";
+export { fail, stay, transitionTo } from "./results";
 export type {
   AnyEntityDefinition,
   CommitResult,
@@ -55,4 +54,5 @@ export type {
   TriggerLike,
   UnknownPolicy,
   Values,
-} from "./types"
+} from "./types";
+export { ERROR_FALLBACK } from "./types";

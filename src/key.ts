@@ -1,15 +1,17 @@
-import { EkmanError } from "./errors"
+import { EkmanError } from "./errors";
 
 /** The separator between an entity name and its segments. */
-export const KEY_SEPARATOR = ":"
+export const KEY_SEPARATOR = ":";
+
+const WHITESPACE = /\s/;
 
 export interface ParsedKey {
   /** The key exactly as given. This is the public identity, never normalized. */
-  readonly key: string
+  readonly key: string;
   /** The first segment, which names the entity. */
-  readonly entity: string
+  readonly entity: string;
   /** Every segment after the entity name. Always at least one. */
-  readonly segments: readonly string[]
+  readonly segments: readonly string[];
 }
 
 /**
@@ -21,17 +23,20 @@ export interface ParsedKey {
  */
 export function parseKey(key: string): ParsedKey {
   if (typeof key !== "string") {
-    throw new EkmanError("INVALID_KEY", `key must be a string, received ${typeof key}`)
+    throw new EkmanError(
+      "INVALID_KEY",
+      `key must be a string, received ${typeof key}`
+    );
   }
 
-  const parts = key.split(KEY_SEPARATOR)
+  const parts = key.split(KEY_SEPARATOR);
 
   if (parts.length < 2) {
     throw new EkmanError(
       "INVALID_KEY",
       `key ${JSON.stringify(key)} must be "<entity>:<segment>", it has no segment`,
-      { key },
-    )
+      { key }
+    );
   }
 
   for (const part of parts) {
@@ -39,22 +44,22 @@ export function parseKey(key: string): ParsedKey {
       throw new EkmanError(
         "INVALID_KEY",
         `key ${JSON.stringify(key)} has an empty segment`,
-        { key },
-      )
+        { key }
+      );
     }
-    if (/\s/.test(part)) {
+    if (WHITESPACE.test(part)) {
       throw new EkmanError(
         "INVALID_KEY",
         `key ${JSON.stringify(key)} has whitespace in segment ${JSON.stringify(part)}`,
-        { key },
-      )
+        { key }
+      );
     }
   }
 
   // Checked above: length >= 2 and every part is non-empty.
-  const [entity, ...segments] = parts as [string, ...string[]]
+  const [entity, ...segments] = parts as [string, ...string[]];
 
-  return { key, entity, segments }
+  return { key, entity, segments };
 }
 
 /**
@@ -65,7 +70,7 @@ export function parseKey(key: string): ParsedKey {
  * breaks later at `send()`.
  */
 export function buildKey(entity: string, id: string): string {
-  const key = `${entity}${KEY_SEPARATOR}${id}`
-  parseKey(key)
-  return key
+  const key = `${entity}${KEY_SEPARATOR}${id}`;
+  parseKey(key);
+  return key;
 }

@@ -5,42 +5,43 @@
  * reports pass/fail per scenario per conformance level. Exits non-zero if any scenario
  * at a claimed level fails.
  */
-import { format, summarize } from "./report"
-import { runScenario } from "./run"
-import { CLAIMED_LEVELS, loadScenarios } from "./scenario"
-import type { ScenarioResult } from "./run"
+import { format, summarize } from "./report";
+import type { ScenarioResult } from "./run";
+import { runScenario } from "./run";
+import { CLAIMED_LEVELS, loadScenarios } from "./scenario";
 
 async function main(): Promise<number> {
-  const scenarios = loadScenarios()
+  const scenarios = loadScenarios();
 
   if (scenarios.length === 0) {
-    console.error("No scenarios found.")
-    return 1
+    console.error("No scenarios found.");
+    return 1;
   }
 
-  const results: ScenarioResult[] = []
+  const results: ScenarioResult[] = [];
   for (const scenario of scenarios) {
-    // Sequential on purpose: scenarios assert on ordering and on an injected clock, and
-    // interleaving them would make a failure hard to attribute.
-    results.push(
-      CLAIMED_LEVELS.includes(scenario.level)
-        ? await runScenario(scenario)
-        : { scenario, status: "passed", failures: [] },
-    )
+    if (!CLAIMED_LEVELS.includes(scenario.level)) {
+      results.push({ scenario, status: "passed", failures: [] });
+      continue;
+    }
+
+    // biome-ignore lint/performance/noAwaitInLoops: scenarios assert on ordering and on an injected clock, so interleaving them would make a failure hard to attribute
+    const result = await runScenario(scenario);
+    results.push(result);
   }
 
-  const report = summarize(results)
-  process.stdout.write(format(report))
+  const report = summarize(results);
+  process.stdout.write(format(report));
 
-  return report.conforming ? 0 : 1
+  return report.conforming ? 0 : 1;
 }
 
 main().then(
   (exitCode) => {
-    process.exitCode = exitCode
+    process.exitCode = exitCode;
   },
   (error: unknown) => {
-    console.error("conformance runner failed:", error)
-    process.exitCode = 1
-  },
-)
+    console.error("conformance runner failed:", error);
+    process.exitCode = 1;
+  }
+);

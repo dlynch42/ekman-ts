@@ -26,15 +26,15 @@ export const ERROR_CODES = [
   "INITIAL_STATE_NOT_IN_STATES",
   /** Configuration is recognized but not implemented yet. Never silently ignored. */
   "NOT_IMPLEMENTED",
-] as const
+] as const;
 
-export type ErrorCode = (typeof ERROR_CODES)[number]
+export type ErrorCode = (typeof ERROR_CODES)[number];
 
 export interface EkmanErrorOptions {
   /** The instance key this error concerns, when it concerns one. */
-  key?: string
+  key?: string;
   /** The underlying error, when this one wraps another. */
-  cause?: unknown
+  cause?: unknown;
 }
 
 /**
@@ -42,24 +42,33 @@ export interface EkmanErrorOptions {
  * that rather than on the message.
  */
 export class EkmanError extends Error {
-  override readonly name = "EkmanError"
-  readonly code: ErrorCode
+  override readonly name = "EkmanError";
+  readonly code: ErrorCode;
   /**
    * `declare` on purpose: under `useDefineForClassFields` a plain optional field is
    * defined as `undefined` on every instance, which would put a dead `key` on errors
    * that have none and dirty up spreads and JSON. Declaring it emits no field, so the
    * property exists only when the constructor actually assigns it.
    */
-  declare readonly key?: string
+  declare readonly key?: string;
 
-  constructor(code: ErrorCode, message: string, options: EkmanErrorOptions = {}) {
-    super(message, "cause" in options ? { cause: options.cause } : undefined)
-    this.code = code
-    if (options.key !== undefined) this.key = options.key
+  constructor(
+    code: ErrorCode,
+    message: string,
+    options: EkmanErrorOptions = {}
+  ) {
+    super(message, "cause" in options ? { cause: options.cause } : undefined);
+    this.code = code;
+    if (options.key !== undefined) {
+      this.key = options.key;
+    }
     // `name` is a class field, so it is assigned after super() and after Error's own
     // stack capture. Re-capture so the stack header reads "EkmanError", not "Error".
-    if (Error.captureStackTrace) Error.captureStackTrace(this, EkmanError)
-    else this.stack = composeStack(this.name, message, this.stack)
+    if (Error.captureStackTrace) {
+      Error.captureStackTrace(this, EkmanError);
+    } else {
+      this.stack = composeStack(this.name, message, this.stack);
+    }
   }
 }
 
@@ -74,13 +83,13 @@ export class EkmanError extends Error {
 export function composeStack(
   name: string,
   message: string,
-  existing: string | undefined,
+  existing: string | undefined
 ): string {
-  const header = `${name}: ${message}`
-  return existing === undefined ? header : `${header}\n${existing}`
+  const header = `${name}: ${message}`;
+  return existing === undefined ? header : `${header}\n${existing}`;
 }
 
 /** Narrowing helper for callers that catch broadly. */
 export function isEkmanError(value: unknown): value is EkmanError {
-  return value instanceof EkmanError
+  return value instanceof EkmanError;
 }

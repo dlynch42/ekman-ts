@@ -1,9 +1,9 @@
-import { dispatch } from "./dispatch"
-import type { DispatchDeps } from "./dispatch"
-import { EkmanError } from "./errors"
-import type { EkmanEvent } from "./events"
-import { InstanceRecord } from "./instance"
-import { parseKey } from "./key"
+import type { DispatchDeps } from "./dispatch";
+import { dispatch } from "./dispatch";
+import { EkmanError } from "./errors";
+import type { EkmanEvent } from "./events";
+import { InstanceRecord } from "./instance";
+import { parseKey } from "./key";
 import type {
   AnyEntityDefinition,
   CommitResult,
@@ -15,12 +15,15 @@ import type {
   Trigger,
   TriggerLike,
   Values,
-} from "./types"
+} from "./types";
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-type AnyInstance = InstanceRecord<any, any>
-type AnyDefinition = EntityDefinition<string, any, any, any>
-/* eslint-enable @typescript-eslint/no-explicit-any */
+// biome-ignore-start lint/suspicious/noExplicitAny: the runtime holds instances and
+// definitions of many entity shapes at once. `unknown` is not assignable across the
+// contravariant handler positions these feed, so `any` is the only escape that keeps
+// the heterogeneous registry typable. Every public surface re-narrows.
+type AnyInstance = InstanceRecord<any, any>;
+type AnyDefinition = EntityDefinition<string, any, any, any>;
+// biome-ignore-end lint/suspicious/noExplicitAny: see above
 
 /**
  * An embedded Ekman runtime.
@@ -39,28 +42,31 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * `entities`. Entities added later with `define()` are returned from that call rather
    * than appearing here, because a type cannot grow at runtime.
    */
-  readonly entities: EntityHandles<D>
+  readonly entities: EntityHandles<D>;
 
-  readonly #definitions = new Map<string, AnyDefinition>()
-  readonly #instances = new Map<string, AnyInstance>()
-  readonly #now: () => number
-  readonly #onUnhandled: (error: unknown) => void
-  readonly #deps: DispatchDeps
-  #triggerSeq = 0
+  readonly #definitions = new Map<string, AnyDefinition>();
+  readonly #instances = new Map<string, AnyInstance>();
+  readonly #now: () => number;
+  readonly #onUnhandled: (error: unknown) => void;
+  readonly #deps: DispatchDeps;
+  #triggerSeq = 0;
 
   constructor(config: EkmanConfig<D> = {}) {
-    this.#now = config.now ?? Date.now
-    this.#onUnhandled = config.onUnhandled ?? defaultOnUnhandled
+    this.#now = config.now ?? Date.now;
+    this.#onUnhandled = config.onUnhandled ?? defaultOnUnhandled;
 
     // Handlers get a signal from the first attempt so the context shape never changes.
     // Nothing aborts it yet; timeouts wire into it in a later phase.
-    this.#deps = { now: () => this.#now(), signal: new AbortController().signal }
+    this.#deps = {
+      now: () => this.#now(),
+      signal: new AbortController().signal,
+    };
 
-    const handles: Record<string, EntityHandle> = {}
+    const handles: Record<string, EntityHandle> = {};
     for (const definition of config.entities ?? []) {
-      handles[definition.name] = this.#register(definition)
+      handles[definition.name] = this.#register(definition);
     }
-    this.entities = Object.freeze(handles) as EntityHandles<D>
+    this.entities = Object.freeze(handles) as EntityHandles<D>;
   }
 
   /**
@@ -69,17 +75,20 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * Safe while the runtime is dispatching: it only adds to the registry, so no in-flight
    * handler is affected.
    */
-  define<N extends string, S extends string, V extends Values, T extends TriggerLike>(
-    definition: EntityDefinition<N, S, V, T>,
-  ): EntityHandle<S, V, T> {
+  define<
+    N extends string,
+    S extends string,
+    V extends Values,
+    T extends TriggerLike,
+  >(definition: EntityDefinition<N, S, V, T>): EntityHandle<S, V, T> {
     // The registry is heterogeneous, so the handle comes back erased. The definition's
     // own type parameters are the truth here.
-    return this.#register(definition) as unknown as EntityHandle<S, V, T>
+    return this.#register(definition) as unknown as EntityHandle<S, V, T>;
   }
 
   /** Every registered entity name, in registration order. */
   get entityNames(): readonly string[] {
-    return [...this.#definitions.keys()]
+    return [...this.#definitions.keys()];
   }
 
   /**
@@ -91,24 +100,28 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    */
   async send<S extends string = string, V extends Values = Values>(
     key: string,
-    trigger: Trigger,
+    trigger: Trigger
   ): Promise<CommitResult<S, V>> {
-    const parsed = parseKey(key)
-    const definition = this.#definitions.get(parsed.entity)
+    const parsed = parseKey(key);
+    const definition = this.#definitions.get(parsed.entity);
 
     if (definition === undefined) {
       throw new EkmanError(
         "UNKNOWN_ENTITY",
         `key ${JSON.stringify(key)} names entity "${parsed.entity}", which is not registered. ` +
           `Registered: ${this.entityNames.join(", ") || "(none)"}`,
-        { key },
-      )
+        { key }
+      );
     }
 
-    const normalized = this.#normalizeTrigger(trigger, key)
-    const instance = this.#resolveInstance(key, definition, normalized)
+    const normalized = this.#normalizeTrigger(trigger, key);
+    const instance = this.#resolveInstance(key, definition, normalized);
 
-    return this.#enqueue(instance, definition, normalized) as Promise<CommitResult<S, V>>
+    return (await this.#enqueue(
+      instance,
+      definition,
+      normalized
+    )) as CommitResult<S, V>;
   }
 
   /**
@@ -118,15 +131,15 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * disappearing. Silence is the one thing this runtime should never do.
    */
   post(key: string, trigger: Trigger): void {
-    void this.send(key, trigger).catch(this.#onUnhandled)
+    this.send(key, trigger).catch(this.#onUnhandled);
   }
 
   /** Current committed state, or undefined if nothing has addressed this key yet. */
   inspect<S extends string = string, V extends Values = Values>(
-    key: string,
+    key: string
   ): InstanceSnapshot<S, V> | undefined {
-    const instance = this.#instances.get(parseKey(key).key)
-    return instance?.snapshot() as InstanceSnapshot<S, V> | undefined
+    const instance = this.#instances.get(parseKey(key).key);
+    return instance?.snapshot() as InstanceSnapshot<S, V> | undefined;
   }
 
   /**
@@ -136,40 +149,42 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * and nothing before that.
    */
   history<S extends string = string, V extends Values = Values>(
-    key: string,
+    key: string
   ): readonly EkmanEvent<S, V>[] {
-    const instance = this.#instances.get(parseKey(key).key)
-    return (instance?.events ?? []) as readonly EkmanEvent<S, V>[]
+    const instance = this.#instances.get(parseKey(key).key);
+    return (instance?.events ?? []) as readonly EkmanEvent<S, V>[];
   }
 
   /** Keys of every resident instance. */
   get residentKeys(): readonly string[] {
-    return [...this.#instances.keys()]
+    return [...this.#instances.keys()];
   }
 
   #register(definition: AnyDefinition): EntityHandle {
-    const existing = this.#definitions.get(definition.name)
+    const existing = this.#definitions.get(definition.name);
 
     if (existing !== undefined) {
       throw new EkmanError(
         "DUPLICATE_ENTITY",
-        `entity "${definition.name}" is already registered with this runtime`,
-      )
+        `entity "${definition.name}" is already registered with this runtime`
+      );
     }
 
-    this.#definitions.set(definition.name, definition)
-    return this.#makeHandle(definition)
+    this.#definitions.set(definition.name, definition);
+    return this.#makeHandle(definition);
   }
 
   #makeHandle(definition: AnyDefinition): EntityHandle {
     return Object.freeze({
       name: definition.name,
       key: (id: string) => definition.key(id),
-      send: (id: string, trigger: Trigger) => this.send(definition.key(id), trigger),
-      post: (id: string, trigger: Trigger) => this.post(definition.key(id), trigger),
+      send: (id: string, trigger: Trigger) =>
+        this.send(definition.key(id), trigger),
+      post: (id: string, trigger: Trigger) =>
+        this.post(definition.key(id), trigger),
       inspect: (id: string) => this.inspect(definition.key(id)),
       history: (id: string) => this.history(definition.key(id)),
-    }) as EntityHandle
+    }) as EntityHandle;
   }
 
   /**
@@ -178,32 +193,43 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * event causes deterministic.
    */
   #normalizeTrigger(trigger: Trigger, key: string): Trigger {
-    if (typeof trigger !== "object" || trigger === null) {
+    // Types cannot reach callers in plain JavaScript, so the shape is checked at the
+    // boundary rather than assumed. Viewing it as unknown keeps the check honest.
+    const candidate: unknown = trigger;
+    if (typeof candidate !== "object" || candidate === null) {
       throw new EkmanError(
         "UNKNOWN_TRIGGER",
-        `trigger for ${key} must be an object with a "type", received ${typeof trigger}`,
-        { key },
-      )
+        `trigger for ${key} must be an object with a "type", received ${typeof candidate}`,
+        { key }
+      );
     }
 
     if (typeof trigger.type !== "string" || trigger.type.length === 0) {
       throw new EkmanError(
         "UNKNOWN_TRIGGER",
         `trigger for ${key} must have a non-empty string "type"`,
-        { key },
-      )
+        { key }
+      );
     }
 
-    this.#triggerSeq += 1
+    this.#triggerSeq += 1;
     return (
-      trigger.id === undefined ? { ...trigger, id: `t${this.#triggerSeq}` } : trigger
-    ) as Trigger
+      trigger.id === undefined
+        ? { ...trigger, id: `t${this.#triggerSeq}` }
+        : trigger
+    ) as Trigger;
   }
 
   /** Load or lazily initialize the instance. Initialization is a commit at sequence 0. */
-  #resolveInstance(key: string, definition: AnyDefinition, trigger: Trigger): AnyInstance {
-    const existing = this.#instances.get(key)
-    if (existing !== undefined) return existing
+  #resolveInstance(
+    key: string,
+    definition: AnyDefinition,
+    trigger: Trigger
+  ): AnyInstance {
+    const existing = this.#instances.get(key);
+    if (existing !== undefined) {
+      return existing;
+    }
 
     const instance = new InstanceRecord({
       key,
@@ -212,10 +238,10 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       initialValues: definition.initialValues,
       at: this.#now(),
       cause: { type: "init", id: trigger.id as string },
-    })
+    });
 
-    this.#instances.set(key, instance)
-    return instance
+    this.#instances.set(key, instance);
+    return instance;
   }
 
   /**
@@ -227,22 +253,24 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   #enqueue(
     instance: AnyInstance,
     definition: AnyDefinition,
-    trigger: Trigger,
+    trigger: Trigger
   ): Promise<CommitResult> {
     const turn = instance.tail.then(() => {
-      instance.markActive()
+      instance.markActive();
       return dispatch(instance, definition, trigger, this.#deps).finally(() => {
-        instance.markIdle()
-      })
-    })
+        instance.markIdle();
+      });
+    });
 
-    instance.tail = turn.then(ignore, ignore)
-    return turn as Promise<CommitResult>
+    instance.tail = turn.then(ignore, ignore);
+    return turn as Promise<CommitResult>;
   }
 }
 
-function ignore(): void {}
+function ignore(): void {
+  // The tail chain only sequences turns. Outcomes belong to the caller's promise.
+}
 
 function defaultOnUnhandled(error: unknown): void {
-  console.error("[ekman] unhandled failure from post()", error)
+  console.error("[ekman] unhandled failure from post()", error);
 }
