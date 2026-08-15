@@ -22,12 +22,16 @@ export class CommitToken {
   readonly attempt: number;
 
   #invalidatedBy: FenceReason | undefined;
+  #racedBy: FenceReason | undefined;
+  #sealed: boolean;
 
   constructor(args: { key: string; seq: number; attempt: number }) {
     this.key = args.key;
     this.seq = args.seq;
     this.attempt = args.attempt;
     this.#invalidatedBy = undefined;
+    this.#racedBy = undefined;
+    this.#sealed = false;
   }
 
   get valid(): boolean {
@@ -40,12 +44,57 @@ export class CommitToken {
   }
 
   /**
+   * What tried to invalidate this token after it was already sealed.
+   *
+   * Purely observational: the commit went ahead. Recorded rather than dropped because the
+   * sender was told the attempt failed while the work actually landed, and an operator
+   * seeing a rate of this needs to know their timeouts are set close to how long their
+   * store takes.
+   */
+  get racedBy(): FenceReason | undefined {
+    return this.#racedBy;
+  }
+
+  /** Whether this attempt has taken ownership of the commit and can no longer be fenced. */
+  get sealed(): boolean {
+    return this.#sealed;
+  }
+
+  /**
    * Invalidate the token. Idempotent, and the first reason wins: a token invalidated by a
    * timeout and then superseded by the retry that replaced it is still, in the only sense
    * that matters to an operator reading telemetry, a timeout.
+   *
+   * Against a sealed token this does not fence anything. It records what arrived too late,
+   * so the race is visible rather than silent. See `seal`.
    */
   invalidate(reason: FenceReason): void {
+    if (this.#sealed) {
+      this.#racedBy ??= reason;
+      return;
+    }
     this.#invalidatedBy ??= reason;
+  }
+
+  /**
+   * Take ownership of the commit. Returns false if the token was already invalid.
+   *
+   * This exists because writing to a store takes time, and a timeout can fire in the
+   * middle of it. Once an event has reached the commit authority it is durable, and the
+   * in-memory state has to agree with it: refusing to apply an event the store already
+   * holds would make replay reconstruct a state the live runtime never had, which is a far
+   * worse failure than a timed-out sender learning the work landed anyway.
+   *
+   * So the fence is checked exactly once, at the moment the commit enters the authority,
+   * and from then on the attempt owns the outcome. The narrow window where a timeout
+   * arrives after the seal is reported as `commit.raced` rather than being papered over.
+   */
+  seal(): boolean {
+    if (this.#invalidatedBy !== undefined) {
+      return false;
+    }
+    this.#sealed = true;
+    return true;
   }
 }
 

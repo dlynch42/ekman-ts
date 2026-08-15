@@ -55,16 +55,21 @@ export class Inbox {
    */
   #running: boolean;
 
+  readonly #onIdle: () => void;
+
   constructor(args: {
     key: string;
     entity: string;
     deps: RuntimeDeps;
     record: OverflowRecorder;
+    /** Called when the queue empties, which is the first moment eviction may act. */
+    onIdle: () => void;
   }) {
     this.#key = args.key;
     this.#entity = args.entity;
     this.#deps = args.deps;
     this.#record = args.record;
+    this.#onIdle = args.onIdle;
     this.#running = false;
   }
 
@@ -249,5 +254,8 @@ export class Inbox {
     }
 
     this.#running = false;
+    // The key is idle only now. Eviction is allowed to touch it from here and not before,
+    // which is why the budget acts here rather than at the commit that blew it.
+    this.#onIdle();
   }
 }

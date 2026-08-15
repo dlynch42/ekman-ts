@@ -1,3 +1,5 @@
+import type { AuditSink } from "./audit";
+import { deliverTo } from "./audit";
 import type { RuntimeDeps } from "./config";
 import { resolveInboxConfig } from "./config";
 import type { CompiledTemporal } from "./constraints";
@@ -7,6 +9,10 @@ import { EkmanError } from "./errors";
 import type { EkmanEvent } from "./events";
 import { InstanceRecord } from "./instance";
 import { parseKey } from "./key";
+import type { ResolvedMemoryConfig } from "./memory";
+import { MemoryLedger, resolveMemoryConfig } from "./memory";
+import type { ResolvedStack } from "./stack";
+import { resolveStack } from "./stack";
 import type { TelemetryEvent } from "./telemetry";
 import { emit, telemetryNow } from "./telemetry";
 import { TemporalIndex } from "./temporal";
@@ -58,6 +64,11 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   readonly #deps: DispatchDeps;
   /** Where every resident instance sits. Read by temporal constraints and by queries. */
   readonly #temporal = new TemporalIndex();
+  readonly #stack: ResolvedStack;
+  readonly #memory: ResolvedMemoryConfig;
+  readonly #audit: readonly AuditSink[];
+  /** What is resident and what it costs, in least-recently-used order. */
+  readonly #ledger = new MemoryLedger();
   #sweepTimer: ReturnType<typeof setInterval> | undefined;
   /**
    * Declared here and assigned in the constructor rather than initialized inline. An
@@ -73,13 +84,23 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     this.#onUnhandled = config.onUnhandled ?? defaultOnUnhandled;
     this.#sweeping = false;
 
-    // Resolved here, at construction, so an unsatisfiable inbox configuration fails at
-    // startup rather than at the first overload.
+    // Everything is resolved here, at construction, so a configuration the stores cannot
+    // satisfy fails at startup rather than being discovered under load. A runtime that
+    // cannot keep its promises should refuse to start rather than quietly keep fewer.
+    this.#stack = resolveStack(config.store);
+    this.#memory = resolveMemoryConfig(config.memory, {
+      hasStore: this.#stack.authority !== undefined,
+    });
+    this.#audit = config.audit ?? [];
+
     this.#runtime = {
       now: () => this.#now(),
       telemetry: config.telemetry,
       onUnhandled: (error) => this.#onUnhandled(error),
       inbox: resolveInboxConfig(config.inbox),
+      stack: this.#stack,
+      memory: this.#memory,
+      audit: (event) => this.#fanOut(event),
     };
 
     this.#deps = {
@@ -225,7 +246,21 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       clearInterval(this.#sweepTimer);
       this.#sweepTimer = undefined;
     }
-    await Promise.resolve();
+
+    await Promise.all(this.#stack.layers.map((layer) => layer.close?.()));
+  }
+
+  /** Resident bytes on the documented accounting basis, and what the budget allows. */
+  get memoryUsage(): {
+    readonly bytes: number;
+    readonly instances: number;
+    readonly maxBytes: number | null;
+  } {
+    return Object.freeze({
+      bytes: this.#ledger.total,
+      instances: this.#ledger.size,
+      maxBytes: this.#memory.bounded ? this.#memory.maxBytes : null,
+    });
   }
 
   #register(definition: AnyDefinition): EntityHandle {
@@ -308,6 +343,31 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       return existing;
     }
 
+    // Under `reject` the budget bounds how much a producer can materialize, which is what
+    // stops a stream of unknown keys from becoming unbounded resident state. Existing
+    // instances are untouched: shedding new work beats disturbing work in progress.
+    if (
+      this.#memory.policy === "reject" &&
+      this.#ledger.total >= this.#memory.maxBytes
+    ) {
+      this.#emit({
+        type: "memory.refused",
+        key,
+        entity: definition.name,
+        residentBytes: this.#ledger.total,
+        maxBytes: this.#memory.maxBytes,
+        at: telemetryNow(),
+      });
+
+      throw new EkmanError(
+        "MEMORY_EXHAUSTED",
+        `the resident memory budget of ${this.#memory.maxBytes} bytes is full ` +
+          `(${this.#ledger.total} bytes across ${this.#ledger.size} instances), and the ` +
+          'eviction policy is "reject", so no further instance can be materialized.',
+        { key }
+      );
+    }
+
     const instance = new InstanceRecord({
       key,
       entity: definition.name,
@@ -316,9 +376,11 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       at: this.#now(),
       cause: { type: "init", id: trigger.id as string },
       deps: this.#runtime,
+      onIdle: () => this.#onIdle(),
     });
 
     this.#instances.set(key, instance);
+    this.#ledger.record(key, instance.bytes);
     // Initialization is an entry into the initial state, so the clock on time-in-state
     // starts here rather than at the first transition.
     this.#temporal.enter(key, definition.name, definition.initial);
@@ -348,22 +410,223 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * the layer that owns the attempt loop and therefore the only one that knows which
    * attempt started, retried, or settled the trigger.
    */
+  /**
+   * Run one dequeued trigger.
+   *
+   * Reconciling with the store happens here rather than in `send()`, because `send()` must
+   * not await anything before the inbox push or FIFO order stops being call order. This is
+   * inside the turn, so a reload cannot reorder anything and application code cannot tell
+   * a reloaded instance from a resident one.
+   */
   #run(
     instance: AnyInstance,
     definition: AnyDefinition,
     trigger: Trigger,
     depth: number
   ): Promise<CommitResult> {
-    return dispatch(instance, definition, trigger, this.#deps, depth).then(
-      (result) => {
-        // Only a move re-indexes. A commit that changed values alone leaves the instance
-        // where it was, and its time in state keeps running.
-        if (result.event.from !== result.event.to) {
-          this.#temporal.enter(instance.key, instance.entity, result.state);
-        }
-        return result;
-      }
+    // Nothing to reconcile means nothing to await, so a memory-only runtime reaches its
+    // handler in the same turn it always did. Awaiting unconditionally would delay
+    // `handler.started` by a microtask and change how telemetry interleaves with the
+    // `send()` calls around it, which scenarios written before stores existed can see.
+    if (!instance.needsHydration) {
+      return this.#dispatch(instance, definition, trigger, depth);
+    }
+
+    return this.#hydrate(instance).then(() =>
+      this.#dispatch(instance, definition, trigger, depth)
     );
+  }
+
+  async #dispatch(
+    instance: AnyInstance,
+    definition: AnyDefinition,
+    trigger: Trigger,
+    depth: number
+  ): Promise<CommitResult> {
+    const result = await dispatch(
+      instance,
+      definition,
+      trigger,
+      this.#deps,
+      depth
+    );
+
+    // Only a move re-indexes. A commit that changed values alone leaves the instance where
+    // it was, and its time in state keeps running.
+    if (result.event.from !== result.event.to) {
+      this.#temporal.enter(instance.key, instance.entity, result.state);
+    }
+
+    this.#account(instance);
+    return result;
+  }
+
+  /** Reconcile an instance with the store, reporting a reload when one happened. */
+  async #hydrate(instance: AnyInstance): Promise<void> {
+    const before = instance.events.length;
+    await instance.ready();
+
+    const restored = instance.events
+      .slice(before)
+      .find((event) => event.type === "restored");
+
+    if (restored !== undefined && restored.type === "restored") {
+      this.#temporal.enter(instance.key, instance.entity, instance.state);
+      this.#emit({
+        type: "instance.restored",
+        key: instance.key,
+        entity: instance.entity,
+        state: instance.state,
+        seq: instance.seq,
+        from: restored.from,
+        replayed: restored.replayed,
+        at: telemetryNow(),
+      });
+    }
+  }
+
+  /**
+   * Record what an instance costs and act on the budget.
+   *
+   * Runs after every commit, which is where the number changes and where the serialized
+   * values needed to measure it already exist.
+   */
+  #account(instance: AnyInstance): void {
+    this.#ledger.record(instance.key, instance.bytes);
+    const overBudget = this.#ledger.total > this.#memory.maxBytes;
+
+    this.#emit({
+      type: "memory.accounted",
+      key: instance.key,
+      entity: instance.entity,
+      bytes: instance.bytes,
+      residentBytes: this.#ledger.total,
+      residentCount: this.#ledger.size,
+      maxBytes: this.#memory.bounded ? this.#memory.maxBytes : null,
+      overBudget,
+      at: telemetryNow(),
+    });
+  }
+
+  /**
+   * A key just went idle, which is the first moment eviction is allowed to consider it.
+   *
+   * Deliberately not at commit. A commit happens inside the key's turn, when the key is by
+   * definition busy, so an instance could never evict itself however cold and however far
+   * over budget the runtime was. `maxBytes: 0` would have quietly meant "keep everything".
+   */
+  #onIdle(): void {
+    if (
+      this.#memory.policy === "lru" &&
+      this.#ledger.total > this.#memory.maxBytes
+    ) {
+      this.#evictToFit();
+    }
+  }
+
+  /**
+   * Release least-recently-used idle instances until the budget is satisfied.
+   *
+   * Idle only, always. An instance with a handler running or a trigger waiting is holding
+   * work that would be lost, so it is skipped no matter how cold it is, and the budget goes
+   * over rather than a commit going missing.
+   */
+  #evictToFit(): void {
+    for (const key of this.#ledger.lru) {
+      if (this.#ledger.total <= this.#memory.maxBytes) {
+        return;
+      }
+
+      const instance = this.#instances.get(key);
+      if (instance === undefined || !instance.idle) {
+        continue;
+      }
+
+      this.#evict(instance);
+    }
+  }
+
+  #evict(instance: AnyInstance): void {
+    const { authority } = this.#stack;
+    // Gated on a store existing, not on it being durable. Snapshotting into an ephemeral
+    // store is worth doing: it is exactly what the next in-process reload reads.
+    const snapshotted = this.#memory.snapshotOnEvict && authority !== undefined;
+
+    if (snapshotted) {
+      // Not awaited: the snapshot is an optimization for the next load, and the events it
+      // summarizes are already in the store. A failed snapshot costs replay time, never
+      // state.
+      authority
+        .snapshot(instance.key, instance.storeSnapshot(this.#now()))
+        .catch(this.#onUnhandled);
+    }
+
+    const bytes = this.#ledger.release(instance.key);
+    this.#instances.delete(instance.key);
+    this.#temporal.remove(instance.key);
+
+    this.#emit({
+      type: "instance.evicted",
+      key: instance.key,
+      entity: instance.entity,
+      state: instance.state,
+      seq: instance.seq,
+      bytes,
+      snapshotted,
+      residentBytes: this.#ledger.total,
+      at: telemetryNow(),
+    });
+  }
+
+  /**
+   * Hand a committed event to every audit sink.
+   *
+   * Never awaited and never able to fail anything: an audit outage must not become a write
+   * outage. A sink that exhausts its attempts is reported and the commit stands.
+   */
+  #fanOut(event: EkmanEvent): void {
+    for (const sink of this.#audit) {
+      deliverTo(sink, event)
+        .then((failure) => {
+          if (failure !== undefined) {
+            this.#emit({
+              type: "audit.failed",
+              key: event.key,
+              entity: parseKey(event.key).entity,
+              sink: sink.name,
+              error: failure.message,
+              seq: event.seq,
+              at: telemetryNow(),
+            });
+          }
+        })
+        .catch(this.#onUnhandled);
+    }
+
+    this.#writeCaches(event);
+  }
+
+  /**
+   * Mirror an event into the cache layers.
+   *
+   * After the authority, never awaited, and a failure is reported rather than raised. The
+   * commit is already durable by this point, so a stale cache is a performance problem.
+   * Treating it as a commit failure would turn it into a correctness one.
+   */
+  #writeCaches(event: EkmanEvent): void {
+    for (const cache of this.#stack.caches) {
+      cache.append(event.key, event, previousSeq(event)).catch((error) => {
+        this.#emit({
+          type: "store.cacheFailed",
+          key: event.key,
+          entity: parseKey(event.key).entity,
+          store: cache.name,
+          error: (error as Error).message,
+          seq: event.seq,
+          at: telemetryNow(),
+        });
+      });
+    }
   }
 
   #startSweeping(sweepMs: number | undefined): void {
@@ -533,4 +796,15 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
 
 function defaultOnUnhandled(error: unknown): void {
   console.error("[ekman] unhandled failure from post()", error);
+}
+
+/**
+ * What a cache append is conditional on.
+ *
+ * A commit is conditional on the sequence before it, so a cache that has fallen behind
+ * refuses the write rather than accepting a hole. Anything else carries the current
+ * sequence, because it does not advance one.
+ */
+function previousSeq(event: EkmanEvent): number {
+  return event.type === "transition" ? event.seq - 1 : event.seq;
 }

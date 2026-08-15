@@ -166,6 +166,87 @@ export interface ConstraintEscalatedEvent extends TelemetryBase {
   readonly delivered: boolean;
 }
 
+/**
+ * A commit reached the authority and a timeout arrived while it was in flight.
+ *
+ * The commit stands, because it is already durable. The sender was told the attempt timed
+ * out, so this is the record of the two crossing. Rare and worth watching: a sustained rate
+ * means timeouts are set close to how long the store actually takes.
+ */
+export interface CommitRacedEvent extends TelemetryBase {
+  readonly type: "commit.raced";
+  readonly attempt: number;
+  readonly reason: FenceReason;
+  /** The sequence the commit landed at. */
+  readonly seq: number;
+  readonly trigger: TriggerRef;
+}
+
+/** An instance was released to stay inside the memory budget. */
+export interface InstanceEvictedEvent extends TelemetryBase {
+  readonly type: "instance.evicted";
+  readonly state: string;
+  readonly seq: number;
+  /** What it was accounted at, freed by this eviction. */
+  readonly bytes: number;
+  readonly snapshotted: boolean;
+  /** Resident bytes after the release. */
+  readonly residentBytes: number;
+}
+
+/** An instance was rebuilt from the store because a trigger arrived for it. */
+export interface InstanceRestoredEvent extends TelemetryBase {
+  readonly type: "instance.restored";
+  readonly state: string;
+  readonly seq: number;
+  readonly from: "snapshot" | "replay";
+  readonly replayed: number;
+}
+
+/**
+ * Resident accounting after a commit.
+ *
+ * `overBudget` is what an operator alerts on: under `none` it is the only signal that the
+ * working set has outgrown its allowance, because nothing else will happen.
+ */
+export interface MemoryAccountedEvent extends TelemetryBase {
+  readonly type: "memory.accounted";
+  readonly bytes: number;
+  readonly residentBytes: number;
+  readonly residentCount: number;
+  /** `null` when the budget is unlimited. */
+  readonly maxBytes: number | null;
+  readonly overBudget: boolean;
+}
+
+/** A new instance was refused because the budget is full and the policy is `reject`. */
+export interface MemoryRefusedEvent extends TelemetryBase {
+  readonly type: "memory.refused";
+  readonly residentBytes: number;
+  readonly maxBytes: number;
+}
+
+/**
+ * An audit sink could not be delivered to, after its retries.
+ *
+ * Never affects the commit, which happened regardless. This is the whole of what
+ * "at-least-once, and told about it when not" means in practice.
+ */
+export interface AuditFailedEvent extends TelemetryBase {
+  readonly type: "audit.failed";
+  readonly sink: string;
+  readonly error: string;
+  readonly seq: number;
+}
+
+/** A cache layer could not be written. The commit is unaffected; the layer is now stale. */
+export interface StoreCacheFailedEvent extends TelemetryBase {
+  readonly type: "store.cacheFailed";
+  readonly store: string;
+  readonly error: string;
+  readonly seq: number;
+}
+
 export type TelemetryEvent =
   | InboxEnqueuedEvent
   | InboxRejectedEvent
@@ -175,8 +256,15 @@ export type TelemetryEvent =
   | HandlerRetriedEvent
   | HandlerTimedOutEvent
   | CommitFencedEvent
+  | CommitRacedEvent
   | ConstraintViolatedEvent
-  | ConstraintEscalatedEvent;
+  | ConstraintEscalatedEvent
+  | InstanceEvictedEvent
+  | InstanceRestoredEvent
+  | MemoryAccountedEvent
+  | MemoryRefusedEvent
+  | AuditFailedEvent
+  | StoreCacheFailedEvent;
 
 export type TelemetryEventType = TelemetryEvent["type"];
 

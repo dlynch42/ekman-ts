@@ -28,6 +28,12 @@ export const ERROR_CODES = [
   "COMMIT_FENCED",
   /** A result did not satisfy a constraint whose policy is `reject`. */
   "CONSTRAINT_VIOLATED",
+  /** A conditional append found the key at a different sequence. Nothing was written. */
+  "STORE_CONFLICT",
+  /** The commit authority could not be reached, so the commit did not happen. */
+  "STORE_UNAVAILABLE",
+  /** The memory budget is full and the eviction policy refuses rather than evicting. */
+  "MEMORY_EXHAUSTED",
   /** Two entities were registered under one name. */
   "DUPLICATE_ENTITY",
   /** Two handlers were declared for one state. */

@@ -71,10 +71,34 @@ export interface ViolationEvent<S extends string = string> {
   readonly attempted?: { readonly from: S; readonly to: S };
 }
 
+/**
+ * An instance was rebuilt from a store, after eviction or after a restart.
+ *
+ * Not a commit, so it carries the sequence it was restored *to* without advancing it. It
+ * records that this runtime's view of the key began here, which is what makes a gap in a
+ * stream explicable rather than mysterious.
+ *
+ * Deliberately not persisted. Writing a restore back to the store would turn every read
+ * into a write, and would be worst exactly under a small memory budget, where reloads are
+ * the whole point. Replay ignores it either way.
+ */
+export interface RestoredEvent {
+  readonly type: "restored";
+  readonly key: string;
+  readonly seq: number;
+  readonly at: number;
+  readonly cause: EventCause;
+  /** Whether a snapshot did the work or the stream was replayed from the beginning. */
+  readonly from: "snapshot" | "replay";
+  /** How many events were replayed on top of any snapshot. */
+  readonly replayed: number;
+}
+
 export type EkmanEvent<S extends string = string, V extends Values = Values> =
   | TransitionEvent<S, V>
   | RejectedEvent
-  | ViolationEvent<S>;
+  | ViolationEvent<S>
+  | RestoredEvent;
 
 /** Only transition events reconstruct state. Everything else is a record of what happened. */
 export function isTransitionEvent<S extends string, V extends Values>(
@@ -99,4 +123,10 @@ export function violationEvent<S extends string>(
   event: Omit<ViolationEvent<S>, "type">
 ): ViolationEvent<S> {
   return Object.freeze({ type: "violation" as const, ...event });
+}
+
+export function restoredEvent(
+  event: Omit<RestoredEvent, "type">
+): RestoredEvent {
+  return Object.freeze({ type: "restored" as const, ...event });
 }

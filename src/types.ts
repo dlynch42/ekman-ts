@@ -1,7 +1,10 @@
+import type { AuditSink } from "./audit";
 import type { CompiledConstraints, ConstraintsConfig } from "./constraints";
 import type { EkmanEvent, TransitionEvent } from "./events";
+import type { MemoryConfig } from "./memory";
 import type { ExecutionPolicy } from "./policy";
 import type { HandlerResult } from "./results";
+import type { Store } from "./store";
 // Type-only, and so erased: `telemetry.ts` names `OverflowPolicy` from here, and this
 // names `TelemetrySink` from there. Neither import survives compilation, so the cycle
 // exists only for the typechecker, which resolves it fine.
@@ -325,6 +328,30 @@ export interface EkmanConfig<
   readonly inbox?: InboxConfig;
   /** How often, if ever, temporal constraints are swept for automatically. */
   readonly temporal?: TemporalConfig;
+  /**
+   * Where commits go. Omitted means memory only, which is a valid documented mode rather
+   * than a degraded one: nothing survives the process, and nothing pretends to.
+   *
+   * A list is a layered stack, read fastest first. Exactly one layer is the commit
+   * authority: the last durable one, or the last one when none is durable, unless a layer
+   * claims it with `authority: true`. Every other layer is a cache, written after the fact
+   * and never able to fail a commit.
+   */
+  readonly store?: Store | readonly Store[];
+  /**
+   * The resident memory budget and what happens when it is full.
+   *
+   * Omitted means unlimited, which is the right setting only when you know your working
+   * set. An unbounded map of resident instances is the failure mode this exists to prevent.
+   */
+  readonly memory?: MemoryConfig;
+  /**
+   * Sinks receiving copies of committed events, asynchronously and at least once.
+   *
+   * A sink can never veto or delay a commit. An audit outage must not become a write
+   * outage.
+   */
+  readonly audit?: readonly AuditSink[];
   /**
    * Default execution policy for every handler in the runtime: attempts, timeout, and
    * backoff.

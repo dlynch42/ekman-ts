@@ -232,7 +232,7 @@ async function runAttempt<S extends string, V extends Values>(
   });
 
   const settled = runHandler(instance, ctx, trigger, handlerCtx).then(
-    (result) => {
+    async (result) => {
       if (result.kind === "fail") {
         return handleFailure(
           instance,
@@ -247,7 +247,11 @@ async function runAttempt<S extends string, V extends Values>(
       }
 
       try {
-        return commit(
+        // `return await`, not a bare `return`. Committing is asynchronous now that it
+        // persists first, so a constraint refusal arrives as a rejection: returning the
+        // promise unawaited would walk straight past the catch below and skip the error
+        // handler that the refusal is classified for.
+        return await commit(
           instance,
           definition,
           result,
@@ -512,7 +516,7 @@ function applyConstraints<S extends string, V extends Values>(
  * Every committed result in the runtime passes through here, which is what makes the
  * fence a single gate rather than a check somebody can forget.
  */
-function commit<S extends string, V extends Values>(
+async function commit<S extends string, V extends Values>(
   instance: InstanceRecord<S, V>,
   definition: EntityDefinition<string, S, V, Trigger>,
   result: TransitionToResult<S, V> | StayResult<V>,
@@ -520,7 +524,7 @@ function commit<S extends string, V extends Values>(
   deps: DispatchDeps,
   cause: EventCause,
   token: CommitToken
-): CommitResult<S, V> {
+): Promise<CommitResult<S, V>> {
   const committable = instance.committable(token);
 
   if (!committable) {
@@ -557,10 +561,26 @@ function commit<S extends string, V extends Values>(
     });
   }
 
-  const event = instance.commit(
+  const event = await instance.commit(
     { state, values, at: deps.now(), cause },
     token
   );
+
+  // The commit reached the authority, and then a timeout arrived. The event is durable, so
+  // it stays: the sender was already told the attempt failed, and the honest thing is to
+  // say the two crossed rather than to leave the store and memory disagreeing.
+  if (token.racedBy !== undefined) {
+    deps.emit({
+      type: "commit.raced",
+      key: instance.key,
+      entity: instance.entity,
+      attempt: token.attempt,
+      reason: token.racedBy,
+      seq: event.seq,
+      trigger: triggerRef(trigger),
+      at: telemetryNow(),
+    });
+  }
 
   return Object.freeze({
     key: instance.key,

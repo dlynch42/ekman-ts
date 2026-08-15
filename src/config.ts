@@ -1,4 +1,7 @@
 import { EkmanError } from "./errors";
+import type { EkmanEvent } from "./events";
+import type { ResolvedMemoryConfig } from "./memory";
+import type { ResolvedStack } from "./stack";
 import type { TelemetrySink } from "./telemetry";
 import type { InboxConfig, OverflowPolicy } from "./types";
 
@@ -31,6 +34,13 @@ export interface RuntimeDeps {
   readonly telemetry: TelemetrySink | undefined;
   readonly onUnhandled: (error: unknown) => void;
   readonly inbox: ResolvedInboxConfig;
+  /** Which layer owns the truth, and which are caches. */
+  readonly stack: ResolvedStack;
+  readonly memory: ResolvedMemoryConfig;
+  /**
+   * Hand a committed event to the audit sinks. Never awaited, never able to fail a commit.
+   */
+  readonly audit: (event: EkmanEvent) => void;
 }
 
 export function resolveInboxConfig(
