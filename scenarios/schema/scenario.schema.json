@@ -91,6 +91,64 @@
                   "minimum": 1
                 }
               }
+            },
+            "store": {
+              "description": "Where commits go. Omitted means memory only. A list is a layered stack, read fastest first, with exactly one commit authority.",
+              "oneOf": [
+                { "$ref": "#/$defs/storeLayer" },
+                {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": { "$ref": "#/$defs/storeLayer" }
+                }
+              ]
+            },
+            "memory": {
+              "description": "The resident budget. Accounting is UTF-8 bytes of key + state + serialized values, measured at commit.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "maxBytes": {
+                  "description": "Omitted means unlimited. 0 means no residency at all, and requires a store.",
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "eviction": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "policy": {
+                      "description": "lru releases idle instances, reject refuses new ones, none only reports.",
+                      "enum": ["lru", "reject", "none"]
+                    },
+                    "snapshotOnEvict": {
+                      "description": "Persist before releasing. Defaults to on when a store is configured, and is refused without one.",
+                      "type": "boolean"
+                    },
+                    "allowDiscard": {
+                      "description": "Permit eviction to throw state away when there is no store to put it in.",
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            },
+            "audit": {
+              "description": "Sinks receiving copies of committed events. A sink can never veto or delay a commit.",
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["name"],
+                "additionalProperties": false,
+                "properties": {
+                  "name": { "type": "string", "minLength": 1 },
+                  "failTimes": {
+                    "description": "Reject this many deliveries before succeeding, exercising at-least-once retrying.",
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              }
             }
           }
         },
@@ -146,6 +204,26 @@
           "additionalProperties": {
             "$ref": "#/$defs/do"
           }
+        }
+      }
+    },
+    "storeLayer": {
+      "type": "object",
+      "required": ["kind"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "description": "memory is ephemeral, file is durable. Runners own the storage a file layer uses.",
+          "enum": ["memory", "file"]
+        },
+        "name": {
+          "description": "Layer name, used in telemetry. Defaults to the kind. Layers must not share one.",
+          "type": "string",
+          "minLength": 1
+        },
+        "authority": {
+          "description": "Claim to be the commit authority, overriding the runtime's own choice.",
+          "type": "boolean"
         }
       }
     },
@@ -420,6 +498,10 @@
         "sweep": {
           "description": "Evaluate temporal constraints once and settle whatever they escalate.",
           "const": true
+        },
+        "restart": {
+          "description": "Throw the runtime away and build a new one against the same storage. Resident state is lost; durable state is not.",
+          "const": true
         }
       },
       "oneOf": [
@@ -427,7 +509,8 @@
         { "required": ["drain"] },
         { "required": ["wait"] },
         { "required": ["advance"] },
-        { "required": ["sweep"] }
+        { "required": ["sweep"] },
+        { "required": ["restart"] }
       ]
     },
     "then": {
@@ -468,7 +551,7 @@
               "type": "object",
               "properties": {
                 "type": {
-                  "enum": ["transition", "rejected", "violation", "restore"]
+                  "enum": ["transition", "rejected", "violation", "restored"]
                 },
                 "from": {
                   "type": ["string", "null"]
@@ -518,6 +601,11 @@
                     "from": { "type": "string" },
                     "to": { "type": "string" }
                   }
+                },
+                "replayed": {
+                  "description": "Present on a restored event: how many events were read on top of any snapshot.",
+                  "type": "integer",
+                  "minimum": 0
                 }
               }
             }
@@ -541,7 +629,14 @@
                   "handler.timedOut",
                   "commit.fenced",
                   "constraint.violated",
-                  "constraint.escalated"
+                  "constraint.escalated",
+                  "commit.raced",
+                  "memory.accounted",
+                  "memory.refused",
+                  "instance.evicted",
+                  "instance.restored",
+                  "audit.failed",
+                  "store.cacheFailed"
                 ]
               }
             }
@@ -564,6 +659,35 @@
                 "minimum": 0
               }
             }
+          }
+        },
+        "resident": {
+          "description": "Keys still in memory, in any order. Paired with then.state, this is how a transparent reload is proved.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "memory": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "instances": {
+              "description": "Exact number of resident instances.",
+              "type": "integer",
+              "minimum": 0
+            },
+            "withinBytes": {
+              "description": "Upper bound on resident accounting. Not an exact figure, because it depends on key names.",
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "audit": {
+          "description": "Events each sink received, by sink name, as <type>@<seq>.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": { "type": "string" }
           }
         },
         "buildError": {

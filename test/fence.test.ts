@@ -98,6 +98,54 @@ describe("assertCommittable", () => {
   });
 });
 
+describe("sealing a token", () => {
+  it("starts unsealed", () => {
+    expect(token().sealed).toBe(false);
+  });
+
+  it("takes ownership and reports success", () => {
+    const issued = token();
+    expect(issued.seal()).toBe(true);
+    expect(issued.sealed).toBe(true);
+    expect(issued.valid).toBe(true);
+  });
+
+  it("refuses to seal a token that was already invalidated", () => {
+    const issued = token();
+    issued.invalidate("timeout");
+
+    expect(issued.seal()).toBe(false);
+    expect(issued.sealed).toBe(false);
+  });
+
+  it("records a late invalidation without acting on it", () => {
+    // The write already reached the authority. Refusing to apply it now would leave the
+    // store holding an event the runtime never had, which is the worse failure by far.
+    const issued = token();
+    issued.seal();
+    issued.invalidate("timeout");
+
+    expect(issued.valid).toBe(true);
+    expect(issued.invalidatedBy).toBeUndefined();
+    expect(issued.racedBy).toBe("timeout");
+  });
+
+  it("keeps the first thing that arrived late", () => {
+    const issued = token();
+    issued.seal();
+    issued.invalidate("timeout");
+    issued.invalidate("superseded");
+
+    expect(issued.racedBy).toBe("timeout");
+  });
+
+  it("reports nothing raced when nothing did", () => {
+    const issued = token();
+    issued.seal();
+    expect(issued.racedBy).toBeUndefined();
+  });
+});
+
 describe("fenceReason", () => {
   it("reports the reason a token was invalidated with", () => {
     const issued = token();

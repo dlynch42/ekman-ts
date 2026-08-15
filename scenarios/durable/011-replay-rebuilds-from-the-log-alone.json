@@ -1,0 +1,74 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "durable/011-replay-rebuilds-from-the-log-alone",
+  "name": "several commits replay to the right state after a restart, and the sequence carries on rather than restarting",
+  "level": "durable",
+  "given": {
+    "runtime": { "store": [{ "kind": "file" }] },
+    "entities": [
+      {
+        "name": "counters",
+        "initial": "counting",
+        "values": { "n": 0 },
+        "states": [
+          {
+            "state": "counting",
+            "cases": [
+              {
+                "when": { "trigger": "bump" },
+                "do": {
+                  "result": "stay",
+                  "values": { "n": { "$trigger": "to" } }
+                }
+              },
+              {
+                "when": { "trigger": "close" },
+                "do": { "result": "transitionTo", "to": "closed" }
+              }
+            ]
+          },
+          { "state": "closed", "else": { "result": "stay" } }
+        ]
+      }
+    ]
+  },
+  "when": [
+    { "send": { "key": "counters:1", "trigger": { "type": "bump", "to": 1 } } },
+    { "send": { "key": "counters:1", "trigger": { "type": "bump", "to": 2 } } },
+    { "send": { "key": "counters:1", "trigger": { "type": "bump", "to": 3 } } },
+    { "restart": true },
+    { "send": { "key": "counters:1", "trigger": { "type": "close" } } }
+  ],
+  "then": {
+    "sends": [
+      { "outcome": "committed", "seq": 1, "values": { "n": 1 } },
+      { "outcome": "committed", "seq": 2, "values": { "n": 2 } },
+      { "outcome": "committed", "seq": 3, "values": { "n": 3 } },
+      {
+        "outcome": "committed",
+        "state": "closed",
+        "seq": 4,
+        "values": { "n": 3 }
+      }
+    ],
+    "state": {
+      "counters:1": { "state": "closed", "seq": 4, "values": { "n": 3 } }
+    },
+    "events": {
+      "counters:1": [
+        {
+          "type": "restored",
+          "seq": 3,
+          "from": "replay",
+          "replayed": 4
+        },
+        {
+          "type": "transition",
+          "from": "counting",
+          "to": "closed",
+          "seq": 4
+        }
+      ]
+    }
+  }
+}

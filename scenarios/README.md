@@ -21,8 +21,14 @@ scenarios/
 ```
 
 Levels stack: Durable includes Core, Coordinated includes Durable. A runner reports per
-level. An implementation that claims only Core runs `core/` and reports the other levels
-as unclaimed rather than as passing.
+level, and runs every level that has scenarios whether or not it is claimed: building
+towards a level without being able to see how far you have got would be pointless. What
+claiming a level adds is that its failures make the whole suite fail.
+
+A level whose scenarios all pass is not automatically claimed. Durable also requires
+queries, so an implementation with green durable scenarios and no query support reports
+them as passing and still does not claim the level. A partial claim is worse than no claim,
+because somebody will believe it.
 
 ## File shape
 
@@ -123,6 +129,74 @@ state that sets only `timeoutMs` keeps the wider `maxAttempts`.
 `temporal` is optional and sets how often the runtime evaluates temporal constraints on its
 own. Scenarios normally leave it out and use the `sweep` step instead, which is
 deterministic; an automatic interval makes a scenario depend on real elapsed time.
+
+```json
+{ "store": [{ "kind": "memory" }, { "kind": "file" }] }
+```
+
+`store` is optional and configures where commits go. Omitted means memory only, which is a
+valid documented mode: nothing survives the process, and nothing pretends to.
+
+| Field | Meaning |
+|---|---|
+| `kind` | `memory` (ephemeral) or `file` (durable). |
+| `name` | Layer name, used in telemetry. Defaults to the kind. Layers must not share one. |
+| `authority` | Claim to be the commit authority, overriding the runtime's choice. |
+
+A list is a layered stack, read fastest first. Exactly one layer is the **commit
+authority**: the last durable one, or the last one when none is durable, unless a layer
+claims it. Every other layer is a cache, written after the fact, and a cache write that
+fails is reported without failing the commit.
+
+Runners give a `file` layer somewhere of their own to keep its bytes, and clean it up
+afterwards. Scenarios never name paths: where a durable store puts things is not behaviour
+worth pinning across implementations.
+
+```json
+{ "memory": { "maxBytes": 65536,
+              "eviction": { "policy": "lru", "snapshotOnEvict": true } } }
+```
+
+`memory` is optional and bounds the resident set.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `maxBytes` | unlimited | The resident budget. `0` means no residency at all, and requires a store. |
+| `eviction.policy` | `lru` | `lru`, `reject`, or `none`. |
+| `eviction.snapshotOnEvict` | on when a store exists | Persist before releasing, so the next load does not replay everything. |
+| `eviction.allowDiscard` | `false` | Permit eviction to throw state away when there is no store. |
+
+The accounting basis, which every implementation must match for a byte assertion to
+transfer: **UTF-8 byte length of the key, the state name, and the JSON-serialized values,
+measured at commit.** It is approximate as a measure of heap and exact as a measure of
+itself, which is the property a testable budget needs.
+
+| Policy | At the budget |
+|---|---|
+| `lru` | Release least-recently-used **idle** instances until back under. |
+| `reject` | Refuse to materialize new instances (`MEMORY_EXHAUSTED`). Resident ones keep working. |
+| `none` | Account and report, never act. |
+
+`none` is the memory equivalent of a constraint in `warn` mode: measure the real working
+set before enforcing a limit on it.
+
+Two rules hold the rest together. **Eviction only ever touches idle instances**, because
+releasing one mid-handler would lose a commit that is already running. And **eviction runs
+when a key goes idle**, not at the commit that blew the budget, because at commit the key is
+by definition busy. The consequence a port must reproduce: the resident set can sit above
+the budget by at most the one instance currently committing.
+
+Refusing rather than quietly under-delivering is the rule for configuration. `maxBytes: 0`
+with no store, `snapshotOnEvict` with no store, and a bounded `lru` budget that would
+discard state with no store and no `allowDiscard` are all `INVALID_CONFIG` at startup.
+
+```json
+{ "audit": [{ "name": "ok" }, { "name": "broken", "failTimes": 99 }] }
+```
+
+`audit` is optional. Each sink records what it was given, and `failTimes` makes it reject
+that many deliveries first, which is how at-least-once retrying is exercised. A sink can
+never veto or delay a commit: an audit outage must not become a write outage.
 
 ### `given.entities`
 
@@ -348,6 +422,16 @@ An ordered array of steps.
 | `wait` | Pause this many milliseconds. |
 | `advance` | Move the declared clock forward this many milliseconds. |
 | `sweep` | Evaluate temporal constraints once and settle whatever they escalate. |
+| `restart` | Throw the runtime away and build a new one against the same storage. |
+
+`restart` is a process restart. Every outstanding send settles, the runtime closes, and a
+fresh one opens over the same durable bytes. Everything resident is lost; everything
+committed to a durable store is not. Runners rebuild durable layers rather than reusing the
+objects, so whatever a layer was caching in memory goes too.
+
+An ephemeral layer necessarily survives a restart in a runner, because there is nothing to
+rebuild it from. That is not a claim about durability, and no scenario should make one:
+assert what a **durable** layer brings back.
 
 `wait` exists for work the runtime is still doing after every send has settled. A handler
 abandoned at its timeout keeps running and eventually tries to commit; `drain` will not
@@ -426,6 +510,7 @@ Event types:
 | `transition` | A committed state or values change. | yes |
 | `rejected` | A trigger refused before it reached a handler. | no |
 | `violation` | A constraint that did not hold. | no |
+| `restored` | An instance was rebuilt from a store. | no |
 
 Only `transition` events reconstruct state. Everything else carries the sequence of the
 commit it followed, which is why `seq` is non-decreasing across a stream rather than unique.
@@ -433,6 +518,16 @@ commit it followed, which is why `seq` is non-decreasing across a stream rather 
 A `violation` event carries `constraint` (`{ kind, name }`), `policy`, `reason`, and, when
 it was refusing a result, `attempted` (`{ from, to }`). A `warn` violation sits immediately
 before the commit it did not stop, so the pair reads in order.
+
+A `restored` event carries `from` (`snapshot` or `replay`) and `replayed`, the number of
+events read on top of any snapshot. It records where **this runtime's** view of the key
+begins, which is what makes a stream that starts mid-life explicable rather than mysterious.
+It is deliberately not persisted: writing a restore back would turn every read into a write,
+and would be worst exactly under a small budget, where reloads are the whole point.
+
+Note what that means for `then.events` after a reload. The assertion reads the stream this
+runtime has, which begins at the `restored` event. What came before it is in the store, not
+in memory.
 
 ### `then.telemetry`
 
@@ -466,6 +561,22 @@ Each matcher is a subset match, like an event assertion.
 | `commit.fenced` | A superseded attempt tried to commit and was refused. | `attempt`, `reason`, `tokenSeq`, `currentSeq` |
 | `constraint.violated` | A constraint did not hold. | `kind`, `constraint`, `policy`, `state`, `reason` |
 | `constraint.escalated` | A temporal constraint fired and its trigger was delivered. | `constraint`, `elapsedMs`, `escalateTo`, `delivered` |
+| `commit.raced` | A commit reached the store, and a timeout arrived while it was in flight. | `attempt`, `reason`, `seq` |
+| `memory.accounted` | Resident accounting, after every commit. | `bytes`, `residentBytes`, `residentCount`, `maxBytes`, `overBudget` |
+| `memory.refused` | A new instance was refused because the budget is full. | `residentBytes`, `maxBytes` |
+| `instance.evicted` | An instance was released to stay inside the budget. | `state`, `seq`, `bytes`, `snapshotted`, `residentBytes` |
+| `instance.restored` | An instance was rebuilt from the store. | `state`, `seq`, `from`, `replayed` |
+| `audit.failed` | An audit sink could not be delivered to, after its retries. | `sink`, `error`, `seq` |
+| `store.cacheFailed` | A cache layer could not be written. The commit stands. | `store`, `error`, `seq` |
+
+`memory.accounted.maxBytes` is `null` when the budget is unlimited.
+
+`commit.raced` is the honest name for a narrow window. A commit that has reached the commit
+authority is durable, so it is applied even if the attempt's timeout fires mid-write:
+refusing it would leave the store holding an event the runtime never applied, and replay
+would then rebuild a state the live runtime never had. The sender is still told the attempt
+timed out. A sustained rate of this means timeouts are set close to how long the store
+actually takes.
 
 `handler.settled.outcome` is `committed`, `failed`, or `refused`. `refused` means the
 trigger never reached a handler.
@@ -501,6 +612,24 @@ Current committed state per key, after all steps settle.
 
 Use `null` as the value for a key to assert that no instance exists for it.
 
+### `then.resident`, `then.memory` and `then.audit`
+
+```json
+"resident": ["orders:1"],
+"memory": { "instances": 1, "withinBytes": 1024 },
+"audit": { "ok": ["transition@0", "transition@1"], "broken": [] }
+```
+
+`resident` lists every key still in memory, in any order. Pairing it with `state` is how a
+transparent reload is proved: a key asserted absent from `resident` and present in `state`
+was read back through the store without the assertion having to know it happened.
+
+`memory.instances` is an exact count. `memory.withinBytes` is an upper bound on the resident
+accounting, not an exact figure, because the exact number depends on key names.
+
+`audit` lists what each sink received, as `<type>@<seq>`, keyed by sink name. Initialization
+is a commit, so it appears as `transition@0`.
+
 ### `then.buildError`
 
 Asserts that `given` is itself invalid and must be rejected when the runtime or entity is
@@ -528,6 +657,9 @@ Stable across implementations. A runner asserts on these strings, never on messa
 | `HANDLER_TIMEOUT` | An attempt ran past its configured timeout. |
 | `COMMIT_FENCED` | A commit was refused because its attempt had been superseded. |
 | `CONSTRAINT_VIOLATED` | A result did not satisfy a constraint whose policy is `reject`. |
+| `STORE_CONFLICT` | A conditional append found the key at a different sequence. Nothing was written. |
+| `STORE_UNAVAILABLE` | The commit authority could not be reached, so the commit did not happen. |
+| `MEMORY_EXHAUSTED` | The budget is full and the eviction policy refuses rather than evicting. |
 | `DUPLICATE_ENTITY` | Two entities registered with the same name. |
 | `DUPLICATE_STATE_HANDLER` | Two handlers for one state. |
 | `MISSING_INITIAL_STATE` | No initial state declared. |
@@ -572,6 +704,15 @@ Anything that cannot be made deterministic must not be asserted.
    | `12x` | transition graph constraints, and violation classification |
    | `13x` | guards and invariants |
    | `14x` | temporal constraints |
+   | `15x` | memory budget and eviction |
+
+   Durable scenarios number from `01x` again, in their own directory:
+
+   | Prefix | Group |
+   |---|---|
+   | `01x` | durability: commits surviving a restart, replay |
+   | `02x` | eviction with a store: snapshot on evict, transparent reload |
+   | `03x` | audit sinks |
 
 3. Assert the narrowest thing that proves the requirement. Over-asserting makes the suite
    brittle for the next port.

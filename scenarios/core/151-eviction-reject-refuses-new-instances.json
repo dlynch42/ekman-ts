@@ -1,0 +1,43 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/151-eviction-reject-refuses-new-instances",
+  "name": "under the reject policy a full budget refuses new instances and leaves resident ones working",
+  "level": "core",
+  "given": {
+    "runtime": {
+      "memory": { "maxBytes": 1, "eviction": { "policy": "reject" } }
+    },
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "open",
+        "states": [
+          {
+            "state": "open",
+            "else": { "result": "stay", "values": { "n": 1 } }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    { "send": { "key": "orders:1", "trigger": { "type": "touch" } } },
+    { "send": { "key": "orders:2", "trigger": { "type": "touch" } } },
+    { "send": { "key": "orders:1", "trigger": { "type": "touch" } } }
+  ],
+  "then": {
+    "sends": [
+      { "outcome": "committed", "state": "open", "seq": 1 },
+      { "outcome": "rejected", "code": "MEMORY_EXHAUSTED" },
+      { "outcome": "committed", "state": "open", "seq": 2 }
+    ],
+    "telemetry": [
+      { "type": "memory.refused", "key": "orders:2", "maxBytes": 1 }
+    ],
+    "state": {
+      "orders:1": { "state": "open", "seq": 2 },
+      "orders:2": null
+    },
+    "resident": ["orders:1"]
+  }
+}

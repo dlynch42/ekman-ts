@@ -611,13 +611,16 @@ describe("telemetry", () => {
       "inbox.enqueued",
       "handler.started",
       "handler.settled",
+      // Accounting closes every commit, because that is where the number changes and
+      // where the values needed to measure it have just been serialized.
+      "memory.accounted",
     ]);
     expect(seen.at(-1)).toMatchObject({
       key: "orders:1",
       entity: "orders",
-      state: "pending",
-      attempt: 1,
-      outcome: "committed",
+      residentCount: 1,
+      maxBytes: null,
+      overBudget: false,
     });
 
     // Runtime metadata stays out of the domain stream.
@@ -672,8 +675,9 @@ describe("telemetry", () => {
       ekman.entities.orders.send("1", { type: "approve", actor: "amy" })
     ).resolves.toMatchObject({ state: "approved" });
 
-    // inbox.enqueued, handler.started, handler.settled: each reported, none fatal.
-    expect(onUnhandled).toHaveBeenCalledTimes(3);
+    // inbox.enqueued, handler.started, handler.settled, memory.accounted: each reported,
+    // none fatal.
+    expect(onUnhandled).toHaveBeenCalledTimes(4);
   });
 
   it("refuses an inbox configuration it cannot satisfy, at construction", () => {

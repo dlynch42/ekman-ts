@@ -1,0 +1,42 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/153-refused-triggers-stay-within-budget",
+  "name": "a trigger addressed to an unknown key materializes an instance before being refused, and the budget is what bounds the damage",
+  "level": "core",
+  "given": {
+    "runtime": {
+      "memory": { "maxBytes": 20, "eviction": { "policy": "reject" } }
+    },
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "open",
+        "triggers": ["approve"],
+        "states": [{ "state": "open", "else": { "result": "stay" } }]
+      }
+    ]
+  },
+  "when": [
+    { "send": { "key": "orders:junk-1", "trigger": { "type": "nonsense" } } },
+    { "send": { "key": "orders:junk-2", "trigger": { "type": "nonsense" } } },
+    { "send": { "key": "orders:junk-3", "trigger": { "type": "nonsense" } } },
+    { "send": { "key": "orders:junk-4", "trigger": { "type": "nonsense" } } },
+    { "send": { "key": "orders:junk-5", "trigger": { "type": "nonsense" } } },
+    { "send": { "key": "orders:junk-6", "trigger": { "type": "nonsense" } } },
+    { "send": { "key": "orders:junk-7", "trigger": { "type": "nonsense" } } },
+    { "send": { "key": "orders:junk-8", "trigger": { "type": "nonsense" } } }
+  ],
+  "then": {
+    "sends": [
+      { "outcome": "rejected", "code": "UNKNOWN_TRIGGER" },
+      { "outcome": "rejected", "code": "UNKNOWN_TRIGGER" },
+      { "outcome": "rejected", "code": "MEMORY_EXHAUSTED" },
+      { "outcome": "rejected", "code": "MEMORY_EXHAUSTED" },
+      { "outcome": "rejected", "code": "MEMORY_EXHAUSTED" },
+      { "outcome": "rejected", "code": "MEMORY_EXHAUSTED" },
+      { "outcome": "rejected", "code": "MEMORY_EXHAUSTED" },
+      { "outcome": "rejected", "code": "MEMORY_EXHAUSTED" }
+    ],
+    "memory": { "instances": 2 }
+  }
+}

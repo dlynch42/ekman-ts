@@ -5,8 +5,17 @@ import { fileURLToPath } from "node:url";
 export const LEVELS = ["core", "durable", "coordinated"] as const;
 export type Level = (typeof LEVELS)[number];
 
-/** Levels this implementation claims. Extend as later phases land. */
+/**
+ * Levels this implementation claims.
+ *
+ * Durable also requires queries, which land in the next phase. Until then the durable
+ * scenarios run and must pass, but the level is not claimed: a partial claim is worse than
+ * no claim, because someone will believe it.
+ */
 export const CLAIMED_LEVELS: readonly Level[] = ["core"];
+
+/** Levels whose scenarios are executed, claimed or not. */
+export const RUN_LEVELS: readonly Level[] = ["core", "durable"];
 
 export interface Scenario {
   readonly id: string;
@@ -23,8 +32,39 @@ export interface Given {
     readonly inbox?: InboxSpec;
     readonly execution?: PolicySpec;
     readonly temporal?: { readonly sweepMs?: number };
+    readonly store?: StoreSpec | readonly StoreSpec[];
+    readonly memory?: MemorySpec;
+    readonly audit?: readonly AuditSpec[];
   };
   readonly entities: readonly EntitySpec[];
+}
+
+/**
+ * A store layer to build.
+ *
+ * A `file` layer gets a directory the runner owns, which survives a `restart` step and is
+ * removed when the scenario ends. Scenarios never name paths: where a durable store keeps
+ * its bytes is not behaviour worth pinning across implementations.
+ */
+export interface StoreSpec {
+  readonly kind: "memory" | "file";
+  readonly name?: string;
+  readonly authority?: boolean;
+}
+
+export interface MemorySpec {
+  readonly maxBytes?: number;
+  readonly eviction?: {
+    readonly policy?: "lru" | "reject" | "none";
+    readonly snapshotOnEvict?: boolean;
+    readonly allowDiscard?: boolean;
+  };
+}
+
+export interface AuditSpec {
+  readonly name: string;
+  /** Reject this many deliveries before succeeding. Exercises at-least-once retrying. */
+  readonly failTimes?: number;
 }
 
 /** Execution policy, at whichever level it is declared. */
@@ -159,7 +199,14 @@ export type Step =
    */
   | { readonly advance: number }
   /** Evaluate temporal constraints once and settle whatever they escalate. */
-  | { readonly sweep: true };
+  | { readonly sweep: true }
+  /**
+   * Throw the runtime away and build a new one against the same durable storage.
+   *
+   * A process restart, in other words. Everything resident is lost; everything committed
+   * to a durable store is not. This is the step the recovery claim is made of.
+   */
+  | { readonly restart: true };
 
 export interface TriggerSpec {
   readonly type: string;
@@ -182,6 +229,20 @@ export interface Then {
   readonly telemetry?: readonly Record<string, unknown>[];
   readonly state?: Readonly<Record<string, StateExpectation | null>>;
   readonly buildError?: { readonly code: string };
+  /**
+   * Which keys are still resident, in no particular order.
+   *
+   * How eviction is asserted: a key that is absent here but present in `state` proves the
+   * reload was transparent, because the assertion read it back without noticing.
+   */
+  readonly resident?: readonly string[];
+  readonly memory?: {
+    readonly instances?: number;
+    /** Resident bytes must not exceed this. The budget claim, stated as an assertion. */
+    readonly withinBytes?: number;
+  };
+  /** Events each audit sink received, by sink name, as `<type>@<seq>`. */
+  readonly audit?: Readonly<Record<string, readonly string[]>>;
 }
 
 export interface SendExpectation {
@@ -220,6 +281,12 @@ export function isSweepStep(
   step: Step
 ): step is Extract<Step, { sweep: true }> {
   return "sweep" in step;
+}
+
+export function isRestartStep(
+  step: Step
+): step is Extract<Step, { restart: true }> {
+  return "restart" in step;
 }
 
 /** The scenarios directory, resolved relative to this file so the cwd does not matter. */

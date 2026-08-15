@@ -1,0 +1,19 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/154-eviction-that-would-discard-is-refused",
+  "name": "a bounded budget that would evict with nowhere durable to put the state is refused at startup rather than silently discarding it",
+  "level": "core",
+  "given": {
+    "runtime": {
+      "memory": { "maxBytes": 1024, "eviction": { "policy": "lru" } }
+    },
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "open",
+        "states": [{ "state": "open", "else": { "result": "stay" } }]
+      }
+    ]
+  },
+  "then": { "buildError": { "code": "INVALID_CONFIG" } }
+}

@@ -1,28 +1,38 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type {
   AnyEntityDefinition,
+  AuditSink,
   ConstraintCheck,
   ConstraintsConfig,
   ErrorHandler,
   Handler,
   HandlerResult,
   InstanceSnapshot,
+  MemoryStore,
   ProposedCommit,
+  Store,
   Trigger,
 } from "../src/index";
 import {
   defineEntity,
   fail,
+  fileStore,
+  memoryStore,
   statesFromEntries,
   stay,
   transitionTo,
 } from "../src/index";
 import type {
+  AuditSpec,
   CheckSpec,
   ConstraintsSpec,
   DoSpec,
   EntitySpec,
   Given,
   StateSpec,
+  StoreSpec,
 } from "./scenario";
 
 /**
@@ -163,6 +173,95 @@ const EMPTY_TRIGGER: Trigger = { type: "error" };
 
 export function buildEntities(given: Given): AnyEntityDefinition[] {
   return given.entities.map(buildEntity);
+}
+
+/**
+ * Storage a scenario owns for its lifetime.
+ *
+ * Held apart from the runtime so a `restart` step can throw the runtime away and build a
+ * new one against the same bytes, which is exactly what surviving a process restart means.
+ * Durable layers are rebuilt rather than reused, so a restart also drops whatever they were
+ * caching in memory.
+ */
+export class ScenarioStorage {
+  readonly #specs: readonly StoreSpec[];
+  readonly #dirs = new Map<number, string>();
+
+  constructor(spec: StoreSpec | readonly StoreSpec[] | undefined) {
+    if (spec === undefined) {
+      this.#specs = [];
+      return;
+    }
+    this.#specs = Array.isArray(spec) ? [...spec] : [spec as StoreSpec];
+  }
+
+  get configured(): boolean {
+    return this.#specs.length > 0;
+  }
+
+  /** Fresh store objects over the same underlying storage. */
+  build(): Store[] {
+    return this.#specs.map((spec, index) => {
+      const options = {
+        ...(spec.name === undefined ? {} : { name: spec.name }),
+        ...(spec.authority === undefined ? {} : { authority: spec.authority }),
+      };
+
+      if (spec.kind === "memory") {
+        // A memory layer cannot survive a restart, so one instance is kept and reused.
+        // That is not cheating: it models a cache that happened to still be warm, and
+        // nothing durable is being claimed for it.
+        this.#memory[index] ??= memoryStore(options);
+        return this.#memory[index];
+      }
+
+      return fileStore(this.#dir(index), options);
+    });
+  }
+
+  cleanup(): void {
+    for (const dir of this.#dirs.values()) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    this.#dirs.clear();
+  }
+
+  readonly #memory: (MemoryStore | undefined)[] = [];
+
+  #dir(index: number): string {
+    let dir = this.#dirs.get(index);
+    if (dir === undefined) {
+      dir = mkdtempSync(join(tmpdir(), "ekman-scenario-"));
+      this.#dirs.set(index, dir);
+    }
+    return dir;
+  }
+}
+
+/** Audit sinks that record what they were given, and can be told to fail first. */
+export class ScenarioAudit {
+  readonly received = new Map<string, string[]>();
+  readonly #remainingFailures = new Map<string, number>();
+  readonly sinks: readonly AuditSink[];
+
+  constructor(specs: readonly AuditSpec[] | undefined) {
+    this.sinks = (specs ?? []).map((spec) => {
+      this.received.set(spec.name, []);
+      this.#remainingFailures.set(spec.name, spec.failTimes ?? 0);
+
+      return {
+        name: spec.name,
+        deliver: (event) => {
+          const failures = this.#remainingFailures.get(spec.name) ?? 0;
+          if (failures > 0) {
+            this.#remainingFailures.set(spec.name, failures - 1);
+            throw new Error(`${spec.name} is refusing delivery`);
+          }
+          this.received.get(spec.name)?.push(`${event.type}@${event.seq}`);
+        },
+      };
+    });
+  }
 }
 
 /**

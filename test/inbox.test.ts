@@ -1,10 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import type { RuntimeDeps } from "../src/config";
-import { resolveInboxConfig } from "../src/config";
 import type { EkmanError } from "../src/errors";
 import { Inbox } from "../src/inbox";
 import type { TelemetryEvent } from "../src/telemetry";
 import type { CommitResult, InboxConfig, Trigger } from "../src/types";
+import { testDeps } from "./deps";
 
 /** Enough of a commit result to settle a caller. Dispatch is not under test here. */
 const committed = (seq: number) =>
@@ -17,22 +16,23 @@ function make(config?: InboxConfig) {
   const recorded: { code: string; reason: string }[] = [];
   const onUnhandled = vi.fn();
 
-  const deps: RuntimeDeps = {
-    now: () => 1000,
+  const deps = testDeps({
     telemetry: { "*": (event) => telemetry.push(event) },
     onUnhandled,
-    inbox: resolveInboxConfig(config),
-  };
+    inbox: config,
+  });
 
+  const idle: number[] = [];
   const inbox = new Inbox({
     key: "orders:1",
     entity: "orders",
     deps,
+    onIdle: () => idle.push(1),
     record: (refusal) =>
       recorded.push({ code: refusal.code, reason: refusal.reason }),
   });
 
-  return { inbox, telemetry, recorded, onUnhandled };
+  return { inbox, telemetry, recorded, onUnhandled, idle };
 }
 
 /** A runner that does not finish until it is released. */

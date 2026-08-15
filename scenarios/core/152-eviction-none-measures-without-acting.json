@@ -1,0 +1,39 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/152-eviction-none-measures-without-acting",
+  "name": "the none policy reports going over budget and changes nothing, so a real working set can be measured before a limit is enforced",
+  "level": "core",
+  "given": {
+    "runtime": {
+      "memory": { "maxBytes": 1, "eviction": { "policy": "none" } }
+    },
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "open",
+        "states": [
+          {
+            "state": "open",
+            "else": { "result": "stay", "values": { "n": 1 } }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    { "send": { "key": "orders:1", "trigger": { "type": "touch" } } },
+    { "send": { "key": "orders:2", "trigger": { "type": "touch" } } }
+  ],
+  "then": {
+    "sends": [
+      { "outcome": "committed", "seq": 1 },
+      { "outcome": "committed", "seq": 1 }
+    ],
+    "telemetry": [
+      { "type": "memory.accounted", "key": "orders:1", "overBudget": true },
+      { "type": "memory.accounted", "key": "orders:2", "overBudget": true }
+    ],
+    "resident": ["orders:1", "orders:2"],
+    "memory": { "instances": 2 }
+  }
+}

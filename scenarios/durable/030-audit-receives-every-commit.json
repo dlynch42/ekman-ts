@@ -1,0 +1,46 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "durable/030-audit-receives-every-commit",
+  "name": "audit sinks receive committed events, and a sink that keeps failing never blocks or fails a commit",
+  "level": "durable",
+  "given": {
+    "runtime": {
+      "store": [{ "kind": "file" }],
+      "audit": [{ "name": "ok" }, { "name": "broken", "failTimes": 99 }]
+    },
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "open",
+        "states": [
+          {
+            "state": "open",
+            "cases": [
+              {
+                "when": { "trigger": "close" },
+                "do": { "result": "transitionTo", "to": "closed" }
+              }
+            ]
+          },
+          { "state": "closed", "else": { "result": "stay" } }
+        ]
+      }
+    ]
+  },
+  "when": [
+    { "send": { "key": "orders:1", "trigger": { "type": "close" } } },
+    { "send": { "key": "orders:1", "trigger": { "type": "poke" } } }
+  ],
+  "then": {
+    "sends": [
+      { "outcome": "committed", "state": "closed", "seq": 1 },
+      { "outcome": "committed", "state": "closed", "seq": 2 }
+    ],
+    "audit": {
+      "ok": ["transition@0", "transition@1", "transition@2"],
+      "broken": []
+    },
+    "telemetry": [{ "type": "audit.failed", "sink": "broken" }],
+    "state": { "orders:1": { "state": "closed", "seq": 2 } }
+  }
+}

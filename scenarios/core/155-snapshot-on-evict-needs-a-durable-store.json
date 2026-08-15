@@ -1,0 +1,22 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/155-snapshot-on-evict-needs-a-durable-store",
+  "name": "asking to snapshot on eviction with nowhere durable to snapshot to is refused, not quietly ignored",
+  "level": "core",
+  "given": {
+    "runtime": {
+      "memory": {
+        "maxBytes": 1024,
+        "eviction": { "policy": "lru", "snapshotOnEvict": true }
+      }
+    },
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "open",
+        "states": [{ "state": "open", "else": { "result": "stay" } }]
+      }
+    ]
+  },
+  "then": { "buildError": { "code": "INVALID_CONFIG" } }
+}

@@ -1,16 +1,10 @@
 import { describe, expect, it } from "vitest";
-import type { RuntimeDeps } from "../src/config";
-import { resolveInboxConfig } from "../src/config";
 import { EkmanError } from "../src/errors";
 import { isTransitionEvent } from "../src/events";
 import { InstanceRecord, sealValues } from "../src/instance";
+import { testDeps } from "./deps";
 
-const deps: RuntimeDeps = {
-  now: () => 1000,
-  telemetry: undefined,
-  onUnhandled: () => undefined,
-  inbox: resolveInboxConfig(undefined),
-};
+const deps = testDeps();
 
 /**
  * Commit the way dispatch does: through a token issued for the attempt.
@@ -50,6 +44,18 @@ describe("InstanceRecord", () => {
     });
   });
 
+  it("is already reconciled when there is no store to reconcile with", async () => {
+    const instance = make();
+
+    expect(instance.needsHydration).toBe(false);
+    // Idempotent and free: a memory-only runtime never waits on the way in, which is what
+    // keeps its dispatch in the same turn it has always been in.
+    await instance.ready();
+    await instance.ready();
+
+    expect(instance.events).toHaveLength(1);
+  });
+
   it("exposes a frozen snapshot", () => {
     const snapshot = make({ a: 1 }).snapshot();
 
@@ -63,16 +69,16 @@ describe("InstanceRecord", () => {
     expect(Object.isFrozen(snapshot)).toBe(true);
   });
 
-  it("advances the sequence by exactly one per commit", () => {
+  it("advances the sequence by exactly one per commit", async () => {
     const instance = make();
 
-    commit(instance, {
+    await commit(instance, {
       state: "approved",
       values: {},
       at: 2000,
       cause: { type: "approve", id: "t2" },
     });
-    commit(instance, {
+    await commit(instance, {
       state: "shipped",
       values: {},
       at: 3000,
@@ -83,9 +89,9 @@ describe("InstanceRecord", () => {
     expect(instance.events.map((e) => e.seq)).toEqual([0, 1, 2]);
   });
 
-  it("applies state, values, sequence and event together", () => {
+  it("applies state, values, sequence and event together", async () => {
     const instance = make();
-    const event = commit(instance, {
+    const event = await commit(instance, {
       state: "approved",
       values: Object.freeze({ by: "amy" }),
       at: 2000,
@@ -98,9 +104,9 @@ describe("InstanceRecord", () => {
     expect(instance.events.at(-1)).toBe(event);
   });
 
-  it("records the state it moved from", () => {
+  it("records the state it moved from", async () => {
     const instance = make();
-    const event = commit(instance, {
+    const event = await commit(instance, {
       state: "approved",
       values: {},
       at: 2000,
@@ -109,9 +115,9 @@ describe("InstanceRecord", () => {
     expect(event.from).toBe("pending");
   });
 
-  it("records a rejection without advancing the sequence", () => {
+  it("records a rejection without advancing the sequence", async () => {
     const instance = make();
-    commit(instance, {
+    await commit(instance, {
       state: "approved",
       values: {},
       at: 2000,
@@ -133,7 +139,7 @@ describe("InstanceRecord", () => {
     });
   });
 
-  it("keeps seq non-decreasing across a stream that mixes commits and rejections", () => {
+  it("keeps seq non-decreasing across a stream that mixes commits and rejections", async () => {
     const instance = make();
     instance.reject({
       code: "UNKNOWN_TRIGGER",
@@ -141,7 +147,7 @@ describe("InstanceRecord", () => {
       at: 1,
       cause: { type: "x", id: "t2" },
     });
-    commit(instance, {
+    await commit(instance, {
       state: "approved",
       values: {},
       at: 2,
@@ -159,9 +165,9 @@ describe("InstanceRecord", () => {
     expect([...seqs].sort((a, b) => a - b)).toEqual(seqs);
   });
 
-  it("leaves only transition events for replay", () => {
+  it("leaves only transition events for replay", async () => {
     const instance = make();
-    commit(instance, {
+    await commit(instance, {
       state: "approved",
       values: {},
       at: 2,

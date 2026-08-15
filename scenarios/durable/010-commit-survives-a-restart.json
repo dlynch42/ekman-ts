@@ -1,0 +1,63 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "durable/010-commit-survives-a-restart",
+  "name": "a committed instance comes back in its exact state after the runtime is thrown away and rebuilt",
+  "level": "durable",
+  "given": {
+    "runtime": { "store": [{ "kind": "file" }] },
+    "entities": [
+      {
+        "name": "deployments",
+        "initial": "pending",
+        "states": [
+          {
+            "state": "pending",
+            "cases": [
+              {
+                "when": { "trigger": "start" },
+                "do": {
+                  "result": "transitionTo",
+                  "to": "deploying",
+                  "values": { "region": { "$trigger": "region" }, "attempt": 1 }
+                }
+              }
+            ]
+          },
+          {
+            "state": "deploying",
+            "cases": [
+              {
+                "when": { "trigger": "finish" },
+                "do": { "result": "transitionTo", "to": "live" }
+              }
+            ]
+          },
+          { "state": "live", "else": { "result": "stay" } }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "deployments:abc123",
+        "trigger": { "type": "start", "region": "us-west-2" }
+      }
+    },
+    { "restart": true },
+    { "send": { "key": "deployments:abc123", "trigger": { "type": "finish" } } }
+  ],
+  "then": {
+    "sends": [
+      { "outcome": "committed", "state": "deploying", "seq": 1 },
+      { "outcome": "committed", "state": "live", "seq": 2 }
+    ],
+    "state": {
+      "deployments:abc123": {
+        "state": "live",
+        "seq": 2,
+        "values": { "region": "us-west-2", "attempt": 1 }
+      }
+    }
+  }
+}

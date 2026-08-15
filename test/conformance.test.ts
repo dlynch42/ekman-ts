@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { runScenario } from "../runner/run";
 import type { Scenario } from "../runner/scenario";
-import { CLAIMED_LEVELS, LEVELS, loadScenarios } from "../runner/scenario";
+import {
+  CLAIMED_LEVELS,
+  LEVELS,
+  loadScenarios,
+  RUN_LEVELS,
+} from "../runner/scenario";
 
 const scenarios = loadScenarios();
 
@@ -41,7 +46,9 @@ describe("conformance suite", () => {
       }
 
       for (const scenario of atLevel) {
-        const test = claimed ? it : it.skip;
+        // Run whether or not the level is claimed. A scenario written for a level still
+        // being built is the thing telling you whether you are getting there.
+        const test = RUN_LEVELS.includes(level) ? it : it.skip;
         test(`${scenario.id}: ${scenario.name}`, async () => {
           const result = await runScenario(scenario);
           expect(result.failures).toEqual([]);

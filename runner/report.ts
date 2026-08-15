@@ -33,23 +33,23 @@ export function format(report: Report): string {
     const results = report.results.filter((r) => r.scenario.level === level);
     const claimed = CLAIMED_LEVELS.includes(level);
 
-    if (!claimed) {
-      const note =
-        results.length === 0
-          ? "no scenarios yet"
-          : `${results.length} scenarios, not run`;
-      lines.push(`  ${level}: not claimed (${note})`, "");
-      continue;
-    }
-
     if (results.length === 0) {
-      lines.push(`  ${level}: claimed, but no scenarios found`, "");
+      lines.push(
+        claimed
+          ? `  ${level}: claimed, but no scenarios found`
+          : `  ${level}: not claimed (no scenarios yet)`,
+        ""
+      );
       continue;
     }
 
     const failed = results.filter((r) => r.status === "failed").length;
+    // A level with scenarios is always run and always reported, claimed or not. Building
+    // towards a level and not seeing whether you are getting there would be pointless, and
+    // a level whose scenarios are green but incomplete should say exactly that.
     lines.push(
-      `  ${level}: ${results.length - failed}/${results.length} passing`
+      `  ${level}: ${results.length - failed}/${results.length} passing` +
+        (claimed ? "" : " (not claimed yet)")
     );
 
     for (const result of results) {

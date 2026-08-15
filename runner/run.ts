@@ -1,14 +1,25 @@
 import type { EkmanError, TelemetryEvent } from "../src/index";
 import { Ekman } from "../src/index";
 import type { ScenarioClock } from "./build";
-import { buildClock, buildEntities } from "./build";
+import {
+  buildClock,
+  buildEntities,
+  ScenarioAudit,
+  ScenarioStorage,
+} from "./build";
 import type {
   Scenario,
   SendExpectation,
   StateExpectation,
   Step,
 } from "./scenario";
-import { isAdvanceStep, isSendStep, isSweepStep, isWaitStep } from "./scenario";
+import {
+  isAdvanceStep,
+  isRestartStep,
+  isSendStep,
+  isSweepStep,
+  isWaitStep,
+} from "./scenario";
 
 export interface ScenarioResult {
   readonly scenario: Scenario;
@@ -59,8 +70,12 @@ async function execute(scenario: Scenario, failures: string[]): Promise<void> {
   // A scenario may assert that its own `given` is invalid and must be refused at build
   // time, before any trigger is sent.
   if (expectBuildError !== undefined) {
+    // Built with its storage, because a refusal is often about what the stores can and
+    // cannot promise, and a runtime built without them would be refused for the wrong
+    // reason or not at all.
+    const storage = new ScenarioStorage(scenario.given.runtime?.store);
     try {
-      buildRuntime(scenario, []);
+      buildRuntime(scenario, [], undefined, storage);
       failures.push(
         `expected building to fail with ${expectBuildError.code}, but it succeeded`
       );
@@ -71,33 +86,51 @@ async function execute(scenario: Scenario, failures: string[]): Promise<void> {
           `expected build error ${expectBuildError.code}, got ${code ?? "a non-Ekman error"}: ${(error as Error).message}`
         );
       }
+    } finally {
+      storage.cleanup();
     }
     return;
   }
 
   const telemetry: TelemetryEvent[] = [];
   const clock = buildClock(scenario.given);
-  const ekman = buildRuntime(scenario, telemetry, clock);
+  const storage = new ScenarioStorage(scenario.given.runtime?.store);
+  const audit = new ScenarioAudit(scenario.given.runtime?.audit);
+
+  // Held in a box because a restart step replaces it, and every assertion afterwards has
+  // to be made against the runtime that is actually running.
+  const active = {
+    ekman: buildRuntime(scenario, telemetry, clock, storage, audit),
+  };
 
   try {
-    const outcomes = await deliver(ekman, scenario.when ?? [], clock);
+    const outcomes = await deliver(active, scenario.when ?? [], clock, () =>
+      buildRuntime(scenario, telemetry, clock, storage, audit)
+    );
 
     assertSends(scenario.then?.sends, outcomes, failures);
-    assertEvents(scenario, ekman, failures);
+    assertEvents(scenario, active.ekman, failures);
     assertTelemetry(scenario.then?.telemetry, telemetry, failures);
-    assertState(scenario.then?.state, ekman, failures);
+    assertState(scenario.then?.state, active.ekman, failures);
+    assertResident(scenario.then?.resident, active.ekman, failures);
+    assertMemory(scenario.then?.memory, active.ekman, failures);
+    assertAudit(scenario.then?.audit, audit, failures);
   } finally {
-    // A scenario that configured an automatic sweep leaves an interval behind otherwise.
-    await ekman.close();
+    // A scenario that configured an automatic sweep leaves an interval behind otherwise,
+    // and a durable one leaves a directory.
+    await active.ekman.close();
+    storage.cleanup();
   }
 }
 
 function buildRuntime(
   scenario: Scenario,
   telemetry: TelemetryEvent[],
-  clock?: ScenarioClock
+  clock?: ScenarioClock,
+  storage?: ScenarioStorage,
+  audit?: ScenarioAudit
 ): Ekman {
-  const { inbox, execution, temporal } = scenario.given.runtime ?? {};
+  const { inbox, execution, temporal, memory } = scenario.given.runtime ?? {};
 
   return new Ekman({
     entities: buildEntities(scenario.given),
@@ -105,6 +138,11 @@ function buildRuntime(
     ...(inbox === undefined ? {} : { inbox }),
     ...(execution === undefined ? {} : { execution }),
     ...(temporal === undefined ? {} : { temporal }),
+    ...(memory === undefined ? {} : { memory }),
+    ...(storage?.configured === true ? { store: storage.build() } : {}),
+    ...(audit === undefined || audit.sinks.length === 0
+      ? {}
+      : { audit: audit.sinks }),
     // Capture everything. A scenario asserts a subsequence of what lands here.
     telemetry: { "*": (event) => telemetry.push(event) },
     // A scenario asserts on outcomes, so a stray post() failure must not print noise.
@@ -113,17 +151,29 @@ function buildRuntime(
 }
 
 async function deliver(
-  ekman: Ekman,
+  active: { ekman: Ekman },
   steps: readonly Step[],
-  clock: ScenarioClock | undefined
+  clock: ScenarioClock | undefined,
+  rebuild: () => Ekman
 ): Promise<Outcome[]> {
   const outcomes: Outcome[] = [];
   const inFlight: Promise<void>[] = [];
   let index = 0;
 
   for (const step of steps) {
+    const { ekman } = active;
+
+    if (isRestartStep(step)) {
+      // Everything outstanding settles first, then the runtime is thrown away. What
+      // survives is whatever reached a durable store, which is the entire claim.
+      // The old runtime is shut down before the new one opens the same storage.
+      // biome-ignore lint/performance/noAwaitInLoops: steps are ordered by definition, and a restart is a barrier across all of them
+      await Promise.all([...inFlight, ekman.close()]);
+      active.ekman = rebuild();
+      continue;
+    }
+
     if (isWaitStep(step)) {
-      // biome-ignore lint/performance/noAwaitInLoops: the pause is the step
       await new Promise((done) => setTimeout(done, step.wait));
       continue;
     }
@@ -345,6 +395,86 @@ function assertState(
     }
     if (want.values !== undefined) {
       failures.push(...diff(`state["${key}"].values`, got.values, want.values));
+    }
+  }
+}
+
+/**
+ * Which keys are still in memory.
+ *
+ * The pairing with `then.state` is what proves a reload is transparent: a key asserted
+ * absent here and present there was read back through the store without the assertion
+ * having to know it happened.
+ */
+function assertResident(
+  expected: readonly string[] | undefined,
+  ekman: Ekman,
+  failures: string[]
+): void {
+  if (expected === undefined) {
+    return;
+  }
+
+  const got = [...ekman.residentKeys].sort();
+  const want = [...expected].sort();
+
+  if (got.join(",") !== want.join(",")) {
+    failures.push(
+      `resident: expected [${want.join(", ")}], got [${got.join(", ")}]`
+    );
+  }
+}
+
+function assertMemory(
+  expected: { instances?: number; withinBytes?: number } | undefined,
+  ekman: Ekman,
+  failures: string[]
+): void {
+  if (expected === undefined) {
+    return;
+  }
+
+  const usage = ekman.memoryUsage;
+
+  if (
+    expected.instances !== undefined &&
+    usage.instances !== expected.instances
+  ) {
+    failures.push(
+      `memory.instances: expected ${expected.instances}, got ${usage.instances}`
+    );
+  }
+
+  if (
+    expected.withinBytes !== undefined &&
+    usage.bytes > expected.withinBytes
+  ) {
+    failures.push(
+      `memory.withinBytes: expected at most ${expected.withinBytes} resident bytes, got ${usage.bytes}`
+    );
+  }
+}
+
+function assertAudit(
+  expected: Readonly<Record<string, readonly string[]>> | undefined,
+  audit: ScenarioAudit,
+  failures: string[]
+): void {
+  if (expected === undefined) {
+    return;
+  }
+
+  for (const [sink, want] of Object.entries(expected)) {
+    const got = audit.received.get(sink);
+
+    if (got === undefined) {
+      failures.push(`audit["${sink}"]: no such sink is configured`);
+      continue;
+    }
+    if (got.join(",") !== want.join(",")) {
+      failures.push(
+        `audit["${sink}"]: expected [${want.join(", ")}], got [${got.join(", ")}]`
+      );
     }
   }
 }

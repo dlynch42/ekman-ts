@@ -1,0 +1,54 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/150-memory-accounted-at-commit",
+  "name": "resident memory is accounted at commit and reported in telemetry, never in the event stream",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "open",
+        "states": [
+          {
+            "state": "open",
+            "else": {
+              "result": "stay",
+              "values": { "note": "some values that take up room" }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    { "send": { "key": "orders:1", "trigger": { "type": "touch" } } },
+    { "send": { "key": "orders:2", "trigger": { "type": "touch" } } }
+  ],
+  "then": {
+    "telemetry": [
+      {
+        "type": "memory.accounted",
+        "key": "orders:1",
+        "bytes": "$number",
+        "residentBytes": "$number",
+        "residentCount": 1,
+        "maxBytes": null,
+        "overBudget": false
+      },
+      {
+        "type": "memory.accounted",
+        "key": "orders:2",
+        "residentCount": 2,
+        "overBudget": false
+      }
+    ],
+    "events": {
+      "orders:1": [
+        { "type": "transition", "from": null, "to": "open", "seq": 0 },
+        { "type": "transition", "from": "open", "to": "open", "seq": 1 }
+      ]
+    },
+    "resident": ["orders:1", "orders:2"],
+    "memory": { "instances": 2 }
+  }
+}

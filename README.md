@@ -52,7 +52,8 @@ export const ekman = new Ekman({
   memory:   { maxBytes: 32 * MB, eviction: { policy: "lru", snapshotOnEvict: true } },
   inbox:    { capacity: 128, overflow: "reject" },   // 128 triggers waiting per key, not bytes
   execution: { maxAttempts: 3, timeoutMs: 10_000, backoff: { kind: "exponential", baseMs: 50 } },
-  store:    [memoryStore(), redisStore(url), postgresStore(dsn)],
+  temporal: { sweepMs: 1_000 },                      // how often time-in-state bounds are checked
+  store:    [memoryStore(), fileStore("./state")],   // fastest first; the last durable layer owns the truth
   audit:    [kafkaSink("state-transitions")],
   telemetry: {
     "inbox.dropped":   (e) => metrics.inc("ekman.inbox.dropped", { entity: e.entity }),
@@ -83,6 +84,27 @@ A running JavaScript function cannot be stopped, so a timeout does two things: i
 
 Telemetry is a separate stream from history, by design. Queue depth, handler duration, drops, and retries are Ekman's business; your transition history stays domain-only. Handlers are keyed by event name with `"*"` as the catch-all, so there is no event union to narrow.
 
+## Durability
+
+Durability is configured, never implied. Omit `store` and you get a memory-only runtime: nothing survives the process, and nothing pretends to. That is a documented mode, not a degraded one.
+
+Configure one and commits are written before they are applied. A `send()` that resolves has already reached the commit authority, so a crash a microsecond later loses nothing. Stores layer, fastest first, and exactly one layer owns the truth: the rest are caches, written after the fact, and a cache that fails to write is reported without failing the commit.
+
+Every store declares what it can actually do (durable or ephemeral, conditional append, safe across processes), and the runtime **refuses configurations those declarations cannot satisfy** rather than quietly under-delivering. Claiming durability a store does not have is the one lie a state runtime must never tell.
+
+Memory is a budget you set, not a hope. Resident instances are accounted at commit, in UTF-8 bytes of the key, the state name and the serialized values, which is a number you can reason about because it is roughly what the instance costs to persist. When the budget is full:
+
+- `lru` releases the coldest **idle** instances, snapshotting them on the way out.
+- `reject` refuses to materialize new instances and leaves the resident ones working.
+- `none` measures and reports without acting, which is how you learn what your real working set is before enforcing a limit on it.
+
+Eviction only ever touches idle instances, and only once a key goes idle, so a commit in flight can never be thrown away. A trigger for an evicted instance reloads it transparently: your code cannot tell a resident instance from one that just came back off disk.
+
+```
+npm run demo:recovery       # commit, crash, restart, everything resumes
+npm run demo:memory-bound   # 5000 instances inside a 64 KB budget
+```
+
 ## What it is not
 
 - **Not an orchestration platform.** No mandatory server, cluster, sidecar, or control plane.
@@ -109,9 +131,13 @@ scenarios at a level is what it means to conform at that level.
 
 | Level | Status | Covers |
 |---|---|---|
-| Core | **passing** | Entities, dispatch, commit, ordering, bounded inbox, execution policy, fencing, telemetry |
-| Durable | not claimed | Durable store, replay, snapshot on evict, queries |
+| Core | **passing** | Entities, dispatch, commit, ordering, bounded inbox, execution policy, fencing, constraints, memory budget, telemetry |
+| Durable | scenarios passing, not yet claimed | Durable store, replay, snapshot on evict, audit; queries still to come |
 | Coordinated | not claimed | Multi-runtime conflict detection |
+
+A level whose scenarios pass is not automatically claimed. Durable also requires the query
+API, so its scenarios run and pass today while the level stays unclaimed. A partial claim is
+worse than no claim.
 
 ```
 npm run conformance
@@ -121,7 +147,7 @@ Reports pass or fail per scenario per level, and exits non-zero if a claimed lev
 
 ## Roadmap
 
-- **v0.1**: TypeScript reference implementation. Entities, dispatch, per-key inbox, retries/timeouts/fencing, memory budget, memory/file stores, transition history.
+- **v0.1**: TypeScript reference implementation. Entities, dispatch, per-key inbox, retries/timeouts/fencing, constraints, memory budget, memory/file stores, transition history, queries.
 - **v0.2**: Redis adapter, query API, constraints (graph + guards).
 - **v0.3**: Postgres adapter, invariants, temporal constraints, optimistic concurrency, Kafka adapters.
 - **v0.4**: Go implementation against the conformance spec.

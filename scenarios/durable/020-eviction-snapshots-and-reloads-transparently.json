@@ -1,0 +1,48 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "durable/020-eviction-snapshots-and-reloads-transparently",
+  "name": "a cold instance is evicted under budget pressure and comes back on its next trigger without the caller noticing",
+  "level": "durable",
+  "given": {
+    "runtime": {
+      "store": [{ "kind": "file" }],
+      "memory": { "maxBytes": 60, "eviction": { "policy": "lru" } }
+    },
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "open",
+        "states": [
+          {
+            "state": "open",
+            "else": {
+              "result": "stay",
+              "values": { "who": { "$trigger": "who" } }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    { "send": { "key": "orders:1", "trigger": { "type": "t", "who": "a" } } },
+    { "send": { "key": "orders:2", "trigger": { "type": "t", "who": "b" } } },
+    { "send": { "key": "orders:3", "trigger": { "type": "t", "who": "c" } } },
+    { "send": { "key": "orders:1", "trigger": { "type": "t", "who": "a2" } } }
+  ],
+  "then": {
+    "sends": [
+      { "outcome": "committed", "seq": 1, "values": { "who": "a" } },
+      { "outcome": "committed", "seq": 1, "values": { "who": "b" } },
+      { "outcome": "committed", "seq": 1, "values": { "who": "c" } },
+      { "outcome": "committed", "seq": 2, "values": { "who": "a2" } }
+    ],
+    "telemetry": [
+      { "type": "instance.evicted", "key": "orders:1", "snapshotted": true },
+      { "type": "instance.restored", "key": "orders:1", "seq": 1 }
+    ],
+    "state": {
+      "orders:1": { "state": "open", "seq": 2, "values": { "who": "a2" } }
+    }
+  }
+}
