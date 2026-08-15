@@ -1,7 +1,16 @@
 import { describe, expect, it } from "vitest";
+import type { RuntimeDeps } from "../src/config";
+import { resolveInboxConfig } from "../src/config";
 import { EkmanError } from "../src/errors";
 import { isTransitionEvent } from "../src/events";
 import { InstanceRecord, sealValues } from "../src/instance";
+
+const deps: RuntimeDeps = {
+  now: () => 1000,
+  telemetry: undefined,
+  onUnhandled: () => undefined,
+  inbox: resolveInboxConfig(undefined),
+};
 
 const make = (values: Record<string, unknown> = {}) =>
   // Widened on purpose: these tests commit to states beyond the initial one.
@@ -12,6 +21,7 @@ const make = (values: Record<string, unknown> = {}) =>
     initialValues: Object.freeze(values),
     at: 1000,
     cause: { type: "init", id: "t1" },
+    deps,
   });
 
 describe("InstanceRecord", () => {
@@ -157,14 +167,33 @@ describe("InstanceRecord", () => {
     expect(replayed.at(-1)?.to).toBe("approved");
   });
 
-  it("tracks whether a handler is running, which is what eviction will need", () => {
+  it("is idle only while its inbox has nothing running and nothing waiting", async () => {
     const instance = make();
     expect(instance.idle).toBe(true);
 
-    instance.markActive();
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const settled = instance.inbox.enqueue(
+      { type: "go", id: "t1" },
+      async () => {
+        await held;
+        return instance.commit({
+          state: "approved",
+          values: {},
+          at: 2000,
+          cause: { type: "go", id: "t1" },
+        }) as never;
+      }
+    );
+
+    // Eviction must not touch an instance with work in flight.
     expect(instance.idle).toBe(false);
 
-    instance.markIdle();
+    release();
+    await settled;
     expect(instance.idle).toBe(true);
   });
 });

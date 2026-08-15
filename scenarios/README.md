@@ -59,6 +59,42 @@ starting at `start` milliseconds and advancing `stepMs` on each read, which make
 event's `at` timestamp assertable. When absent, runners must ignore `at` in all event
 assertions.
 
+This clock is the *domain* clock: it stamps the per-key event stream and nothing else.
+Telemetry uses wall time and must not draw from it, or the number of times an
+implementation happens to read the clock internally would change the timestamps a
+scenario asserts, and no two implementations would agree.
+
+```json
+{ "inbox": { "maxQueued": 1, "overflow": "reject", "recordOverflow": false } }
+```
+
+`inbox` is optional and configures the bounded per-key inbox for every instance.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `maxQueued` | 128 | How many triggers may **wait** per key. A count of triggers, not bytes. |
+| `overflow` | `reject` | What happens to a trigger arriving at a full inbox. |
+| `recordOverflow` | `false` | Also record an overflow refusal in the key's event stream, not only in telemetry. |
+
+`maxQueued` counts triggers that are waiting. The one currently being handled has already
+left the queue and does not count against it, so a trigger arriving at a completely idle
+instance is always admitted, and `maxQueued: 0` means "one at a time, no backlog" rather
+than "refuse everything".
+
+Overflow policies:
+
+| Policy | Effect | The sender gets |
+|---|---|---|
+| `reject` | Refuses the arriving trigger, queue untouched. | `INBOX_OVERFLOW` |
+| `drop-newest` | Refuses the arriving trigger, queue untouched. | `TRIGGER_DROPPED` |
+| `drop-oldest` | Refuses the longest-waiting trigger and admits the arriving one. | `TRIGGER_DROPPED` |
+
+`reject` and `drop-newest` have the same effect on the queue and differ in what the sender
+is told: `INBOX_OVERFLOW` is backpressure, meaning the trigger did not land and the
+producer should slow down; `TRIGGER_DROPPED` is shedding, meaning the trigger is gone on
+purpose and should not be retried. `drop-oldest` with a `maxQueued` of 0 has no waiting
+trigger to drop, so it drops the arriving one.
+
 ### `given.entities`
 
 An array of entity specifications.
@@ -202,6 +238,49 @@ scenario asserts only the fields it cares about.
 
 `at` is asserted only when `given.runtime.clock` is declared.
 
+### `then.telemetry`
+
+Runtime telemetry: queue depth, drops, handler duration. A separate stream from
+`then.events`, and nothing that appears here may appear there.
+
+```json
+[
+  { "type": "handler.started", "key": "orders:1", "state": "a", "depth": 0 },
+  { "type": "inbox.dropped", "dropped": "newest", "trigger": { "id": "t3" } },
+  { "type": "handler.settled", "outcome": "committed", "durationMs": "$number" }
+]
+```
+
+Asserted as an **ordered subsequence** of what was emitted, not as an exact list. Order
+between the matchers is asserted, so "started before settled" is provable, but unrelated
+events in between are ignored. Telemetry is a firehose, and a scenario about one dropped
+trigger should not have to enumerate every enqueue around it.
+
+Each matcher is a subset match, like an event assertion.
+
+| Event | Emitted when | Notable fields |
+|---|---|---|
+| `inbox.enqueued` | A trigger is accepted into an inbox. | `depth`, `maxQueued`, `trigger` |
+| `inbox.rejected` | A trigger is refused by the `reject` policy. | `depth`, `maxQueued`, `overflow`, `trigger` |
+| `inbox.dropped` | A trigger is dropped by a drop policy. | `dropped` (`newest`/`oldest`), `trigger` |
+| `handler.started` | A handler attempt begins. | `state`, `attempt`, `depth` |
+| `handler.settled` | A trigger finishes being processed. | `outcome`, `durationMs`, `attempt` |
+
+`handler.settled.outcome` is `committed`, `failed`, or `refused`. `refused` means the
+trigger never reached a handler.
+
+### Type matchers
+
+Some values are real but not deterministic, a handler's duration being the obvious one.
+Asserting the shape is the most a scenario can honestly say about them, so a matcher
+string may stand in for a value anywhere in `then`:
+
+| Matcher | Matches |
+|---|---|
+| `"$number"` | Any number that is not `NaN`. |
+| `"$string"` | Any string. |
+| `"$any"` | Any value that is present. |
+
 ### `then.state`
 
 Current committed state per key, after all steps settle.
@@ -234,13 +313,16 @@ Stable across implementations. A runner asserts on these strings, never on messa
 | `UNKNOWN_STATE` | The current state has no handler and the unknown policy is `reject`. |
 | `UNKNOWN_TRIGGER` | The trigger type is not in the declared `triggers`. |
 | `HANDLER_FAILED` | The handler produced `fail`, or threw. |
+| `INBOX_OVERFLOW` | The inbox was full and the overflow policy is `reject`. |
+| `TRIGGER_DROPPED` | The inbox was full and a drop policy discarded this trigger. |
 | `DUPLICATE_ENTITY` | Two entities registered with the same name. |
 | `DUPLICATE_STATE_HANDLER` | Two handlers for one state. |
 | `MISSING_INITIAL_STATE` | No initial state declared. |
 | `INITIAL_STATE_NOT_IN_STATES` | The initial state has no handler. |
+| `INVALID_CONFIG` | Configuration is recognized but cannot be satisfied, and is refused rather than adjusted. |
 | `NOT_IMPLEMENTED` | Configuration is recognized but unimplemented at this phase. |
 
-Later phases add codes for inbox overflow, fencing, and timeouts.
+Later phases add codes for fencing and timeouts.
 
 ## Determinism
 
@@ -270,6 +352,8 @@ Anything that cannot be made deterministic must not be asserted.
    | `05x` | keys and addressing |
    | `06x` | ordering and per-key serialization |
    | `07x` | definition-time validation |
+   | `08x` | inbox capacity and overflow policies |
+   | `09x` | telemetry |
 
 3. Assert the narrowest thing that proves the requirement. Over-asserting makes the suite
    brittle for the next port.

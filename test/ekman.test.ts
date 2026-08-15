@@ -4,6 +4,9 @@ import { defineEntity } from "../src/entity";
 import { EkmanError } from "../src/errors";
 import type { EkmanEvent, TransitionEvent } from "../src/events";
 import { fail, stay, transitionTo } from "../src/results";
+import type { TelemetryEvent } from "../src/telemetry";
+
+const NON_NEGATIVE_INTEGER = /non-negative integer/;
 
 /** A clock that advances a fixed step per read, so `at` is assertable. */
 const steppingClock = (start = 1000, step = 1000) => {
@@ -591,6 +594,92 @@ describe("post", () => {
     await vi.waitFor(() => expect(onUnhandled).toHaveBeenCalledTimes(1));
     const [reported] = onUnhandled.mock.calls[0] ?? [];
     expect((reported as EkmanError).code).toBe("HANDLER_FAILED");
+  });
+});
+
+describe("telemetry", () => {
+  it("reports the inbox and the handler without touching the event stream", async () => {
+    const seen: TelemetryEvent[] = [];
+    const ekman = new Ekman({
+      entities: [orders],
+      telemetry: { "*": (event) => seen.push(event) },
+    });
+
+    await ekman.entities.orders.send("1", { type: "approve", actor: "amy" });
+
+    expect(seen.map((event) => event.type)).toEqual([
+      "inbox.enqueued",
+      "handler.started",
+      "handler.settled",
+    ]);
+    expect(seen.at(-1)).toMatchObject({
+      key: "orders:1",
+      entity: "orders",
+      state: "pending",
+      attempt: 1,
+      outcome: "committed",
+    });
+
+    // Runtime metadata stays out of the domain stream.
+    for (const event of ekman.entities.orders.history("1")) {
+      expect(event).not.toHaveProperty("durationMs");
+      expect(event).not.toHaveProperty("depth");
+    }
+  });
+
+  it("classifies a refused trigger separately from a failed handler", async () => {
+    // A trigger that never reaches a handler was refused; one the handler rejected
+    // failed. Collapsing the two would hide a misrouted producer inside an error rate.
+    const strict = defineEntity("strict", {
+      initial: "pending",
+      triggers: ["approve"],
+      states: { pending: () => fail(new Error("nope")) },
+    });
+
+    const seen: TelemetryEvent[] = [];
+    const ekman = new Ekman({
+      entities: [strict],
+      telemetry: { "handler.settled": (event) => seen.push(event) },
+    });
+
+    await expect(
+      ekman.entities.strict.send("1", { type: "approve" })
+    ).rejects.toThrow();
+    await expect(
+      ekman.send("strict:2", { type: "unrecognized" })
+    ).rejects.toThrow();
+
+    expect(
+      seen.map((event) => event.type === "handler.settled" && event.outcome)
+    ).toEqual(["failed", "refused"]);
+  });
+
+  it("keeps a throwing telemetry sink from breaking the dispatch it observes", async () => {
+    const onUnhandled = vi.fn();
+    const ekman = new Ekman({
+      entities: [orders],
+      onUnhandled,
+      // Throws for every event, which covers both the inbox's emissions and the
+      // runtime's own.
+      telemetry: {
+        "*": () => {
+          throw new Error("sink exploded");
+        },
+      },
+    });
+
+    await expect(
+      ekman.entities.orders.send("1", { type: "approve", actor: "amy" })
+    ).resolves.toMatchObject({ state: "approved" });
+
+    // inbox.enqueued, handler.started, handler.settled: each reported, none fatal.
+    expect(onUnhandled).toHaveBeenCalledTimes(3);
+  });
+
+  it("refuses an inbox configuration it cannot satisfy, at construction", () => {
+    expect(() => new Ekman({ inbox: { maxQueued: -1 } })).toThrow(
+      NON_NEGATIVE_INTEGER
+    );
   });
 });
 

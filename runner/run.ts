@@ -1,4 +1,4 @@
-import type { EkmanError } from "../src/index";
+import type { EkmanError, TelemetryEvent } from "../src/index";
 import { Ekman } from "../src/index";
 import { buildClock, buildEntities } from "./build";
 import type {
@@ -14,6 +14,17 @@ export interface ScenarioResult {
   readonly status: "passed" | "failed";
   readonly failures: readonly string[];
 }
+
+/**
+ * Type matchers for values a scenario cannot pin down. A scenario writes `"$number"`
+ * where a real but non-deterministic number is expected.
+ */
+const TYPE_MATCHERS = {
+  $number: (value: unknown) =>
+    typeof value === "number" && !Number.isNaN(value),
+  $string: (value: unknown) => typeof value === "string",
+  $any: (value: unknown) => value !== undefined,
+} as const;
 
 interface Outcome {
   outcome: "committed" | "rejected";
@@ -48,7 +59,7 @@ async function execute(scenario: Scenario, failures: string[]): Promise<void> {
   // time, before any trigger is sent.
   if (expectBuildError !== undefined) {
     try {
-      buildRuntime(scenario);
+      buildRuntime(scenario, []);
       failures.push(
         `expected building to fail with ${expectBuildError.code}, but it succeeded`
       );
@@ -63,19 +74,26 @@ async function execute(scenario: Scenario, failures: string[]): Promise<void> {
     return;
   }
 
-  const ekman = buildRuntime(scenario);
+  const telemetry: TelemetryEvent[] = [];
+  const ekman = buildRuntime(scenario, telemetry);
   const outcomes = await deliver(ekman, scenario.when ?? []);
 
   assertSends(scenario.then?.sends, outcomes, failures);
   assertEvents(scenario, ekman, failures);
+  assertTelemetry(scenario.then?.telemetry, telemetry, failures);
   assertState(scenario.then?.state, ekman, failures);
 }
 
-function buildRuntime(scenario: Scenario): Ekman {
+function buildRuntime(scenario: Scenario, telemetry: TelemetryEvent[]): Ekman {
   const now = buildClock(scenario.given);
+  const { inbox } = scenario.given.runtime ?? {};
+
   return new Ekman({
     entities: buildEntities(scenario.given),
     ...(now === undefined ? {} : { now }),
+    ...(inbox === undefined ? {} : { inbox }),
+    // Capture everything. A scenario asserts a subsequence of what lands here.
+    telemetry: { "*": (event) => telemetry.push(event) },
     // A scenario asserts on outcomes, so a stray post() failure must not print noise.
     onUnhandled: () => undefined,
   });
@@ -209,6 +227,50 @@ function assertEvents(
   }
 }
 
+/**
+ * Assert the expected telemetry appears, in order, somewhere in what was emitted.
+ *
+ * A subsequence rather than an exact list. Telemetry is a firehose, and a scenario about
+ * one dropped trigger should not have to enumerate every enqueue around it. Order between
+ * the matchers is still asserted, so "started before settled" remains provable.
+ */
+function assertTelemetry(
+  expected: readonly Record<string, unknown>[] | undefined,
+  actual: readonly TelemetryEvent[],
+  failures: string[]
+): void {
+  if (expected === undefined) {
+    return;
+  }
+
+  let cursor = 0;
+
+  expected.forEach((want, i) => {
+    const found = actual.findIndex(
+      (event, at) =>
+        at >= cursor &&
+        diff("", event as unknown as Record<string, unknown>, want).length === 0
+    );
+
+    if (found === -1) {
+      // The cursor stays put, so a later matcher is still searched for from here rather
+      // than cascading one missing event into a failure for every matcher after it.
+      failures.push(
+        `telemetry[${i}]: no ${describeMatcher(want)} found after the previous match ` +
+          `(emitted: ${actual.map((event) => event.type).join(", ") || "nothing"})`
+      );
+      return;
+    }
+
+    cursor = found + 1;
+  });
+}
+
+function describeMatcher(want: Record<string, unknown>): string {
+  const type = typeof want.type === "string" ? want.type : "event";
+  return `${type} matching ${JSON.stringify(want)}`;
+}
+
 function assertState(
   expected: Readonly<Record<string, StateExpectation | null>> | undefined,
   ekman: Ekman,
@@ -261,6 +323,13 @@ function diff(
   want: unknown,
   ignore: ReadonlySet<string> = new Set()
 ): string[] {
+  // Some values are real but not deterministic: a handler's duration is the obvious one.
+  // Asserting the shape is the most a scenario can honestly say about them.
+  if (typeof want === "string" && want in TYPE_MATCHERS) {
+    const matcher = TYPE_MATCHERS[want as keyof typeof TYPE_MATCHERS];
+    return matcher(got) ? [] : [`${path}: expected ${want}, got ${json(got)}`];
+  }
+
   if (want === null || typeof want !== "object") {
     return Object.is(got, want)
       ? []

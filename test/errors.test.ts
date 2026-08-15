@@ -46,10 +46,13 @@ describe("EkmanError", () => {
       "UNKNOWN_STATE",
       "UNKNOWN_TRIGGER",
       "HANDLER_FAILED",
+      "INBOX_OVERFLOW",
+      "TRIGGER_DROPPED",
       "DUPLICATE_ENTITY",
       "DUPLICATE_STATE_HANDLER",
       "MISSING_INITIAL_STATE",
       "INITIAL_STATE_NOT_IN_STATES",
+      "INVALID_CONFIG",
       "NOT_IMPLEMENTED",
     ]);
   });

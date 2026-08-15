@@ -1,0 +1,108 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/083-overflow-recorded-opt-in",
+  "name": "recordOverflow puts a refused trigger in the key's stream without advancing seq",
+  "level": "core",
+  "given": {
+    "runtime": {
+      "inbox": {
+        "maxQueued": 0,
+        "overflow": "reject",
+        "recordOverflow": true
+      }
+    },
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "a",
+        "states": [
+          {
+            "state": "a",
+            "else": {
+              "result": "stay",
+              "delayMs": 10,
+              "values": {
+                "n": {
+                  "$trigger": "n"
+                }
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "orders:1",
+        "trigger": {
+          "type": "go",
+          "n": 1
+        }
+      },
+      "await": false
+    },
+    {
+      "send": {
+        "key": "orders:1",
+        "trigger": {
+          "type": "go",
+          "n": 2
+        }
+      },
+      "await": false
+    },
+    {
+      "drain": true
+    }
+  ],
+  "then": {
+    "sends": [
+      {
+        "outcome": "committed",
+        "seq": 1,
+        "values": {
+          "n": 1
+        }
+      },
+      {
+        "outcome": "rejected",
+        "code": "INBOX_OVERFLOW"
+      }
+    ],
+    "events": {
+      "orders:1": [
+        {
+          "type": "transition",
+          "from": null,
+          "seq": 0
+        },
+        {
+          "type": "rejected",
+          "seq": 0,
+          "code": "INBOX_OVERFLOW",
+          "cause": {
+            "type": "go",
+            "id": "t2"
+          }
+        },
+        {
+          "type": "transition",
+          "seq": 1,
+          "values": {
+            "n": 1
+          }
+        }
+      ]
+    },
+    "state": {
+      "orders:1": {
+        "seq": 1,
+        "values": {
+          "n": 1
+        }
+      }
+    }
+  }
+}

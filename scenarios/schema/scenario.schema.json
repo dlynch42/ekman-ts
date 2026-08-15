@@ -58,6 +58,23 @@
                   "minimum": 0
                 }
               }
+            },
+            "inbox": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "maxQueued": {
+                  "description": "How many triggers may wait per key. A count of triggers, not bytes. The one being handled has already left the queue and does not count against it.",
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "overflow": {
+                  "enum": ["reject", "drop-newest", "drop-oldest"]
+                },
+                "recordOverflow": {
+                  "type": "boolean"
+                }
+              }
             }
           }
         },
@@ -306,6 +323,25 @@
             }
           }
         },
+        "telemetry": {
+          "description": "Telemetry matchers, asserted as an ordered subsequence of what was emitted rather than an exact list.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["type"],
+            "properties": {
+              "type": {
+                "enum": [
+                  "inbox.enqueued",
+                  "inbox.rejected",
+                  "inbox.dropped",
+                  "handler.started",
+                  "handler.settled"
+                ]
+              }
+            }
+          }
+        },
         "state": {
           "type": "object",
           "additionalProperties": {
@@ -344,10 +380,13 @@
         "UNKNOWN_STATE",
         "UNKNOWN_TRIGGER",
         "HANDLER_FAILED",
+        "INBOX_OVERFLOW",
+        "TRIGGER_DROPPED",
         "DUPLICATE_ENTITY",
         "DUPLICATE_STATE_HANDLER",
         "MISSING_INITIAL_STATE",
         "INITIAL_STATE_NOT_IN_STATES",
+        "INVALID_CONFIG",
         "NOT_IMPLEMENTED"
       ]
     }

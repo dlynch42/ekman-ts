@@ -1,0 +1,116 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/062-dispatch-at-dequeue",
+  "name": "a queued trigger runs the handler for the state committed while it waited",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "first",
+        "states": [
+          {
+            "state": "first",
+            "else": {
+              "result": "transitionTo",
+              "to": "second",
+              "delayMs": 10,
+              "values": {
+                "ran": "first"
+              }
+            }
+          },
+          {
+            "state": "second",
+            "else": {
+              "result": "stay",
+              "values": {
+                "ran": "second"
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "orders:1",
+        "trigger": {
+          "type": "go"
+        }
+      },
+      "await": false
+    },
+    {
+      "send": {
+        "key": "orders:1",
+        "trigger": {
+          "type": "go"
+        }
+      },
+      "await": false
+    },
+    {
+      "drain": true
+    }
+  ],
+  "then": {
+    "sends": [
+      {
+        "outcome": "committed",
+        "state": "second",
+        "seq": 1,
+        "values": {
+          "ran": "first"
+        }
+      },
+      {
+        "outcome": "committed",
+        "state": "second",
+        "seq": 2,
+        "values": {
+          "ran": "second"
+        }
+      }
+    ],
+    "events": {
+      "orders:1": [
+        {
+          "type": "transition",
+          "from": null,
+          "to": "first",
+          "seq": 0
+        },
+        {
+          "type": "transition",
+          "from": "first",
+          "to": "second",
+          "seq": 1,
+          "values": {
+            "ran": "first"
+          }
+        },
+        {
+          "type": "transition",
+          "from": "second",
+          "to": "second",
+          "seq": 2,
+          "values": {
+            "ran": "second"
+          }
+        }
+      ]
+    },
+    "state": {
+      "orders:1": {
+        "state": "second",
+        "seq": 2,
+        "values": {
+          "ran": "second"
+        }
+      }
+    }
+  }
+}

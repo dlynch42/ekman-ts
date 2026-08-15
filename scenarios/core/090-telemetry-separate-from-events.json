@@ -1,0 +1,156 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/090-telemetry-separate-from-events",
+  "name": "queue depth, handler duration and drops reach telemetry and never the event stream",
+  "level": "core",
+  "given": {
+    "runtime": {
+      "inbox": {
+        "maxQueued": 1,
+        "overflow": "drop-newest"
+      }
+    },
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "a",
+        "states": [
+          {
+            "state": "a",
+            "else": {
+              "result": "stay",
+              "delayMs": 5,
+              "values": {
+                "n": {
+                  "$trigger": "n"
+                }
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "orders:1",
+        "trigger": {
+          "type": "go",
+          "n": 1
+        }
+      },
+      "await": false
+    },
+    {
+      "send": {
+        "key": "orders:1",
+        "trigger": {
+          "type": "go",
+          "n": 2
+        }
+      },
+      "await": false
+    },
+    {
+      "send": {
+        "key": "orders:1",
+        "trigger": {
+          "type": "go",
+          "n": 3
+        }
+      },
+      "await": false
+    },
+    {
+      "drain": true
+    }
+  ],
+  "then": {
+    "telemetry": [
+      {
+        "type": "inbox.enqueued",
+        "key": "orders:1",
+        "entity": "orders",
+        "depth": 1,
+        "maxQueued": 1,
+        "trigger": {
+          "id": "t1"
+        }
+      },
+      {
+        "type": "handler.started",
+        "key": "orders:1",
+        "state": "a",
+        "attempt": 1,
+        "depth": 0,
+        "trigger": {
+          "id": "t1"
+        }
+      },
+      {
+        "type": "inbox.enqueued",
+        "depth": 1,
+        "trigger": {
+          "id": "t2"
+        }
+      },
+      {
+        "type": "inbox.dropped",
+        "dropped": "newest",
+        "depth": 1,
+        "trigger": {
+          "id": "t3"
+        }
+      },
+      {
+        "type": "handler.settled",
+        "key": "orders:1",
+        "state": "a",
+        "attempt": 1,
+        "outcome": "committed",
+        "durationMs": "$number",
+        "trigger": {
+          "id": "t1"
+        }
+      },
+      {
+        "type": "handler.started",
+        "depth": 0,
+        "trigger": {
+          "id": "t2"
+        }
+      },
+      {
+        "type": "handler.settled",
+        "outcome": "committed",
+        "trigger": {
+          "id": "t2"
+        }
+      }
+    ],
+    "events": {
+      "orders:1": [
+        {
+          "type": "transition",
+          "from": null,
+          "seq": 0
+        },
+        {
+          "type": "transition",
+          "seq": 1,
+          "values": {
+            "n": 1
+          }
+        },
+        {
+          "type": "transition",
+          "seq": 2,
+          "values": {
+            "n": 2
+          }
+        }
+      ]
+    }
+  }
+}

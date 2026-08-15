@@ -1,0 +1,135 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/082-inbox-drop-oldest",
+  "name": "drop-oldest refuses the longest-waiting trigger and admits the arriving one",
+  "level": "core",
+  "given": {
+    "runtime": {
+      "inbox": {
+        "maxQueued": 1,
+        "overflow": "drop-oldest"
+      }
+    },
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "a",
+        "states": [
+          {
+            "state": "a",
+            "else": {
+              "result": "stay",
+              "delayMs": 10,
+              "values": {
+                "n": {
+                  "$trigger": "n"
+                }
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "orders:1",
+        "trigger": {
+          "type": "go",
+          "n": 1
+        }
+      },
+      "await": false
+    },
+    {
+      "send": {
+        "key": "orders:1",
+        "trigger": {
+          "type": "go",
+          "n": 2
+        }
+      },
+      "await": false
+    },
+    {
+      "send": {
+        "key": "orders:1",
+        "trigger": {
+          "type": "go",
+          "n": 3
+        }
+      },
+      "await": false
+    },
+    {
+      "drain": true
+    }
+  ],
+  "then": {
+    "sends": [
+      {
+        "outcome": "committed",
+        "seq": 1,
+        "values": {
+          "n": 1
+        }
+      },
+      {
+        "outcome": "rejected",
+        "code": "TRIGGER_DROPPED"
+      },
+      {
+        "outcome": "committed",
+        "seq": 2,
+        "values": {
+          "n": 3
+        }
+      }
+    ],
+    "telemetry": [
+      {
+        "type": "inbox.dropped",
+        "key": "orders:1",
+        "dropped": "oldest",
+        "maxQueued": 1,
+        "overflow": "drop-oldest",
+        "trigger": {
+          "type": "go",
+          "id": "t2"
+        }
+      }
+    ],
+    "events": {
+      "orders:1": [
+        {
+          "type": "transition",
+          "from": null,
+          "seq": 0
+        },
+        {
+          "type": "transition",
+          "seq": 1,
+          "values": {
+            "n": 1
+          }
+        },
+        {
+          "type": "transition",
+          "seq": 2,
+          "values": {
+            "n": 3
+          }
+        }
+      ]
+    },
+    "state": {
+      "orders:1": {
+        "seq": 2,
+        "values": {
+          "n": 3
+        }
+      }
+    }
+  }
+}

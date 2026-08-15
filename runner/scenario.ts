@@ -20,8 +20,15 @@ export interface Scenario {
 export interface Given {
   readonly runtime?: {
     readonly clock?: { readonly start: number; readonly stepMs: number };
+    readonly inbox?: InboxSpec;
   };
   readonly entities: readonly EntitySpec[];
+}
+
+export interface InboxSpec {
+  readonly maxQueued?: number;
+  readonly overflow?: "reject" | "drop-newest" | "drop-oldest";
+  readonly recordOverflow?: boolean;
 }
 
 export interface EntitySpec {
@@ -72,6 +79,14 @@ export interface Then {
   readonly events?: Readonly<
     Record<string, readonly Record<string, unknown>[]>
   >;
+  /**
+   * Telemetry matchers, asserted as an ordered subsequence rather than an exact list.
+   *
+   * Telemetry is a firehose: a scenario that cares about one drop should not break when
+   * an unrelated enqueue is emitted alongside it. Order between the matchers is still
+   * asserted, so "started before settled" is provable.
+   */
+  readonly telemetry?: readonly Record<string, unknown>[];
   readonly state?: Readonly<Record<string, StateExpectation | null>>;
   readonly buildError?: { readonly code: string };
 }

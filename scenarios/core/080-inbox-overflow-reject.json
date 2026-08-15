@@ -1,0 +1,136 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/080-inbox-overflow-reject",
+  "name": "a trigger arriving at a full inbox is refused, and the queued ones still commit in order",
+  "level": "core",
+  "given": {
+    "runtime": {
+      "inbox": {
+        "maxQueued": 1,
+        "overflow": "reject"
+      }
+    },
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "a",
+        "states": [
+          {
+            "state": "a",
+            "else": {
+              "result": "stay",
+              "delayMs": 10,
+              "values": {
+                "n": {
+                  "$trigger": "n"
+                }
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "orders:1",
+        "trigger": {
+          "type": "go",
+          "n": 1
+        }
+      },
+      "await": false
+    },
+    {
+      "send": {
+        "key": "orders:1",
+        "trigger": {
+          "type": "go",
+          "n": 2
+        }
+      },
+      "await": false
+    },
+    {
+      "send": {
+        "key": "orders:1",
+        "trigger": {
+          "type": "go",
+          "n": 3
+        }
+      },
+      "await": false
+    },
+    {
+      "drain": true
+    }
+  ],
+  "then": {
+    "sends": [
+      {
+        "outcome": "committed",
+        "seq": 1,
+        "values": {
+          "n": 1
+        }
+      },
+      {
+        "outcome": "committed",
+        "seq": 2,
+        "values": {
+          "n": 2
+        }
+      },
+      {
+        "outcome": "rejected",
+        "code": "INBOX_OVERFLOW"
+      }
+    ],
+    "telemetry": [
+      {
+        "type": "inbox.rejected",
+        "key": "orders:1",
+        "entity": "orders",
+        "depth": 1,
+        "maxQueued": 1,
+        "overflow": "reject",
+        "trigger": {
+          "type": "go",
+          "id": "t3"
+        }
+      }
+    ],
+    "events": {
+      "orders:1": [
+        {
+          "type": "transition",
+          "from": null,
+          "seq": 0
+        },
+        {
+          "type": "transition",
+          "seq": 1,
+          "values": {
+            "n": 1
+          }
+        },
+        {
+          "type": "transition",
+          "seq": 2,
+          "values": {
+            "n": 2
+          }
+        }
+      ]
+    },
+    "state": {
+      "orders:1": {
+        "seq": 2,
+        "values": {
+          "n": 2
+        }
+      }
+    }
+  }
+}
