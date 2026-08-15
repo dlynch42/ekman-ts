@@ -1,7 +1,9 @@
+import type { RuntimeDeps } from "./config";
 import type { ErrorCode } from "./errors";
 import { EkmanError } from "./errors";
 import type { EkmanEvent, EventCause, TransitionEvent } from "./events";
 import { rejectedEvent, transitionEvent } from "./events";
+import { Inbox } from "./inbox";
 import type { InstanceSnapshot, Values } from "./types";
 
 /**
@@ -25,13 +27,10 @@ export class InstanceRecord<
   readonly #events: EkmanEvent<S, V>[] = [];
 
   /**
-   * Tail of the per-key promise chain. Every trigger for this key links onto it, which
-   * is what keeps exactly one handler running per key and later triggers behind it.
-   *
-   * Always a settled-or-settling promise that never rejects: rejections are delivered to
-   * the caller, not to the chain, so one failure cannot poison the queue behind it.
+   * This key's bounded FIFO inbox: what keeps exactly one handler running per key and
+   * every later trigger behind it.
    */
-  tail: Promise<void> = Promise.resolve();
+  readonly inbox: Inbox;
 
   constructor(args: {
     key: string;
@@ -40,9 +39,18 @@ export class InstanceRecord<
     initialValues: Readonly<V>;
     at: number;
     cause: EventCause;
+    deps: RuntimeDeps;
   }) {
     this.key = args.key;
     this.entity = args.entity;
+    this.inbox = new Inbox({
+      key: args.key,
+      entity: args.entity,
+      deps: args.deps,
+      // An overflow refusal is recorded the same way any other refusal is, so a stream
+      // that has `recordOverflow` on stays uniform.
+      record: (refusal) => this.reject(refusal),
+    });
     this.#state = args.initial;
     this.#values = args.initialValues;
     this.#seq = 0;
@@ -78,19 +86,12 @@ export class InstanceRecord<
     return this.#events;
   }
 
-  /** Whether this instance can be touched by eviction. Inbox depth arrives in a later phase. */
+  /**
+   * Whether this instance can be touched by eviction: no handler running and nothing
+   * waiting behind it.
+   */
   get idle(): boolean {
-    return this.#active === 0;
-  }
-
-  #active = 0;
-
-  markActive(): void {
-    this.#active += 1;
-  }
-
-  markIdle(): void {
-    this.#active -= 1;
+    return this.inbox.idle;
   }
 
   /** The immutable view a handler receives. */

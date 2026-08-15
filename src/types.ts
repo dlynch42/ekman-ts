@@ -1,5 +1,9 @@
 import type { EkmanEvent, TransitionEvent } from "./events";
 import type { HandlerResult } from "./results";
+// Type-only, and so erased: `telemetry.ts` names `OverflowPolicy` from here, and this
+// names `TelemetrySink` from there. Neither import survives compilation, so the cycle
+// exists only for the typechecker, which resolves it fine.
+import type { TelemetrySink } from "./telemetry";
 
 /** An instance's state-local data. Must be serializable. */
 export type Values = Record<string, unknown>;
@@ -192,11 +196,61 @@ export type EntityHandles<D extends readonly AnyEntityDefinition[]> = {
   readonly [K in D[number]["name"]]: HandleFor<Extract<D[number], { name: K }>>;
 };
 
+/**
+ * What to do with a trigger arriving at a full inbox. Never silently discards: every
+ * policy tells the sender, and every policy is visible in telemetry.
+ *
+ * - `reject` refuses the arriving trigger and leaves the queue alone. The default,
+ *   because it is the only one that pushes back on the producer.
+ * - `drop-newest` also refuses the arriving trigger. Identical to `reject` in effect,
+ *   named separately so a config reads as a deliberate shedding choice.
+ * - `drop-oldest` refuses the longest-waiting trigger to make room, which is what you
+ *   want when the freshest trigger carries the most current information.
+ */
+export type OverflowPolicy = "reject" | "drop-newest" | "drop-oldest";
+
+/**
+ * The bounded per-key inbox. One setting for every instance in the runtime.
+ *
+ * Unbounded queues turn overload into silent latency and unbounded memory, so there is
+ * no "unlimited" here on purpose.
+ */
+export interface InboxConfig {
+  /**
+   * How many triggers may wait per key. A count of triggers, not bytes: this is a queue
+   * length, and has nothing to do with the memory budget.
+   *
+   * The trigger currently being handled has already left the queue and does not count
+   * against it, so `maxQueued: 0` means no queuing at all: anything arriving while a
+   * handler runs meets the overflow policy.
+   */
+  readonly maxQueued?: number;
+  /** Defaults to `reject`. */
+  readonly overflow?: OverflowPolicy;
+  /**
+   * Also record overflow in the key's event stream, not only in telemetry.
+   *
+   * Off by default. An overload storm would otherwise grow per-key history without
+   * bound at exactly the moment memory is already the problem. Turn it on when you want
+   * per-key forensics and can afford the writes.
+   */
+  readonly recordOverflow?: boolean;
+}
+
 export interface EkmanConfig<
   D extends readonly AnyEntityDefinition[] = readonly AnyEntityDefinition[],
 > {
   /** Entities available from construction. More can be added with `define()`. */
   readonly entities?: D;
+  /** Bounded per-key inbox settings. */
+  readonly inbox?: InboxConfig;
+  /**
+   * Runtime telemetry: queue depth, drops, handler duration. Keyed by event name, with
+   * `"*"` as the catch-all.
+   *
+   * Separate from the per-key event stream on purpose. Nothing here is domain history.
+   */
+  readonly telemetry?: TelemetrySink;
   /** Time source, in milliseconds. Defaults to `Date.now`. Injected by tests. */
   readonly now?: () => number;
   /**

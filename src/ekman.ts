@@ -1,9 +1,13 @@
+import type { RuntimeDeps } from "./config";
+import { resolveInboxConfig } from "./config";
 import type { DispatchDeps } from "./dispatch";
 import { dispatch } from "./dispatch";
-import { EkmanError } from "./errors";
+import { EkmanError, isEkmanError } from "./errors";
 import type { EkmanEvent } from "./events";
 import { InstanceRecord } from "./instance";
 import { parseKey } from "./key";
+import type { TelemetryEvent } from "./telemetry";
+import { emit, triggerRef } from "./telemetry";
 import type {
   AnyEntityDefinition,
   CommitResult,
@@ -48,12 +52,22 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   readonly #instances = new Map<string, AnyInstance>();
   readonly #now: () => number;
   readonly #onUnhandled: (error: unknown) => void;
+  readonly #runtime: RuntimeDeps;
   readonly #deps: DispatchDeps;
   #triggerSeq = 0;
 
   constructor(config: EkmanConfig<D> = {}) {
     this.#now = config.now ?? Date.now;
     this.#onUnhandled = config.onUnhandled ?? defaultOnUnhandled;
+
+    // Resolved here, at construction, so an unsatisfiable inbox configuration fails at
+    // startup rather than at the first overload.
+    this.#runtime = {
+      now: () => this.#now(),
+      telemetry: config.telemetry,
+      onUnhandled: (error) => this.#onUnhandled(error),
+      inbox: resolveInboxConfig(config.inbox),
+    };
 
     // Handlers get a signal from the first attempt so the context shape never changes.
     // Nothing aborts it yet; timeouts wire into it in a later phase.
@@ -238,6 +252,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       initialValues: definition.initialValues,
       at: this.#now(),
       cause: { type: "init", id: trigger.id as string },
+      deps: this.#runtime,
     });
 
     this.#instances.set(key, instance);
@@ -245,30 +260,91 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   }
 
   /**
-   * Take a turn in this key's serializer chain.
+   * Hand the trigger to this key's inbox, along with the closure that will run it.
    *
-   * The caller's promise carries the real outcome. The chain itself is kept
-   * non-rejecting so one failed trigger cannot poison the triggers queued behind it.
+   * The inbox owns ordering and maxQueued; it knows nothing about entities. This closure
+   * is the only place the two meet.
    */
   #enqueue(
     instance: AnyInstance,
     definition: AnyDefinition,
     trigger: Trigger
   ): Promise<CommitResult> {
-    const turn = instance.tail.then(() => {
-      instance.markActive();
-      return dispatch(instance, definition, trigger, this.#deps).finally(() => {
-        instance.markIdle();
-      });
-    });
+    return instance.inbox.enqueue(trigger, (dequeued, depth) =>
+      this.#run(instance, definition, dequeued, depth)
+    );
+  }
 
-    instance.tail = turn.then(ignore, ignore);
-    return turn as Promise<CommitResult>;
+  /**
+   * Run one dequeued trigger, bracketed by telemetry.
+   *
+   * Duration and attempt count are runtime metadata, so they are measured here and
+   * reported to the telemetry sink. None of it reaches the key's event stream.
+   */
+  async #run(
+    instance: AnyInstance,
+    definition: AnyDefinition,
+    trigger: Trigger,
+    depth: number
+  ): Promise<CommitResult> {
+    const startedAt = this.#now();
+    // Captured before dispatch, because a committed result has already moved it on.
+    const { state, key, entity } = instance;
+    const common = {
+      key,
+      entity,
+      state,
+      attempt: 1,
+      trigger: triggerRef(trigger),
+    };
+
+    this.#emit({ type: "handler.started", ...common, depth, at: startedAt });
+
+    try {
+      const result = await dispatch(instance, definition, trigger, this.#deps);
+      this.#settled(common, startedAt, "committed");
+      return result;
+    } catch (error) {
+      this.#settled(common, startedAt, outcomeOf(error));
+      throw error;
+    }
+  }
+
+  #settled(
+    common: {
+      key: string;
+      entity: string;
+      state: string;
+      attempt: number;
+      trigger: { type: string; id: string };
+    },
+    startedAt: number,
+    outcome: "committed" | "failed" | "refused"
+  ): void {
+    const at = this.#now();
+    this.#emit({
+      type: "handler.settled",
+      ...common,
+      durationMs: at - startedAt,
+      outcome,
+      at,
+    });
+  }
+
+  #emit(event: TelemetryEvent): void {
+    emit(this.#runtime.telemetry, event, this.#onUnhandled);
   }
 }
 
-function ignore(): void {
-  // The tail chain only sequences turns. Outcomes belong to the caller's promise.
+/**
+ * A trigger that never reached a handler was refused, not failed. The distinction is
+ * what lets an operator separate "the domain rejected this" from "the handler broke".
+ */
+function outcomeOf(error: unknown): "failed" | "refused" {
+  return isEkmanError(error) &&
+    (error.code === "UNKNOWN_STATE" || error.code === "UNKNOWN_TRIGGER")
+    ? "refused"
+    : "failed";
 }
 
 function defaultOnUnhandled(error: unknown): void {

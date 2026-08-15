@@ -16,6 +16,10 @@ export const ERROR_CODES = [
   "UNKNOWN_TRIGGER",
   /** The handler produced `fail`, or threw. */
   "HANDLER_FAILED",
+  /** The inbox was full and the overflow policy is `reject`. */
+  "INBOX_OVERFLOW",
+  /** The inbox was full and an overflow policy dropped this trigger. */
+  "TRIGGER_DROPPED",
   /** Two entities were registered under one name. */
   "DUPLICATE_ENTITY",
   /** Two handlers were declared for one state. */
@@ -24,6 +28,8 @@ export const ERROR_CODES = [
   "MISSING_INITIAL_STATE",
   /** The declared initial state has no handler. */
   "INITIAL_STATE_NOT_IN_STATES",
+  /** Configuration is recognized but not satisfiable, and is refused rather than adjusted. */
+  "INVALID_CONFIG",
   /** Configuration is recognized but not implemented yet. Never silently ignored. */
   "NOT_IMPLEMENTED",
 ] as const;
