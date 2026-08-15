@@ -91,17 +91,24 @@ export interface EntityConfig<
   /**
    * Exactly one handler per state. Exhaustive over `S`.
    *
-   * `NoInfer` on the handler's own state parameter matters: without it `S` appears in
-   * both the key and the value position of this mapped type, TypeScript cannot resolve
-   * the circularity, and the state union silently widens to `string`. Blocking
-   * inference in the value position leaves the keys as the single source of `S`.
+   * Every type parameter is wrapped in `NoInfer`, and each one earns it:
+   *
+   * - `S`: without it `S` sits in both the key and the value position of this mapped
+   *   type, TypeScript cannot resolve the circularity, and the state union widens to
+   *   `string`. Blocking the value position leaves the keys as the sole source.
+   * - `V`: a handler returning `stay()` with no arguments offers `never` as a candidate,
+   *   so an entity whose handlers all omit values would infer `V` as `never` and give
+   *   its handlers an unusable `instance.values`. Values come from `values` alone.
+   * - `T`: an unannotated handler parameter offers the bare constraint, which has no
+   *   index signature, so `trigger.actor` would not compile. Blocking it lets the
+   *   default apply instead.
    */
-  readonly states: { readonly [K in S]: Handler<NoInfer<S>, V, T> }
+  readonly states: { readonly [K in S]: Handler<NoInfer<S>, NoInfer<V>, NoInfer<T>> }
   /**
    * Handlers keyed by error classification, with `"*"` as the fallback. Classification
    * is `error.name` unless `classify` says otherwise.
    */
-  readonly onError?: Readonly<Record<string, ErrorHandler<S, V>>>
+  readonly onError?: Readonly<Record<string, ErrorHandler<NoInfer<S>, NoInfer<V>>>>
   readonly classify?: (error: Error) => string
   /**
    * Not implemented yet. Setting it throws `NOT_IMPLEMENTED` rather than being quietly

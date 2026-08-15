@@ -91,7 +91,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    */
   async send<S extends string = string, V extends Values = Values>(
     key: string,
-    trigger: TriggerLike,
+    trigger: Trigger,
   ): Promise<CommitResult<S, V>> {
     const parsed = parseKey(key)
     const definition = this.#definitions.get(parsed.entity)
@@ -117,7 +117,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * A failure here has no caller to reject, so it goes to `onUnhandled` rather than
    * disappearing. Silence is the one thing this runtime should never do.
    */
-  post(key: string, trigger: TriggerLike): void {
+  post(key: string, trigger: Trigger): void {
     void this.send(key, trigger).catch(this.#onUnhandled)
   }
 
@@ -165,8 +165,8 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     return Object.freeze({
       name: definition.name,
       key: (id: string) => definition.key(id),
-      send: (id: string, trigger: TriggerLike) => this.send(definition.key(id), trigger),
-      post: (id: string, trigger: TriggerLike) => this.post(definition.key(id), trigger),
+      send: (id: string, trigger: Trigger) => this.send(definition.key(id), trigger),
+      post: (id: string, trigger: Trigger) => this.post(definition.key(id), trigger),
       inspect: (id: string) => this.inspect(definition.key(id)),
       history: (id: string) => this.history(definition.key(id)),
     }) as EntityHandle
@@ -177,7 +177,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * assigned from a per-runtime counter when the caller does not supply one, which keeps
    * event causes deterministic.
    */
-  #normalizeTrigger(trigger: TriggerLike, key: string): Trigger {
+  #normalizeTrigger(trigger: Trigger, key: string): Trigger {
     if (typeof trigger !== "object" || trigger === null) {
       throw new EkmanError(
         "UNKNOWN_TRIGGER",
