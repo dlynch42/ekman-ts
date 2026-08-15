@@ -1,10 +1,12 @@
 import { EkmanError } from "./errors";
 import { buildKey } from "./key";
+import type { ExecutionPolicy } from "./policy";
 import type {
   EntityConfig,
   EntityDefinition,
   ErrorHandler,
-  Handler,
+  StateConfig,
+  StateEntry,
   Trigger,
   TriggerLike,
   Values,
@@ -45,8 +47,10 @@ export function defineEntity<
     );
   }
 
-  const states = new Map<string, Handler<S, V, T>>(
-    Object.entries(config.states) as [string, Handler<S, V, T>][]
+  const states = new Map<string, StateEntry<S, V, T>>(
+    (Object.entries(config.states) as [string, StateConfig<S, V, T>][]).map(
+      ([state, declared]) => [state, toStateEntry(declared, config.policy)]
+    )
   );
 
   if (states.size === 0) {
@@ -105,6 +109,30 @@ export function defineEntity<
   });
 }
 
+/**
+ * Normalize the two ways a state may be declared into one shape.
+ *
+ * A bare handler inherits the entity's policy. An object form layers its own fields over
+ * the entity's, field by field, so declaring only `timeoutMs` on a state does not discard
+ * the entity's `maxAttempts`. The runtime's default is layered under both, later, because
+ * a definition is runtime-free and cannot see it.
+ */
+function toStateEntry<
+  S extends string,
+  V extends Values,
+  T extends TriggerLike,
+>(
+  declared: StateConfig<S, V, T>,
+  entityPolicy: ExecutionPolicy | undefined
+): StateEntry<S, V, T> {
+  if (typeof declared === "function") {
+    return { handler: declared, policy: entityPolicy };
+  }
+
+  const { handler, ...override } = declared;
+  return { handler, policy: { ...entityPolicy, ...override } };
+}
+
 /** Classification basis for `onError` lookup. */
 function defaultClassify(error: Error): string {
   return error.name;
@@ -141,19 +169,19 @@ export function statesFromEntries<
   T extends TriggerLike,
 >(
   entityName: string,
-  entries: Iterable<readonly [S, Handler<S, V, T>]>
-): { readonly [K in S]: Handler<S, V, T> } {
-  const out = {} as Record<string, Handler<S, V, T>>;
-  for (const [state, handler] of entries) {
+  entries: Iterable<readonly [S, StateConfig<S, V, T>]>
+): { readonly [K in S]: StateConfig<S, V, T> } {
+  const out = {} as Record<string, StateConfig<S, V, T>>;
+  for (const [state, declared] of entries) {
     if (Object.hasOwn(out, state)) {
       throw new EkmanError(
         "DUPLICATE_STATE_HANDLER",
         `entity "${entityName}" declares more than one handler for state "${state}"`
       );
     }
-    out[state] = handler;
+    out[state] = declared;
   }
-  return out as { readonly [K in S]: Handler<S, V, T> };
+  return out as { readonly [K in S]: StateConfig<S, V, T> };
 }
 
 /**

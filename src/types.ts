@@ -1,4 +1,5 @@
 import type { EkmanEvent, TransitionEvent } from "./events";
+import type { ExecutionPolicy } from "./policy";
 import type { HandlerResult } from "./results";
 // Type-only, and so erased: `telemetry.ts` names `OverflowPolicy` from here, and this
 // names `TelemetrySink` from there. Neither import survives compilation, so the cycle
@@ -72,6 +73,54 @@ export type ErrorHandler<
 ) => HandlerResult<S, V> | Promise<HandlerResult<S, V>>;
 
 /**
+ * A state's handler plus an execution policy that overrides the entity's and the
+ * runtime's for this state alone.
+ *
+ * Written inline where the handler is declared, because how a piece of work is retried
+ * and how long it may take belong with the work itself:
+ *
+ * ```ts
+ * states: {
+ *   pending: handlePending,
+ *   shipping: {
+ *     handler: callTheCarrier,
+ *     maxAttempts: 5,
+ *     timeoutMs: 30_000,
+ *     backoff: { kind: "exponential", baseMs: 50 },
+ *   },
+ * }
+ * ```
+ *
+ * Adding this union member is safe for inference only because every type parameter in
+ * the `states` value position is wrapped in `NoInfer`. The value side contributes no
+ * inference candidates, so `S` still comes from the keys alone and cannot widen.
+ */
+export interface StatePolicyConfig<
+  S extends string = string,
+  V extends Values = Values,
+  T extends TriggerLike = Trigger,
+> extends ExecutionPolicy {
+  readonly handler: Handler<S, V, T>;
+}
+
+export type StateConfig<
+  S extends string = string,
+  V extends Values = Values,
+  T extends TriggerLike = Trigger,
+> = Handler<S, V, T> | StatePolicyConfig<S, V, T>;
+
+/** One state's handler with its policy already layered and resolved. */
+export interface StateEntry<
+  S extends string = string,
+  V extends Values = Values,
+  T extends TriggerLike = Trigger,
+> {
+  readonly handler: Handler<S, V, T>;
+  /** The entity-level policy with this state's override applied. Still unresolved. */
+  readonly policy: ExecutionPolicy | undefined;
+}
+
+/**
  * What to do with a trigger nothing handles. Never silently discards.
  *
  * `reject` refuses the trigger, records the refusal in the key's event stream, and
@@ -114,8 +163,13 @@ export interface EntityConfig<
    *   default apply instead.
    */
   readonly states: {
-    readonly [K in S]: Handler<NoInfer<S>, NoInfer<V>, NoInfer<T>>;
+    readonly [K in S]: StateConfig<NoInfer<S>, NoInfer<V>, NoInfer<T>>;
   };
+  /**
+   * Execution policy for every state of this entity, layered over the runtime's own
+   * default and under any per-state override.
+   */
+  readonly policy?: ExecutionPolicy;
   /**
    * Handlers keyed by error classification, with `"*"` as the fallback. Classification
    * is `error.name` unless `classify` says otherwise.
@@ -144,7 +198,7 @@ export interface EntityDefinition<
   readonly unknownPolicy: UnknownPolicy;
   /** Null means every trigger type is recognized. */
   readonly triggers: ReadonlySet<string> | null;
-  readonly states: ReadonlyMap<string, Handler<S, V, T>>;
+  readonly states: ReadonlyMap<string, StateEntry<S, V, T>>;
   readonly errorHandlers: ReadonlyMap<string, ErrorHandler<S, V>>;
   readonly classify: (error: Error) => string;
   /** Build a full key from an id, without needing a runtime. */
@@ -243,6 +297,15 @@ export interface EkmanConfig<
   readonly entities?: D;
   /** Bounded per-key inbox settings. */
   readonly inbox?: InboxConfig;
+  /**
+   * Default execution policy for every handler in the runtime: attempts, timeout, and
+   * backoff.
+   *
+   * An entity may override it with `policy`, and a single state may override that again
+   * inline in `states`. Layered field by field, so a narrower override that sets only
+   * `timeoutMs` keeps the wider `maxAttempts`.
+   */
+  readonly execution?: ExecutionPolicy;
   /**
    * Runtime telemetry: queue depth, drops, handler duration. Keyed by event name, with
    * `"*"` as the catch-all.

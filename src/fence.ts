@@ -71,8 +71,22 @@ export function fenceViolation(
   if (token.seq !== current.seq) {
     return `commit token for ${token.key} observed sequence ${token.seq}, but the instance is now at ${current.seq}`;
   }
+}
 
-  return;
+/**
+ * Why a refused commit was refused, in the vocabulary telemetry reports.
+ *
+ * A token that was explicitly invalidated names its own reason. One still nominally
+ * valid but whose sequence has moved was overtaken by another commit, which is
+ * supersession arriving by a different route.
+ *
+ * A standalone function because the second case cannot be produced through the public
+ * API on a serialized key: nothing else can commit while an attempt holds the key. It is
+ * reachable through a store or another runtime in later phases, so the branch is real
+ * and is tested here directly rather than left to rot inside a call site.
+ */
+export function fenceReason(token: CommitToken): FenceReason {
+  return token.invalidatedBy ?? "superseded";
 }
 
 export function assertCommittable(

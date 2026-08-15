@@ -3,6 +3,7 @@ import type { ErrorCode } from "./errors";
 import { EkmanError } from "./errors";
 import type { EkmanEvent, EventCause, TransitionEvent } from "./events";
 import { rejectedEvent, transitionEvent } from "./events";
+import { assertCommittable, CommitToken, fenceViolation } from "./fence";
 import { Inbox } from "./inbox";
 import type { InstanceSnapshot, Values } from "./types";
 
@@ -106,15 +107,42 @@ export class InstanceRecord<
   }
 
   /**
+   * Issue a commit token for an attempt, bound to this key and to the sequence the
+   * attempt is about to observe.
+   *
+   * Every attempt gets its own. A token is the only thing that authorizes a commit, so
+   * an attempt that has been timed out, superseded, or evicted holds a worthless one.
+   */
+  issueToken(attempt: number): CommitToken {
+    return new CommitToken({ key: this.key, seq: this.#seq, attempt });
+  }
+
+  /** Whether this token still authorizes a commit against the instance as it stands. */
+  committable(token: CommitToken): boolean {
+    return (
+      fenceViolation(token, { key: this.key, seq: this.#seq }) === undefined
+    );
+  }
+
+  /**
    * Apply a handler result. Advances the sequence exactly once and appends exactly one
    * transition event.
+   *
+   * The fence is checked here, before anything is mutated, because this is the single
+   * point every committed result in the runtime passes through. A check anywhere else is
+   * one somebody can forget to make.
    */
-  commit(next: {
-    state: S;
-    values: Readonly<V>;
-    at: number;
-    cause: EventCause;
-  }): TransitionEvent<S, V> {
+  commit(
+    next: {
+      state: S;
+      values: Readonly<V>;
+      at: number;
+      cause: EventCause;
+    },
+    token: CommitToken
+  ): TransitionEvent<S, V> {
+    assertCommittable(token, { key: this.key, seq: this.#seq });
+
     const event = transitionEvent<S, V>({
       key: this.key,
       from: this.#state,

@@ -2,12 +2,12 @@ import type { RuntimeDeps } from "./config";
 import { resolveInboxConfig } from "./config";
 import type { DispatchDeps } from "./dispatch";
 import { dispatch } from "./dispatch";
-import { EkmanError, isEkmanError } from "./errors";
+import { EkmanError } from "./errors";
 import type { EkmanEvent } from "./events";
 import { InstanceRecord } from "./instance";
 import { parseKey } from "./key";
 import type { TelemetryEvent } from "./telemetry";
-import { emit, telemetryNow, triggerRef } from "./telemetry";
+import { emit } from "./telemetry";
 import type {
   AnyEntityDefinition,
   CommitResult,
@@ -69,11 +69,10 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       inbox: resolveInboxConfig(config.inbox),
     };
 
-    // Handlers get a signal from the first attempt so the context shape never changes.
-    // Nothing aborts it yet; timeouts wire into it in a later phase.
     this.#deps = {
       now: () => this.#now(),
-      signal: new AbortController().signal,
+      policy: config.execution,
+      emit: (event) => this.#emit(event),
     };
 
     const handles: Record<string, EntityHandle> = {};
@@ -276,77 +275,24 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   }
 
   /**
-   * Run one dequeued trigger, bracketed by telemetry.
+   * Run one dequeued trigger.
    *
-   * Duration and attempt count are runtime metadata, so they are measured here and
-   * reported to the telemetry sink. None of it reaches the key's event stream.
+   * Thin on purpose. The attempt lifecycle telemetry is emitted by `dispatch`, which is
+   * the layer that owns the attempt loop and therefore the only one that knows which
+   * attempt started, retried, or settled the trigger.
    */
-  async #run(
+  #run(
     instance: AnyInstance,
     definition: AnyDefinition,
     trigger: Trigger,
     depth: number
   ): Promise<CommitResult> {
-    // Wall clock, not the injected one: duration is telemetry, and the injected clock
-    // belongs to the domain event stream.
-    const startedAt = telemetryNow();
-    // Captured before dispatch, because a committed result has already moved it on.
-    const { state, key, entity } = instance;
-    const common = {
-      key,
-      entity,
-      state,
-      attempt: 1,
-      trigger: triggerRef(trigger),
-    };
-
-    this.#emit({ type: "handler.started", ...common, depth, at: startedAt });
-
-    try {
-      const result = await dispatch(instance, definition, trigger, this.#deps);
-      this.#settled(common, startedAt, "committed");
-      return result;
-    } catch (error) {
-      this.#settled(common, startedAt, outcomeOf(error));
-      throw error;
-    }
-  }
-
-  #settled(
-    common: {
-      key: string;
-      entity: string;
-      state: string;
-      attempt: number;
-      trigger: { type: string; id: string };
-    },
-    startedAt: number,
-    outcome: "committed" | "failed" | "refused"
-  ): void {
-    const at = telemetryNow();
-    this.#emit({
-      type: "handler.settled",
-      ...common,
-      durationMs: at - startedAt,
-      outcome,
-      at,
-    });
+    return dispatch(instance, definition, trigger, this.#deps, depth);
   }
 
   #emit(event: TelemetryEvent): void {
     emit(this.#runtime.telemetry, event, this.#onUnhandled);
   }
-}
-
-/**
- * A trigger that never reached a handler was refused, not failed. The distinction is
- * what lets an operator separate "the domain rejected this" from "the handler broke".
- */
-function outcomeOf(error: unknown): "failed" | "refused" {
-  return isEkmanError(error) &&
-    (error.code === "UNKNOWN_STATE" || error.code === "UNKNOWN_TRIGGER")
-    ? "refused"
-    : "failed";
 }
 
 function defaultOnUnhandled(error: unknown): void {
