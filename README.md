@@ -76,6 +76,12 @@ Constraints (transition graphs, guards, invariants, time-in-state bounds) are op
 
 A time-in-state bound fires as a *trigger*, never as a write. The runtime hands your handler the escalation and your handler decides, exactly as with any other input, which keeps every state change attributable to one piece of your code. Evaluate on your own schedule with `temporal: { sweepMs }`, or call `await ekman.sweep()` yourself.
 
+```
+npm run demo:no-going-backwards   # a redelivered message tries to rewind an order
+```
+
+That one is worth running. Queues redeliver, and a handler written to "just apply the message" will happily walk a shipped order back to `paid` without anything failing. The same naive handler runs three times: unconstrained, in `warn`, and in `reject`.
+
 The inbox is bounded in **triggers, not bytes**: `capacity` is how many triggers may wait behind the one being handled, and is unrelated to `memory`, which is the byte budget. A `capacity` of 0 means one at a time with no backlog. When it fills, the overflow policy decides, and the sender always finds out. `reject` is backpressure (`INBOX_OVERFLOW`, the trigger did not land); `drop-newest` and `drop-oldest` are shedding (`TRIGGER_DROPPED`, the trigger is gone on purpose). Overflow is always visible in telemetry, and never in the transition history unless you ask for it with `recordOverflow`.
 
 Retries, timeouts, and backoff are the runtime's job, not your handler's. Configure them once on the runtime, override them per entity or per state, and write handlers that do the work and nothing else. During retries the key stays occupied, so a queued trigger can never slip past an attempt in flight.

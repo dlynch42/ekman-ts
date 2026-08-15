@@ -41,6 +41,7 @@
     "test:coverage": "vitest run --coverage",
     "conformance": "tsx runner/cli.ts",
     "demo:recovery": "tsx demos/recovery.ts",
+    "demo:no-going-backwards": "tsx demos/no-going-backwards.ts",
     "demo:memory-bound": "tsx demos/memory-bound.ts",
     "lint": "ultracite check",
     "format": "ultracite fix"
