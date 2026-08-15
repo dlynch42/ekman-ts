@@ -1,0 +1,69 @@
+/**
+ * Stable error codes. These strings are part of the public contract and are shared
+ * verbatim with every other Ekman implementation, so the conformance suite can assert
+ * on them without asserting on human-readable messages.
+ *
+ * Adding a code is additive. Renaming or removing one is a breaking change.
+ */
+export const ERROR_CODES = [
+  /** The key is malformed. */
+  "INVALID_KEY",
+  /** The key's first segment names no registered entity. */
+  "UNKNOWN_ENTITY",
+  /** The current state has no handler and the unknown policy is `reject`. */
+  "UNKNOWN_STATE",
+  /** The trigger's type is not in the entity's declared trigger list. */
+  "UNKNOWN_TRIGGER",
+  /** The handler produced `fail`, or threw. */
+  "HANDLER_FAILED",
+  /** Two entities were registered under one name. */
+  "DUPLICATE_ENTITY",
+  /** Two handlers were declared for one state. */
+  "DUPLICATE_STATE_HANDLER",
+  /** The entity declared no initial state. */
+  "MISSING_INITIAL_STATE",
+  /** The declared initial state has no handler. */
+  "INITIAL_STATE_NOT_IN_STATES",
+  /** Configuration is recognized but not implemented yet. Never silently ignored. */
+  "NOT_IMPLEMENTED",
+] as const
+
+export type ErrorCode = (typeof ERROR_CODES)[number]
+
+export interface EkmanErrorOptions {
+  /** The instance key this error concerns, when it concerns one. */
+  key?: string
+  /** The underlying error, when this one wraps another. */
+  cause?: unknown
+}
+
+/**
+ * Every error Ekman raises. Always carries a stable `code`; callers should branch on
+ * that rather than on the message.
+ */
+export class EkmanError extends Error {
+  override readonly name = "EkmanError"
+  readonly code: ErrorCode
+  /**
+   * `declare` on purpose: under `useDefineForClassFields` a plain optional field is
+   * defined as `undefined` on every instance, which would put a dead `key` on errors
+   * that have none and dirty up spreads and JSON. Declaring it emits no field, so the
+   * property exists only when the constructor actually assigns it.
+   */
+  declare readonly key?: string
+
+  constructor(code: ErrorCode, message: string, options: EkmanErrorOptions = {}) {
+    super(message, "cause" in options ? { cause: options.cause } : undefined)
+    this.code = code
+    if (options.key !== undefined) this.key = options.key
+    // `name` is a class field, so it is assigned after super() and after Error's own
+    // stack capture. Re-capture so the stack header reads "EkmanError", not "Error".
+    if (Error.captureStackTrace) Error.captureStackTrace(this, EkmanError)
+    else this.stack = `${this.name}: ${message}\n${this.stack ?? ""}`
+  }
+}
+
+/** Narrowing helper for callers that catch broadly. */
+export function isEkmanError(value: unknown): value is EkmanError {
+  return value instanceof EkmanError
+}
