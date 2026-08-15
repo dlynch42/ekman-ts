@@ -1,0 +1,58 @@
+{
+  "name": "ekman",
+  "version": "0.0.1",
+  "description": "Declarative, embeddable state management for backend services. A runtime you embed, not a platform you operate.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "state-machine",
+    "actor",
+    "virtual-actor",
+    "stateful",
+    "entity",
+    "embedded",
+    "workflow"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "conformance": "tsx runner/cli.ts",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.14.0",
+    "@types/node": "^22.9.0",
+    "@vitest/coverage-v8": "^4.1.10",
+    "eslint": "^9.14.0",
+    "prettier": "^3.3.3",
+    "tsup": "^8.3.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "typescript-eslint": "^8.13.0",
+    "vitest": "^4.1.10"
+  }
+}

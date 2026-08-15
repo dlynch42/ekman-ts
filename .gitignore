@@ -1,6 +1,8 @@
 # Internal design docs
 SPEC.md
 DESIGN.md
+IMPLEMENTATION.md
+DECISIONS.md
 
 # Agent instructions
 CLAUDE.md
