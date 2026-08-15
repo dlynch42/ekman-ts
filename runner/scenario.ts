@@ -26,7 +26,7 @@ export interface Given {
 }
 
 export interface InboxSpec {
-  readonly maxQueued?: number;
+  readonly capacity?: number;
   readonly overflow?: "reject" | "drop-newest" | "drop-oldest";
   readonly recordOverflow?: boolean;
 }

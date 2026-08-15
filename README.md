@@ -42,7 +42,7 @@ export const deployments = defineEntity("deployments", {
 export const ekman = new Ekman({
   entities: [deployments],
   memory:   { maxBytes: 32 * MB, eviction: { policy: "lru", snapshotOnEvict: true } },
-  inbox:    { maxQueued: 128, overflow: "reject" },   // triggers waiting per key
+  inbox:    { capacity: 128, overflow: "reject" },   // 128 triggers waiting per key, not bytes
   store:    [memoryStore(), redisStore(url), postgresStore(dsn)],
   audit:    [kafkaSink("state-transitions")],
   telemetry: {
@@ -62,7 +62,7 @@ ekman.history("deployments:abc123")
 
 Every instance gets a human-readable key, its own state and values, a bounded inbox that serializes its triggers, and an append-only transition history. Unknown states and triggers fail loudly. Constraints (transition graphs, guards, invariants, time-in-state bounds) are opt-in, each with a `reject` / `warn` / `off` dial.
 
-The inbox is bounded in triggers, not bytes: `maxQueued` is how many triggers may wait behind the one being handled. When it fills, the overflow policy decides, and the sender always finds out. `reject` is backpressure (`INBOX_OVERFLOW`, the trigger did not land); `drop-newest` and `drop-oldest` are shedding (`TRIGGER_DROPPED`, the trigger is gone on purpose). Overflow is always visible in telemetry, and never in the transition history unless you ask for it with `recordOverflow`.
+The inbox is bounded in **triggers, not bytes**: `capacity` is how many triggers may wait behind the one being handled, and is unrelated to `memory`, which is the byte budget. A `capacity` of 0 means one at a time with no backlog. When it fills, the overflow policy decides, and the sender always finds out. `reject` is backpressure (`INBOX_OVERFLOW`, the trigger did not land); `drop-newest` and `drop-oldest` are shedding (`TRIGGER_DROPPED`, the trigger is gone on purpose). Overflow is always visible in telemetry, and never in the transition history unless you ask for it with `recordOverflow`.
 
 Telemetry is a separate stream from history, by design. Queue depth, handler duration, drops, and retries are Ekman's business; your transition history stays domain-only. Handlers are keyed by event name with `"*"` as the catch-all, so there is no event union to narrow.
 

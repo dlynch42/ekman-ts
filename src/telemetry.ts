@@ -1,6 +1,6 @@
 /**
- * Runtime telemetry: queue depth, drops, handler duration, and later retries, timeouts
- * and fenced commits.
+ * Runtime telemetry: queue depth, drops, handler duration, retries, timeouts, and
+ * fenced commits.
  *
  * This is deliberately a different stream from the per-key event stream. That one is the
  * domain's: transitions, refusals, and violations, ordered per key and replayable.
@@ -9,6 +9,7 @@
  * The `type` strings are the cross-implementation contract. Every port emits these names
  * with these fields; how a port lets you subscribe is its own business.
  */
+import type { FenceReason } from "./fence";
 import type { OverflowPolicy } from "./types";
 
 /** The `"*"` key: receives any event no named handler claimed. */
@@ -31,7 +32,7 @@ export interface TriggerRef {
 export interface InboxEnqueuedEvent extends TelemetryBase {
   readonly type: "inbox.enqueued";
   readonly depth: number;
-  readonly maxQueued: number;
+  readonly capacity: number;
   readonly trigger: TriggerRef;
 }
 
@@ -39,7 +40,7 @@ export interface InboxEnqueuedEvent extends TelemetryBase {
 export interface InboxRejectedEvent extends TelemetryBase {
   readonly type: "inbox.rejected";
   readonly depth: number;
-  readonly maxQueued: number;
+  readonly capacity: number;
   readonly overflow: OverflowPolicy;
   readonly trigger: TriggerRef;
 }
@@ -55,7 +56,7 @@ export interface InboxDroppedEvent extends TelemetryBase {
   readonly type: "inbox.dropped";
   readonly dropped: "newest" | "oldest";
   readonly depth: number;
-  readonly maxQueued: number;
+  readonly capacity: number;
   readonly overflow: OverflowPolicy;
   readonly trigger: TriggerRef;
 }
@@ -84,12 +85,57 @@ export interface HandlerSettledEvent extends TelemetryBase {
   readonly trigger: TriggerRef;
 }
 
+/** An attempt failed and another will be made. `delayMs` is the wait before it. */
+export interface HandlerRetriedEvent extends TelemetryBase {
+  readonly type: "handler.retried";
+  readonly state: string;
+  readonly attempt: number;
+  readonly maxAttempts: number;
+  readonly delayMs: number;
+  readonly error: string;
+  readonly trigger: TriggerRef;
+}
+
+/**
+ * An attempt ran past its timeout and was abandoned.
+ *
+ * The handler itself may still be running: this says the runtime stopped waiting and
+ * fenced the attempt, not that the function stopped executing.
+ */
+export interface HandlerTimedOutEvent extends TelemetryBase {
+  readonly type: "handler.timedOut";
+  readonly state: string;
+  readonly attempt: number;
+  readonly timeoutMs: number;
+  readonly trigger: TriggerRef;
+}
+
+/**
+ * A superseded attempt finished and tried to commit. Its result was discarded.
+ *
+ * This is the fence doing its job, and seeing it is normal in a system with timeouts. A
+ * sustained rate of it means handlers are outliving their timeouts.
+ */
+export interface CommitFencedEvent extends TelemetryBase {
+  readonly type: "commit.fenced";
+  readonly attempt: number;
+  readonly reason: FenceReason;
+  /** The sequence the fenced attempt observed when it was dispatched. */
+  readonly tokenSeq: number;
+  /** Where the instance actually is now. */
+  readonly currentSeq: number;
+  readonly trigger: TriggerRef;
+}
+
 export type TelemetryEvent =
   | InboxEnqueuedEvent
   | InboxRejectedEvent
   | InboxDroppedEvent
   | HandlerStartedEvent
-  | HandlerSettledEvent;
+  | HandlerSettledEvent
+  | HandlerRetriedEvent
+  | HandlerTimedOutEvent
+  | CommitFencedEvent;
 
 export type TelemetryEventType = TelemetryEvent["type"];
 
@@ -108,11 +154,13 @@ export type TelemetryEventType = TelemetryEvent["type"];
  * }
  * ```
  *
+ * A handler is any function that accepts its event, so a plain reference works and the
+ * arrow is only needed when the event has to be reshaped into someone else's arguments:
+ *
  * ```ts
  * telemetry: {
- *   "inbox.dropped":   metrics.inc("ekman.inbox.dropped", { which: e.dropped }),
- *   "handler.settled": metrics.observe("ekman.handler.ms", e.durationMs),
- *   "*":               log.debug(e.type, e.key),
+ *   "handler.settled": recordHandlerDuration,   // (e: HandlerSettledEvent) => void
+ *   "*":               console.log,
  * }
  * ```
  */

@@ -6,7 +6,7 @@
   "given": {
     "runtime": {
       "inbox": {
-        "maxQueued": 1,
+        "capacity": 1,
         "overflow": "drop-oldest"
       }
     },
@@ -92,7 +92,7 @@
         "type": "inbox.dropped",
         "key": "orders:1",
         "dropped": "oldest",
-        "maxQueued": 1,
+        "capacity": 1,
         "overflow": "drop-oldest",
         "trigger": {
           "type": "go",

@@ -77,7 +77,7 @@ describe("Inbox", () => {
   });
 
   it("queues behind an active handler instead of running concurrently", async () => {
-    const { inbox } = make({ maxQueued: 4 });
+    const { inbox } = make({ capacity: 4 });
     const held = gate();
 
     const first = inbox.enqueue(trigger("t1"), held.run);
@@ -90,10 +90,10 @@ describe("Inbox", () => {
     await first;
   });
 
-  it("admits a trigger that can start immediately even at maxQueued zero", async () => {
+  it("admits a trigger that can start immediately even at capacity zero", async () => {
     // The one in flight has left the queue, so it is not measured against a limit on
-    // waiting. Otherwise `maxQueued: 0` would refuse everything, including the first.
-    const { inbox } = make({ maxQueued: 0 });
+    // waiting. Otherwise `capacity: 0` would refuse everything, including the first.
+    const { inbox } = make({ capacity: 0 });
     const held = gate();
 
     const settled = inbox.enqueue(trigger("t1"), held.run);
@@ -104,7 +104,7 @@ describe("Inbox", () => {
   });
 
   it("rejects an arriving trigger when full, leaving the queue intact", async () => {
-    const { inbox, telemetry } = make({ maxQueued: 1, overflow: "reject" });
+    const { inbox, telemetry } = make({ capacity: 1, overflow: "reject" });
     const held = gate();
 
     const first = inbox.enqueue(trigger("t1"), held.run);
@@ -125,7 +125,7 @@ describe("Inbox", () => {
 
   it("drop-newest refuses the arriving trigger", async () => {
     const { inbox, telemetry } = make({
-      maxQueued: 1,
+      capacity: 1,
       overflow: "drop-newest",
     });
     const held = gate();
@@ -143,7 +143,7 @@ describe("Inbox", () => {
 
   it("drop-oldest refuses the longest-waiting trigger and admits the newcomer", async () => {
     const { inbox, telemetry } = make({
-      maxQueued: 1,
+      capacity: 1,
       overflow: "drop-oldest",
     });
     const held = gate();
@@ -167,7 +167,7 @@ describe("Inbox", () => {
 
   it("drop-oldest with nothing waiting has only the newcomer to drop", async () => {
     const { inbox, telemetry } = make({
-      maxQueued: 0,
+      capacity: 0,
       overflow: "drop-oldest",
     });
     const held = gate();
@@ -192,8 +192,8 @@ describe("Inbox", () => {
     };
 
     const [off, on] = await Promise.all([
-      overflowOnce({ maxQueued: 0 }),
-      overflowOnce({ maxQueued: 0, recordOverflow: true }),
+      overflowOnce({ capacity: 0 }),
+      overflowOnce({ capacity: 0, recordOverflow: true }),
     ]);
 
     // Off by default: an overload storm must not grow the per-key stream.
@@ -203,7 +203,7 @@ describe("Inbox", () => {
   });
 
   it("keeps draining after a trigger fails, so one failure cannot poison the queue", async () => {
-    const { inbox } = make({ maxQueued: 4 });
+    const { inbox } = make({ capacity: 4 });
     const boom = new Error("handler blew up");
 
     const failing = inbox.enqueue(trigger("t1"), () => Promise.reject(boom));
@@ -217,7 +217,7 @@ describe("Inbox", () => {
   });
 
   it("reports the depth still waiting behind the trigger it starts", async () => {
-    const { inbox } = make({ maxQueued: 4 });
+    const { inbox } = make({ capacity: 4 });
     const depths: number[] = [];
     const run = (_t: Trigger, depth: number) => {
       depths.push(depth);

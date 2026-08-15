@@ -63,8 +63,8 @@
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "maxQueued": {
-                  "description": "How many triggers may wait per key. A count of triggers, not bytes. The one being handled has already left the queue and does not count against it.",
+                "capacity": {
+                  "description": "How many triggers may wait per key. A queue length in triggers, never a size in bytes. The one being handled has already left the queue and does not count against it.",
                   "type": "integer",
                   "minimum": 0
                 },

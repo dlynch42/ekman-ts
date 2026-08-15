@@ -19,7 +19,7 @@
 
 // biome-ignore-all lint/performance/noBarrelFile: this is the package entry point declared in `exports`, so one public surface is the point. File-scoped rather than line-scoped because the rule reports on whichever export sorts second, which moves as the surface grows.
 export type { ResolvedInboxConfig } from "./config";
-export { DEFAULT_MAX_QUEUED, OVERFLOW_POLICIES } from "./config";
+export { DEFAULT_CAPACITY, OVERFLOW_POLICIES } from "./config";
 export { Ekman } from "./ekman";
 export { defineEntity, statesFromEntries } from "./entity";
 export type { EkmanErrorOptions, ErrorCode } from "./errors";

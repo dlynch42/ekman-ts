@@ -13,7 +13,7 @@ const dropped: TelemetryEvent = {
   entity: "orders",
   dropped: "oldest",
   depth: 1,
-  maxQueued: 1,
+  capacity: 1,
   overflow: "drop-oldest",
   trigger: { type: "go", id: "t1" },
   at: 1000,

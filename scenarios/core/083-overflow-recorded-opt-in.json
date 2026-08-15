@@ -6,7 +6,7 @@
   "given": {
     "runtime": {
       "inbox": {
-        "maxQueued": 0,
+        "capacity": 0,
         "overflow": "reject",
         "recordOverflow": true
       }

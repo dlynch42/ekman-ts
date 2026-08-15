@@ -677,7 +677,7 @@ describe("telemetry", () => {
   });
 
   it("refuses an inbox configuration it cannot satisfy, at construction", () => {
-    expect(() => new Ekman({ inbox: { maxQueued: -1 } })).toThrow(
+    expect(() => new Ekman({ inbox: { capacity: -1 } })).toThrow(
       NON_NEGATIVE_INTEGER
     );
   });

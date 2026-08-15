@@ -262,7 +262,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   /**
    * Hand the trigger to this key's inbox, along with the closure that will run it.
    *
-   * The inbox owns ordering and maxQueued; it knows nothing about entities. This closure
+   * The inbox owns ordering and capacity; it knows nothing about entities. This closure
    * is the only place the two meet.
    */
   #enqueue(

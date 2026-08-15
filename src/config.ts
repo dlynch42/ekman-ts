@@ -10,8 +10,8 @@ import type { InboxConfig, OverflowPolicy } from "./types";
  * refused at startup rather than discovered under load.
  */
 
-/** Triggers, not bytes. Matches the runtime config example in the README. */
-export const DEFAULT_MAX_QUEUED = 128;
+/** Default to 128 waiting triggers per key. */
+export const DEFAULT_CAPACITY = 128;
 
 export const OVERFLOW_POLICIES: readonly OverflowPolicy[] = [
   "reject",
@@ -20,7 +20,7 @@ export const OVERFLOW_POLICIES: readonly OverflowPolicy[] = [
 ];
 
 export interface ResolvedInboxConfig {
-  readonly maxQueued: number;
+  readonly capacity: number;
   readonly overflow: OverflowPolicy;
   readonly recordOverflow: boolean;
 }
@@ -36,17 +36,18 @@ export interface RuntimeDeps {
 export function resolveInboxConfig(
   config: InboxConfig | undefined
 ): ResolvedInboxConfig {
-  const maxQueued = config?.maxQueued ?? DEFAULT_MAX_QUEUED;
+  const capacity = config?.capacity ?? DEFAULT_CAPACITY;
   const overflow = config?.overflow ?? "reject";
 
   // An unbounded inbox converts overload into silent latency and unbounded memory, which
   // is the failure this runtime exists to prevent. There is deliberately no way to ask
   // for one, so a nonsensical value is refused rather than reinterpreted.
-  if (!(Number.isInteger(maxQueued) && maxQueued >= 0)) {
+  if (!(Number.isInteger(capacity) && capacity >= 0)) {
     throw new EkmanError(
       "INVALID_CONFIG",
-      `inbox maxQueued must be a non-negative integer, received ${JSON.stringify(maxQueued)}. ` +
-        "Use 0 to allow no queuing at all; there is no unbounded setting."
+      `inbox capacity must be a non-negative integer number of triggers, received ${JSON.stringify(capacity)}. ` +
+        "It is a queue length, not a size in bytes. Use 0 to allow no queuing at all; " +
+        "there is no unbounded setting."
     );
   }
 
@@ -59,7 +60,7 @@ export function resolveInboxConfig(
   }
 
   return Object.freeze({
-    maxQueued,
+    capacity,
     overflow,
     recordOverflow: config?.recordOverflow ?? false,
   });

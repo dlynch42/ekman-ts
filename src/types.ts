@@ -217,14 +217,13 @@ export type OverflowPolicy = "reject" | "drop-newest" | "drop-oldest";
  */
 export interface InboxConfig {
   /**
-   * How many triggers may wait per key. A count of triggers, not bytes: this is a queue
-   * length, and has nothing to do with the memory budget.
+   * Queue length. `capacity: 128` means "up to 128 triggers may be waiting".
    *
    * The trigger currently being handled has already left the queue and does not count
-   * against it, so `maxQueued: 0` means no queuing at all: anything arriving while a
+   * against it, so `capacity: 0` means no queuing at all: anything arriving while a
    * handler runs meets the overflow policy.
    */
-  readonly maxQueued?: number;
+  readonly capacity?: number;
   /** Defaults to `reject`. */
   readonly overflow?: OverflowPolicy;
   /**

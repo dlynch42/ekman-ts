@@ -20,6 +20,10 @@ export const ERROR_CODES = [
   "INBOX_OVERFLOW",
   /** The inbox was full and an overflow policy dropped this trigger. */
   "TRIGGER_DROPPED",
+  /** An attempt ran past its configured timeout. */
+  "HANDLER_TIMEOUT",
+  /** A commit was refused because its attempt had been superseded. */
+  "COMMIT_FENCED",
   /** Two entities were registered under one name. */
   "DUPLICATE_ENTITY",
   /** Two handlers were declared for one state. */

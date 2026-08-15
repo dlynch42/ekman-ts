@@ -65,20 +65,20 @@ implementation happens to read the clock internally would change the timestamps 
 scenario asserts, and no two implementations would agree.
 
 ```json
-{ "inbox": { "maxQueued": 1, "overflow": "reject", "recordOverflow": false } }
+{ "inbox": { "capacity": 1, "overflow": "reject", "recordOverflow": false } }
 ```
 
 `inbox` is optional and configures the bounded per-key inbox for every instance.
 
 | Field | Default | Meaning |
 |---|---|---|
-| `maxQueued` | 128 | How many triggers may **wait** per key. A count of triggers, not bytes. |
+| `capacity` | 128 | How many triggers may **wait** per key. A queue length in triggers, never a size in bytes. |
 | `overflow` | `reject` | What happens to a trigger arriving at a full inbox. |
 | `recordOverflow` | `false` | Also record an overflow refusal in the key's event stream, not only in telemetry. |
 
-`maxQueued` counts triggers that are waiting. The one currently being handled has already
+`capacity` counts triggers that are waiting. The one currently being handled has already
 left the queue and does not count against it, so a trigger arriving at a completely idle
-instance is always admitted, and `maxQueued: 0` means "one at a time, no backlog" rather
+instance is always admitted, and `capacity: 0` means "one at a time, no backlog" rather
 than "refuse everything".
 
 Overflow policies:
@@ -92,7 +92,7 @@ Overflow policies:
 `reject` and `drop-newest` have the same effect on the queue and differ in what the sender
 is told: `INBOX_OVERFLOW` is backpressure, meaning the trigger did not land and the
 producer should slow down; `TRIGGER_DROPPED` is shedding, meaning the trigger is gone on
-purpose and should not be retried. `drop-oldest` with a `maxQueued` of 0 has no waiting
+purpose and should not be retried. `drop-oldest` with a `capacity` of 0 has no waiting
 trigger to drop, so it drops the arriving one.
 
 ### `given.entities`
@@ -260,8 +260,8 @@ Each matcher is a subset match, like an event assertion.
 
 | Event | Emitted when | Notable fields |
 |---|---|---|
-| `inbox.enqueued` | A trigger is accepted into an inbox. | `depth`, `maxQueued`, `trigger` |
-| `inbox.rejected` | A trigger is refused by the `reject` policy. | `depth`, `maxQueued`, `overflow`, `trigger` |
+| `inbox.enqueued` | A trigger is accepted into an inbox. | `depth`, `capacity`, `trigger` |
+| `inbox.rejected` | A trigger is refused by the `reject` policy. | `depth`, `capacity`, `overflow`, `trigger` |
 | `inbox.dropped` | A trigger is dropped by a drop policy. | `dropped` (`newest`/`oldest`), `trigger` |
 | `handler.started` | A handler attempt begins. | `state`, `attempt`, `depth` |
 | `handler.settled` | A trigger finishes being processed. | `outcome`, `durationMs`, `attempt` |

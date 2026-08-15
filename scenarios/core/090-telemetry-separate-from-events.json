@@ -6,7 +6,7 @@
   "given": {
     "runtime": {
       "inbox": {
-        "maxQueued": 1,
+        "capacity": 1,
         "overflow": "drop-newest"
       }
     },
@@ -73,7 +73,7 @@
         "key": "orders:1",
         "entity": "orders",
         "depth": 1,
-        "maxQueued": 1,
+        "capacity": 1,
         "trigger": {
           "id": "t1"
         }

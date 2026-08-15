@@ -37,7 +37,10 @@ export type OverflowRecorder = (args: {
  * the chain is now an explicit queue with a drain loop over it.
  *
  * The queue holds triggers that are *waiting*. The one being handled has already been
- * shifted off, so the limit bounds the backlog and not the backlog plus the work.
+ * shifted off, so capacity bounds the backlog and not the backlog plus the work.
+ *
+ * Capacity is counted in triggers. Nothing here weighs anything; the memory budget is a
+ * separate concern with separate units.
  */
 export class Inbox {
   readonly #queue: Entry[] = [];
@@ -92,9 +95,9 @@ export class Inbox {
    */
   enqueue(trigger: Trigger, run: Runner): Promise<CommitResult> {
     // A trigger that can start immediately never waits, so it is not measured against a
-    // limit on waiting. This is what makes `maxQueued: 0` mean "one at a time, no
+    // limit on waiting. This is what makes `capacity: 0` mean "one at a time, no
     // backlog" rather than "refuse everything".
-    if (this.idle || this.#queue.length < this.#config.maxQueued) {
+    if (this.idle || this.#queue.length < this.#config.capacity) {
       return this.#accept(trigger, run);
     }
     return this.#overflow(trigger, run);
@@ -111,7 +114,7 @@ export class Inbox {
       key: this.#key,
       entity: this.#entity,
       depth: this.#queue.length,
-      maxQueued: this.#config.maxQueued,
+      capacity: this.#config.capacity,
       trigger: triggerRef(trigger),
       at: telemetryNow(),
     });
@@ -134,7 +137,7 @@ export class Inbox {
    * none of them silently discards.
    */
   #overflow(trigger: Trigger, run: Runner): Promise<CommitResult> {
-    const { overflow, maxQueued } = this.#config;
+    const { overflow, capacity } = this.#config;
 
     if (overflow === "reject") {
       return Promise.reject(
@@ -143,7 +146,7 @@ export class Inbox {
           key: this.#key,
           entity: this.#entity,
           depth: this.#queue.length,
-          maxQueued,
+          capacity,
           overflow,
           trigger: triggerRef(trigger),
           at: telemetryNow(),
@@ -151,7 +154,7 @@ export class Inbox {
       );
     }
 
-    // `drop-oldest` with a limit of 0 has no older trigger to drop: the backlog is
+    // `drop-oldest` with a capacity of 0 has no older trigger to drop: the backlog is
     // empty and the one in flight is not a queue member. The arriving trigger is the
     // only thing that can go.
     const oldest = overflow === "drop-oldest" ? this.#queue.shift() : undefined;
@@ -164,7 +167,7 @@ export class Inbox {
           entity: this.#entity,
           dropped: "newest",
           depth: this.#queue.length,
-          maxQueued,
+          capacity,
           overflow,
           trigger: triggerRef(trigger),
           at: telemetryNow(),
@@ -181,7 +184,7 @@ export class Inbox {
         // Reported before the newcomer takes the freed slot, so it reads as the depth
         // that was full rather than the depth after the swap.
         depth: this.#queue.length + 1,
-        maxQueued,
+        capacity,
         overflow,
         trigger: triggerRef(oldest.trigger),
         at: telemetryNow(),
@@ -199,11 +202,12 @@ export class Inbox {
   ): EkmanError {
     this.#emit(event);
 
-    const { maxQueued, overflow } = this.#config;
+    const { capacity, overflow } = this.#config;
+    const full = `the inbox for ${this.#key} is full at its capacity of ${capacity} waiting triggers`;
     const reason =
       code === "INBOX_OVERFLOW"
-        ? `inbox for ${this.#key} is at its limit of ${maxQueued}, and the overflow policy is "${overflow}"`
-        : `trigger "${trigger.type}" was dropped from the inbox for ${this.#key}, which is at its limit of ${maxQueued} under the "${overflow}" overflow policy`;
+        ? `${full}, and the overflow policy is "${overflow}"`
+        : `trigger "${trigger.type}" was dropped because ${full}, under the "${overflow}" overflow policy`;
 
     if (this.#config.recordOverflow) {
       this.#record({
