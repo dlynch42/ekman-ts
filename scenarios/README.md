@@ -116,6 +116,14 @@ The same shape may be declared on an entity (`policy`) and on a single state
 (`states[].policy`). The three levels are layered field by field, narrowest winning, so a
 state that sets only `timeoutMs` keeps the wider `maxAttempts`.
 
+```json
+{ "temporal": { "sweepMs": 1000 } }
+```
+
+`temporal` is optional and sets how often the runtime evaluates temporal constraints on its
+own. Scenarios normally leave it out and use the `sweep` step instead, which is
+deterministic; an automatic interval makes a scenario depend on real elapsed time.
+
 ### `given.entities`
 
 An array of entity specifications.
@@ -139,7 +147,18 @@ An array of entity specifications.
 | `unknown` | no | Unknown policy. Defaults to `reject`. |
 | `triggers` | no | Recognized trigger types. Omitted means every type is recognized. |
 | `policy` | no | Execution policy for this entity, over the runtime's and under any state's. |
+| `constraints` | no | The strictness dial. See below. |
+| `onError` | no | Recovery handlers keyed by error classification, with `*` as the fallback. |
 | `states` | yes | Handler specifications, one per state. |
+
+`onError` maps a classification to a `do` object, which runs in place of the failed result:
+
+```json
+{ "onError": { "ConstraintViolation": { "result": "transitionTo", "to": "blocked" } } }
+```
+
+Classification is the error's name. `ConstraintViolation` is the one the runtime raises
+itself; a handler that throws contributes whatever `errorName` its `do` declared.
 
 ### `given.entities[].states[]`
 
@@ -212,6 +231,104 @@ References may appear at any depth. Everything else is a literal.
 { "region": { "$trigger": "region" }, "attempt": 1, "note": "literal" }
 ```
 
+### `given.entities[].constraints`
+
+Constraints are the strictness dial. All of them are opt-in, and an entity that declares
+none accepts any well-formed result.
+
+```json
+{
+  "transitions": { "policy": "reject", "allow": { "pending": ["deploying"] } },
+  "guards": [
+    { "name": "region-required", "on": "deploying",
+      "check": { "values": "region", "exists": true } }
+  ],
+  "invariants": [
+    { "name": "balance-non-negative", "in": ["open"],
+      "check": { "values": "balance", "gte": 0 } }
+  ],
+  "temporal": [
+    { "name": "deploy-timeout", "in": "deploying", "within": 600000,
+      "escalateTo": "stalled", "trigger": "deploy.stalled" }
+  ]
+}
+```
+
+Four kinds, each checked at a defined moment:
+
+| Kind | Checked |
+|---|---|
+| `transitions` | Before committing a `transitionTo`. |
+| `guards` | Before committing a `transitionTo` into the state named by `on`. |
+| `invariants` | Before committing any result that changes state or values. |
+| `temporal` | On a sweep, against how long the instance has been in `in`. |
+
+Every constraint carries a `policy`, defaulting to `reject`:
+
+| Policy | Effect |
+|---|---|
+| `reject` | The result fails with `CONSTRAINT_VIOLATED`, the instance does not move, and a violation event is recorded. |
+| `warn` | A violation event is recorded and the commit proceeds. |
+| `off` | Not evaluated at all, and nothing is recorded. |
+
+`warn` is the reason the dial exists: a team that does not yet know its real transition
+graph turns constraints on in `warn`, reads the violations out of production, and only then
+switches to `reject`. A violation is recorded under both policies, distinguished by the
+event's `policy` field, so one query answers "everything that would have been refused".
+
+Details worth knowing, each of which has a scenario:
+
+- **Every `transitionTo` is graph-checked**, including one targeting the state the instance
+  is already in. Use `stay` to change values without transitioning.
+- **A guard runs only when its `on` state is the one being entered.**
+- **An invariant applies to the state being entered**, filtered by `in`, or to every state
+  when `in` is omitted. A `stay` that supplies no values changes nothing and is not checked.
+- **A check that throws is a violation**, not a pass. Deciding a condition holds because the
+  code asking about it is broken is the silent fall-through constraints exist to prevent.
+- **A refused result is classified**, so `onError` can catch it under `ConstraintViolation`
+  and commit something legal instead. A recovery is itself a commit and faces the same
+  constraints, with no second error handler behind it.
+- **`escalateTo` is carried on the trigger**, not applied by the runtime. A trigger never
+  changes state on its own; the handler decides, exactly as with any other input.
+- **A temporal constraint fires once per entry** into its state. Leaving and re-entering
+  arms it again. Without this, sweeping a stuck instance produces an escalation per pass.
+
+Under `reject` a temporal constraint records the violation and delivers its escalation
+trigger. Under `warn` it records the violation and delivers nothing.
+
+The escalation trigger carries:
+
+```json
+{ "type": "deploy.stalled", "constraint": "deploy-timeout",
+  "state": "deploying", "sinceMs": 600000, "escalateTo": "stalled" }
+```
+
+`type` defaults to `constraint.temporal` when the constraint declares no `trigger`.
+
+### Checks
+
+A handler cannot be code in a language-neutral file, and neither can a condition. A check
+declares one source and one predicate:
+
+| Field | Meaning |
+|---|---|
+| `values` | Dot path into the values being proposed. Empty string is the whole map. |
+| `trigger` | Dot path into the trigger. |
+| `state` | `true` to read the proposed state name. |
+| `exists` | Whether the subject is expected to be present. |
+| `equals` | The subject must equal this. |
+| `gte`, `lte` | Numeric bounds. |
+| `reason` | Reported as the violation's `reason` when the check does not hold. |
+| `throw` | Throw instead of answering, exercising the broken-check path. |
+
+```json
+{ "values": "region", "exists": true, "reason": "a deployment needs a region" }
+```
+
+This is deliberately not an expression language. Every implementation has to reproduce it
+exactly, and a small vocabulary is the difference between inheriting the constraint
+scenarios and reimplementing an evaluator.
+
 ## `when`
 
 An ordered array of steps.
@@ -229,10 +346,33 @@ An ordered array of steps.
 | `send` | Deliver a trigger to a key. `await` defaults to `true`, meaning the runner waits for the send to settle before the next step. |
 | `drain` | Wait for every outstanding send to settle. |
 | `wait` | Pause this many milliseconds. |
+| `advance` | Move the declared clock forward this many milliseconds. |
+| `sweep` | Evaluate temporal constraints once and settle whatever they escalate. |
 
 `wait` exists for work the runtime is still doing after every send has settled. A handler
 abandoned at its timeout keeps running and eventually tries to commit; `drain` will not
 wait for it, because its sender was told the outcome long before.
+
+`advance` and `sweep` are what make a temporal constraint testable without waiting on real
+time. Declare a frozen clock (`"stepMs": 0`), age the instance with `advance`, then run one
+evaluation with `sweep`:
+
+```json
+"given": { "runtime": { "clock": { "start": 0, "stepMs": 0 } } },
+"when": [
+  { "send": { "key": "deployments:a", "trigger": { "type": "start" } } },
+  { "advance": 600000 },
+  { "sweep": true }
+]
+```
+
+A frozen clock matters here specifically. Under a stepping clock, elapsed time would depend
+on how many times the implementation happens to read its own clock, and no two ports would
+agree. `sweep` settles every escalation it raised before the next step runs, so the
+assertions afterwards see the finished picture.
+
+A sweep reads the clock once. Every violation one pass records is stamped with that single
+instant, rather than with whatever moment the walk happened to reach each instance.
 
 `"await": false` leaves the send in flight, which is how ordering and concurrency
 scenarios overlap work on one key. A scenario that uses it should end with
@@ -279,6 +419,21 @@ scenario asserts only the fields it cares about.
 
 `at` is asserted only when `given.runtime.clock` is declared.
 
+Event types:
+
+| Type | Meaning | Advances `seq`? |
+|---|---|---|
+| `transition` | A committed state or values change. | yes |
+| `rejected` | A trigger refused before it reached a handler. | no |
+| `violation` | A constraint that did not hold. | no |
+
+Only `transition` events reconstruct state. Everything else carries the sequence of the
+commit it followed, which is why `seq` is non-decreasing across a stream rather than unique.
+
+A `violation` event carries `constraint` (`{ kind, name }`), `policy`, `reason`, and, when
+it was refusing a result, `attempted` (`{ from, to }`). A `warn` violation sits immediately
+before the commit it did not stop, so the pair reads in order.
+
 ### `then.telemetry`
 
 Runtime telemetry: queue depth, drops, handler duration. A separate stream from
@@ -309,9 +464,20 @@ Each matcher is a subset match, like an event assertion.
 | `handler.retried` | An attempt failed and another will follow. | `attempt`, `maxAttempts`, `delayMs`, `error` |
 | `handler.timedOut` | An attempt ran past its timeout and was abandoned. | `attempt`, `timeoutMs` |
 | `commit.fenced` | A superseded attempt tried to commit and was refused. | `attempt`, `reason`, `tokenSeq`, `currentSeq` |
+| `constraint.violated` | A constraint did not hold. | `kind`, `constraint`, `policy`, `state`, `reason` |
+| `constraint.escalated` | A temporal constraint fired and its trigger was delivered. | `constraint`, `elapsedMs`, `escalateTo`, `delivered` |
 
 `handler.settled.outcome` is `committed`, `failed`, or `refused`. `refused` means the
 trigger never reached a handler.
+
+A constraint violation appears in both streams on purpose, and the direction matters. The
+per-key `violation` event is the record; `constraint.violated` is the mirror an operator
+alerts on, because a rising rate of violations is a runtime signal even when each one is a
+domain fact. Nothing travels the other way: no telemetry event ever reaches a key's history.
+
+`constraint.escalated` is separate from the violation because delivery can fail on its own.
+`delivered: false` usually means the instance is stranded in a state whose handler cannot
+take the trigger, which is exactly the situation the constraint was watching for.
 
 ### Type matchers
 
@@ -361,6 +527,7 @@ Stable across implementations. A runner asserts on these strings, never on messa
 | `TRIGGER_DROPPED` | The inbox was full and a drop policy discarded this trigger. |
 | `HANDLER_TIMEOUT` | An attempt ran past its configured timeout. |
 | `COMMIT_FENCED` | A commit was refused because its attempt had been superseded. |
+| `CONSTRAINT_VIOLATED` | A result did not satisfy a constraint whose policy is `reject`. |
 | `DUPLICATE_ENTITY` | Two entities registered with the same name. |
 | `DUPLICATE_STATE_HANDLER` | Two handlers for one state. |
 | `MISSING_INITIAL_STATE` | No initial state declared. |
@@ -368,7 +535,7 @@ Stable across implementations. A runner asserts on these strings, never on messa
 | `INVALID_CONFIG` | Configuration is recognized but cannot be satisfied, and is refused rather than adjusted. |
 | `NOT_IMPLEMENTED` | Configuration is recognized but unimplemented at this phase. |
 
-Later phases add codes for constraint violations and store conflicts.
+Later phases add codes for store conflicts and memory exhaustion.
 
 ## Determinism
 
@@ -402,6 +569,9 @@ Anything that cannot be made deterministic must not be asserted.
    | `09x` | telemetry |
    | `10x` | execution policy: retries and backoff |
    | `11x` | timeouts and commit fencing |
+   | `12x` | transition graph constraints, and violation classification |
+   | `13x` | guards and invariants |
+   | `14x` | temporal constraints |
 
 3. Assert the narrowest thing that proves the requirement. Over-asserting makes the suite
    brittle for the next port.

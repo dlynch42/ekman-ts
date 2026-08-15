@@ -1,0 +1,70 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/142-temporal-fires-once-per-entry",
+  "name": "a temporal bound fires once for each entry into its state, not once per sweep, so a stuck instance does not produce an escalation storm",
+  "level": "core",
+  "given": {
+    "runtime": { "clock": { "start": 0, "stepMs": 0 } },
+    "entities": [
+      {
+        "name": "deployments",
+        "initial": "deploying",
+        "constraints": {
+          "temporal": [{ "name": "stuck", "in": "deploying", "within": 100 }]
+        },
+        "states": [
+          {
+            "state": "deploying",
+            "cases": [
+              {
+                "when": { "trigger": "constraint.temporal" },
+                "do": { "result": "stay", "values": { "nagged": true } }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    { "send": { "key": "deployments:a", "trigger": { "type": "start" } } },
+    { "advance": 500 },
+    { "sweep": true },
+    { "sweep": true },
+    { "advance": 5000 },
+    { "sweep": true }
+  ],
+  "then": {
+    "events": {
+      "deployments:a": [
+        { "type": "transition", "from": null, "to": "deploying", "seq": 0 },
+        {
+          "type": "transition",
+          "from": "deploying",
+          "to": "deploying",
+          "seq": 1
+        },
+        {
+          "type": "violation",
+          "seq": 1,
+          "at": 500,
+          "constraint": { "kind": "temporal", "name": "stuck" }
+        },
+        {
+          "type": "transition",
+          "from": "deploying",
+          "to": "deploying",
+          "seq": 2,
+          "values": { "nagged": true }
+        }
+      ]
+    },
+    "state": {
+      "deployments:a": {
+        "state": "deploying",
+        "seq": 2,
+        "values": { "nagged": true }
+      }
+    }
+  }
+}

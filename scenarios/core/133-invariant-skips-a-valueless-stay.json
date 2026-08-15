@@ -1,0 +1,48 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/133-invariant-skips-a-valueless-stay",
+  "name": "a stay that supplies no values changes nothing, so an invariant that already does not hold is not re-evaluated against it",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "accounts",
+        "initial": "open",
+        "values": { "balance": -1 },
+        "constraints": {
+          "invariants": [
+            {
+              "name": "balance-non-negative",
+              "check": { "values": "balance", "gte": 0 }
+            }
+          ]
+        },
+        "states": [
+          {
+            "state": "open",
+            "cases": [
+              { "when": { "trigger": "touch" }, "do": { "result": "stay" } }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "when": [{ "send": { "key": "accounts:1", "trigger": { "type": "touch" } } }],
+  "then": {
+    "sends": [
+      {
+        "outcome": "committed",
+        "state": "open",
+        "seq": 1,
+        "values": { "balance": -1 }
+      }
+    ],
+    "events": {
+      "accounts:1": [
+        { "type": "transition", "from": null, "to": "open", "seq": 0 },
+        { "type": "transition", "from": "open", "to": "open", "seq": 1 }
+      ]
+    }
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/143-temporal-not-yet-due",
+  "name": "a sweep before the bound elapses does nothing at all",
+  "level": "core",
+  "given": {
+    "runtime": { "clock": { "start": 0, "stepMs": 0 } },
+    "entities": [
+      {
+        "name": "deployments",
+        "initial": "deploying",
+        "constraints": {
+          "temporal": [
+            {
+              "name": "stuck",
+              "in": "deploying",
+              "within": 10000,
+              "escalateTo": "stalled"
+            }
+          ]
+        },
+        "states": [
+          { "state": "deploying", "else": { "result": "stay" } },
+          { "state": "stalled", "else": { "result": "stay" } }
+        ]
+      }
+    ]
+  },
+  "when": [
+    { "send": { "key": "deployments:a", "trigger": { "type": "start" } } },
+    { "advance": 9999 },
+    { "sweep": true }
+  ],
+  "then": {
+    "events": {
+      "deployments:a": [
+        { "type": "transition", "from": null, "to": "deploying", "seq": 0 },
+        {
+          "type": "transition",
+          "from": "deploying",
+          "to": "deploying",
+          "seq": 1
+        }
+      ]
+    },
+    "state": { "deployments:a": { "state": "deploying", "seq": 1 } }
+  }
+}

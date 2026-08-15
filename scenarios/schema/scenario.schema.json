@@ -79,6 +79,18 @@
             "execution": {
               "description": "Default execution policy for every handler in the runtime.",
               "$ref": "#/$defs/policy"
+            },
+            "temporal": {
+              "description": "How temporal constraints are evaluated. Scenarios normally drive them with an explicit sweep step instead.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "sweepMs": {
+                  "description": "Milliseconds between automatic sweeps. Omitted means sweeps happen only when asked for.",
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
             }
           }
         },
@@ -124,6 +136,135 @@
           "items": {
             "$ref": "#/$defs/stateSpec"
           }
+        },
+        "constraints": {
+          "$ref": "#/$defs/constraints"
+        },
+        "onError": {
+          "description": "Recovery handlers keyed by error classification, with * as the fallback.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/do"
+          }
+        }
+      }
+    },
+    "constraints": {
+      "description": "The strictness dial. Every constraint is opt-in and carries its own violation policy.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "transitions": {
+          "description": "Which transitions are legal. Every transitionTo is checked, including one targeting the current state.",
+          "type": "object",
+          "required": ["allow"],
+          "additionalProperties": false,
+          "properties": {
+            "policy": { "$ref": "#/$defs/violationPolicy" },
+            "allow": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            }
+          }
+        },
+        "guards": {
+          "description": "Entry conditions on a target state, checked before committing a move into it.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["on", "check"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string" },
+              "on": { "type": "string", "minLength": 1 },
+              "policy": { "$ref": "#/$defs/violationPolicy" },
+              "check": { "$ref": "#/$defs/check" }
+            }
+          }
+        },
+        "invariants": {
+          "description": "Conditions that must hold in a state, checked before any result that changes values.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["check"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string" },
+              "in": {
+                "description": "States this applies to. Omitted means every state.",
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "policy": { "$ref": "#/$defs/violationPolicy" },
+              "check": { "$ref": "#/$defs/check" }
+            }
+          }
+        },
+        "temporal": {
+          "description": "Bounds on how long an instance may sit in one state. Evaluated by a sweep, and firing delivers a trigger.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["in", "within"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string" },
+              "in": { "type": "string", "minLength": 1 },
+              "within": {
+                "description": "Milliseconds an instance may remain in the state.",
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "escalateTo": {
+                "description": "Carried on the escalation trigger for the handler to act on. The runtime never applies it directly.",
+                "type": "string"
+              },
+              "trigger": {
+                "description": "Type of the delivered trigger. Defaults to constraint.temporal.",
+                "type": "string"
+              },
+              "policy": { "$ref": "#/$defs/violationPolicy" }
+            }
+          }
+        }
+      }
+    },
+    "violationPolicy": {
+      "description": "reject refuses the result, warn records it and proceeds, off is not evaluated. Defaults to reject.",
+      "enum": ["reject", "warn", "off"]
+    },
+    "check": {
+      "description": "A guard or invariant condition as data: one source, one predicate.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "values": {
+          "description": "Dot path into the values being proposed. Empty string is the whole map.",
+          "type": "string"
+        },
+        "trigger": {
+          "description": "Dot path into the trigger.",
+          "type": "string"
+        },
+        "state": {
+          "description": "Read the proposed state name.",
+          "const": true
+        },
+        "exists": { "type": "boolean" },
+        "equals": {},
+        "gte": { "type": "number" },
+        "lte": { "type": "number" },
+        "reason": {
+          "description": "Reported as the violation's reason when the check does not hold.",
+          "type": "string"
+        },
+        "throw": {
+          "description": "Throw instead of answering, exercising the broken-check path.",
+          "type": "string"
         }
       }
     },
@@ -180,8 +321,7 @@
           "enum": ["transitionTo", "stay", "fail"]
         },
         "to": {
-          "type": "string",
-          "minLength": 1
+          "description": "A state name, or a value expression resolving to one. An escalation carries its target on the trigger."
         },
         "values": {},
         "error": {
@@ -271,15 +411,23 @@
           "description": "Pause this many milliseconds, for work still in flight after every send has settled.",
           "type": "integer",
           "minimum": 0
+        },
+        "advance": {
+          "description": "Move the declared clock forward this many milliseconds. Ages an instance past a temporal bound without waiting for real time.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "sweep": {
+          "description": "Evaluate temporal constraints once and settle whatever they escalate.",
+          "const": true
         }
       },
       "oneOf": [
-        {
-          "required": ["send"]
-        },
-        {
-          "required": ["drain"]
-        }
+        { "required": ["send"] },
+        { "required": ["drain"] },
+        { "required": ["wait"] },
+        { "required": ["advance"] },
+        { "required": ["sweep"] }
       ]
     },
     "then": {
@@ -340,6 +488,36 @@
                 },
                 "values": {
                   "type": "object"
+                },
+                "code": {
+                  "$ref": "#/$defs/errorCode"
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "constraint": {
+                  "description": "Present on a violation event.",
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "enum": ["transition", "guard", "invariant", "temporal"]
+                    },
+                    "name": { "type": "string" }
+                  }
+                },
+                "policy": {
+                  "description": "Present on a violation event. warn means the commit went ahead anyway.",
+                  "enum": ["reject", "warn"]
+                },
+                "attempted": {
+                  "description": "The change a violation was refusing. Absent on a temporal violation, which is attached to no result.",
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "from": { "type": "string" },
+                    "to": { "type": "string" }
+                  }
                 }
               }
             }
@@ -361,7 +539,9 @@
                   "handler.settled",
                   "handler.retried",
                   "handler.timedOut",
-                  "commit.fenced"
+                  "commit.fenced",
+                  "constraint.violated",
+                  "constraint.escalated"
                 ]
               }
             }
@@ -409,6 +589,7 @@
         "TRIGGER_DROPPED",
         "HANDLER_TIMEOUT",
         "COMMIT_FENCED",
+        "CONSTRAINT_VIOLATED",
         "DUPLICATE_ENTITY",
         "DUPLICATE_STATE_HANDLER",
         "MISSING_INITIAL_STATE",

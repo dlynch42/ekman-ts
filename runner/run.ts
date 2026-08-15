@@ -1,5 +1,6 @@
 import type { EkmanError, TelemetryEvent } from "../src/index";
 import { Ekman } from "../src/index";
+import type { ScenarioClock } from "./build";
 import { buildClock, buildEntities } from "./build";
 import type {
   Scenario,
@@ -7,7 +8,7 @@ import type {
   StateExpectation,
   Step,
 } from "./scenario";
-import { isSendStep, isWaitStep } from "./scenario";
+import { isAdvanceStep, isSendStep, isSweepStep, isWaitStep } from "./scenario";
 
 export interface ScenarioResult {
   readonly scenario: Scenario;
@@ -75,24 +76,35 @@ async function execute(scenario: Scenario, failures: string[]): Promise<void> {
   }
 
   const telemetry: TelemetryEvent[] = [];
-  const ekman = buildRuntime(scenario, telemetry);
-  const outcomes = await deliver(ekman, scenario.when ?? []);
+  const clock = buildClock(scenario.given);
+  const ekman = buildRuntime(scenario, telemetry, clock);
 
-  assertSends(scenario.then?.sends, outcomes, failures);
-  assertEvents(scenario, ekman, failures);
-  assertTelemetry(scenario.then?.telemetry, telemetry, failures);
-  assertState(scenario.then?.state, ekman, failures);
+  try {
+    const outcomes = await deliver(ekman, scenario.when ?? [], clock);
+
+    assertSends(scenario.then?.sends, outcomes, failures);
+    assertEvents(scenario, ekman, failures);
+    assertTelemetry(scenario.then?.telemetry, telemetry, failures);
+    assertState(scenario.then?.state, ekman, failures);
+  } finally {
+    // A scenario that configured an automatic sweep leaves an interval behind otherwise.
+    await ekman.close();
+  }
 }
 
-function buildRuntime(scenario: Scenario, telemetry: TelemetryEvent[]): Ekman {
-  const now = buildClock(scenario.given);
-  const { inbox, execution } = scenario.given.runtime ?? {};
+function buildRuntime(
+  scenario: Scenario,
+  telemetry: TelemetryEvent[],
+  clock?: ScenarioClock
+): Ekman {
+  const { inbox, execution, temporal } = scenario.given.runtime ?? {};
 
   return new Ekman({
     entities: buildEntities(scenario.given),
-    ...(now === undefined ? {} : { now }),
+    ...(clock === undefined ? {} : { now: clock.now }),
     ...(inbox === undefined ? {} : { inbox }),
     ...(execution === undefined ? {} : { execution }),
+    ...(temporal === undefined ? {} : { temporal }),
     // Capture everything. A scenario asserts a subsequence of what lands here.
     telemetry: { "*": (event) => telemetry.push(event) },
     // A scenario asserts on outcomes, so a stray post() failure must not print noise.
@@ -102,7 +114,8 @@ function buildRuntime(scenario: Scenario, telemetry: TelemetryEvent[]): Ekman {
 
 async function deliver(
   ekman: Ekman,
-  steps: readonly Step[]
+  steps: readonly Step[],
+  clock: ScenarioClock | undefined
 ): Promise<Outcome[]> {
   const outcomes: Outcome[] = [];
   const inFlight: Promise<void>[] = [];
@@ -112,6 +125,23 @@ async function deliver(
     if (isWaitStep(step)) {
       // biome-ignore lint/performance/noAwaitInLoops: the pause is the step
       await new Promise((done) => setTimeout(done, step.wait));
+      continue;
+    }
+
+    if (isAdvanceStep(step)) {
+      if (clock === undefined) {
+        throw new Error(
+          "an advance step needs a declared clock: add given.runtime.clock"
+        );
+      }
+      clock.advance(step.advance);
+      continue;
+    }
+
+    if (isSweepStep(step)) {
+      // Resolves once every escalation it raised has been processed, so the assertions
+      // that follow see the finished picture.
+      await ekman.sweep();
       continue;
     }
 

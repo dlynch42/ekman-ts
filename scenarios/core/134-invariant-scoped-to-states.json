@@ -1,0 +1,68 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/134-invariant-scoped-to-states",
+  "name": "an invariant applies to the state being entered, so the same values are legal in one state and not in another",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "draft",
+        "constraints": {
+          "invariants": [
+            {
+              "name": "submitted-needs-a-total",
+              "in": ["submitted"],
+              "policy": "warn",
+              "check": { "values": "total", "exists": true }
+            }
+          ]
+        },
+        "states": [
+          {
+            "state": "draft",
+            "cases": [
+              {
+                "when": { "trigger": "note" },
+                "do": { "result": "stay", "values": { "note": "no total yet" } }
+              },
+              {
+                "when": { "trigger": "submit" },
+                "do": { "result": "transitionTo", "to": "submitted" }
+              }
+            ]
+          },
+          { "state": "submitted", "else": { "result": "stay" } }
+        ]
+      }
+    ]
+  },
+  "when": [
+    { "send": { "key": "orders:1", "trigger": { "type": "note" } } },
+    { "send": { "key": "orders:1", "trigger": { "type": "submit" } } }
+  ],
+  "then": {
+    "sends": [
+      { "outcome": "committed", "state": "draft", "seq": 1 },
+      { "outcome": "committed", "state": "submitted", "seq": 2 }
+    ],
+    "events": {
+      "orders:1": [
+        { "type": "transition", "from": null, "to": "draft", "seq": 0 },
+        { "type": "transition", "from": "draft", "to": "draft", "seq": 1 },
+        {
+          "type": "violation",
+          "seq": 1,
+          "policy": "warn",
+          "constraint": {
+            "kind": "invariant",
+            "name": "submitted-needs-a-total"
+          },
+          "attempted": { "from": "draft", "to": "submitted" }
+        },
+        { "type": "transition", "from": "draft", "to": "submitted", "seq": 2 }
+      ]
+    },
+    "state": { "orders:1": { "state": "submitted", "seq": 2 } }
+  }
+}

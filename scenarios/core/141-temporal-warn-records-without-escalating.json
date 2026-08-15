@@ -1,0 +1,67 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/141-temporal-warn-records-without-escalating",
+  "name": "under warn a temporal bound records the violation and delivers nothing, so real timings can be measured before anything acts on them",
+  "level": "core",
+  "given": {
+    "runtime": { "clock": { "start": 0, "stepMs": 0 } },
+    "entities": [
+      {
+        "name": "deployments",
+        "initial": "deploying",
+        "constraints": {
+          "temporal": [
+            {
+              "name": "deploy-timeout",
+              "in": "deploying",
+              "within": 1000,
+              "escalateTo": "stalled",
+              "policy": "warn"
+            }
+          ]
+        },
+        "states": [
+          {
+            "state": "deploying",
+            "cases": [
+              {
+                "when": { "trigger": "constraint.temporal" },
+                "do": { "result": "transitionTo", "to": "stalled" }
+              }
+            ]
+          },
+          { "state": "stalled", "else": { "result": "stay" } }
+        ]
+      }
+    ]
+  },
+  "when": [
+    { "send": { "key": "deployments:a", "trigger": { "type": "poke" } } },
+    { "advance": 5000 },
+    { "sweep": true }
+  ],
+  "then": {
+    "telemetry": [
+      { "type": "constraint.violated", "kind": "temporal", "policy": "warn" }
+    ],
+    "events": {
+      "deployments:a": [
+        { "type": "transition", "from": null, "to": "deploying", "seq": 0 },
+        {
+          "type": "transition",
+          "from": "deploying",
+          "to": "deploying",
+          "seq": 1
+        },
+        {
+          "type": "violation",
+          "seq": 1,
+          "at": 5000,
+          "policy": "warn",
+          "constraint": { "kind": "temporal", "name": "deploy-timeout" }
+        }
+      ]
+    },
+    "state": { "deployments:a": { "state": "deploying", "seq": 1 } }
+  }
+}

@@ -1,8 +1,12 @@
 import type {
   AnyEntityDefinition,
+  ConstraintCheck,
+  ConstraintsConfig,
+  ErrorHandler,
   Handler,
   HandlerResult,
   InstanceSnapshot,
+  ProposedCommit,
   Trigger,
 } from "../src/index";
 import {
@@ -12,7 +16,14 @@ import {
   stay,
   transitionTo,
 } from "../src/index";
-import type { DoSpec, EntitySpec, Given, StateSpec } from "./scenario";
+import type {
+  CheckSpec,
+  ConstraintsSpec,
+  DoSpec,
+  EntitySpec,
+  Given,
+  StateSpec,
+} from "./scenario";
 
 /**
  * Compile a scenario's declarative entity spec into a real entity definition.
@@ -43,27 +54,147 @@ export function buildEntity(spec: EntitySpec): AnyEntityDefinition {
     ...(spec.unknown === undefined ? {} : { unknown: spec.unknown }),
     ...(spec.triggers === undefined ? {} : { triggers: spec.triggers }),
     ...(spec.policy === undefined ? {} : { policy: spec.policy }),
+    ...(spec.constraints === undefined
+      ? {}
+      : { constraints: buildConstraints(spec.constraints) }),
+    ...(spec.onError === undefined
+      ? {}
+      : { onError: buildErrorHandlers(spec.onError) }),
   }) as AnyEntityDefinition;
 }
+
+/**
+ * Compile the declarative constraint spec into the real configuration.
+ *
+ * Only the checks need translating. Everything else in a constraint is already data, which
+ * is the point: a port reimplements `compileCheck` and inherits every constraint scenario.
+ */
+function buildConstraints(spec: ConstraintsSpec): ConstraintsConfig {
+  return {
+    ...(spec.transitions === undefined
+      ? {}
+      : { transitions: spec.transitions }),
+    ...(spec.temporal === undefined ? {} : { temporal: spec.temporal }),
+    ...(spec.guards === undefined
+      ? {}
+      : {
+          guards: spec.guards.map((guard) => ({
+            ...guard,
+            check: compileCheck(guard.check),
+          })),
+        }),
+    ...(spec.invariants === undefined
+      ? {}
+      : {
+          invariants: spec.invariants.map((invariant) => ({
+            ...invariant,
+            check: compileCheck(invariant.check),
+          })),
+        }),
+  };
+}
+
+/** One source, one predicate. See `CheckSpec` for why it is this small. */
+function compileCheck(spec: CheckSpec): ConstraintCheck {
+  return (next, _instance, trigger) => {
+    if (spec.throw !== undefined) {
+      throw new Error(spec.throw);
+    }
+
+    const subject = readSubject(spec, next, trigger);
+    return holds(spec, subject) ? true : (spec.reason ?? false);
+  };
+}
+
+function readSubject(
+  spec: CheckSpec,
+  next: ProposedCommit,
+  trigger: Trigger
+): unknown {
+  if (spec.state === true) {
+    return next.state;
+  }
+  if (spec.trigger !== undefined) {
+    return read(trigger, spec.trigger);
+  }
+  if (spec.values !== undefined) {
+    return read(next.values, spec.values);
+  }
+  throw new Error(
+    `check declares no source: ${JSON.stringify(spec)}. Use values, trigger or state.`
+  );
+}
+
+function holds(spec: CheckSpec, subject: unknown): boolean {
+  if (spec.exists !== undefined) {
+    return (subject !== undefined) === spec.exists;
+  }
+  if (spec.equals !== undefined) {
+    return Object.is(subject, spec.equals);
+  }
+  if (spec.gte !== undefined) {
+    return typeof subject === "number" && subject >= spec.gte;
+  }
+  if (spec.lte !== undefined) {
+    return typeof subject === "number" && subject <= spec.lte;
+  }
+  throw new Error(
+    `check declares no predicate: ${JSON.stringify(spec)}. Use exists, equals, gte or lte.`
+  );
+}
+
+function buildErrorHandlers(
+  spec: Readonly<Record<string, DoSpec>>
+): Record<string, ErrorHandler> {
+  return Object.fromEntries(
+    Object.entries(spec).map(([classification, action]) => [
+      classification,
+      ((instance, _error, _ctx) =>
+        toResult(action, instance, EMPTY_TRIGGER)) as ErrorHandler,
+    ])
+  );
+}
+
+/**
+ * An error handler receives no trigger, so a `$trigger` reference in its result has
+ * nothing to read. This stands in for one so the same `do` shape works in both places.
+ */
+const EMPTY_TRIGGER: Trigger = { type: "error" };
 
 export function buildEntities(given: Given): AnyEntityDefinition[] {
   return given.entities.map(buildEntity);
 }
 
 /**
- * A clock that starts at `start` and advances `stepMs` on every read, so scenarios can
- * assert on event timestamps.
+ * A clock a scenario controls.
+ *
+ * `now` advances `stepMs` on every read, which is what makes an event's `at` assertable.
+ * `advance` moves it by an arbitrary amount, which is how a scenario ages an instance past
+ * a temporal bound without waiting for real time to pass. A `stepMs` of 0 gives a frozen
+ * clock that only `advance` moves, and that is the right setting for anything measuring
+ * elapsed time, because otherwise the answer depends on how many times the runtime happens
+ * to read its own clock.
  */
-export function buildClock(given: Given): (() => number) | undefined {
+export interface ScenarioClock {
+  now: () => number;
+  advance: (ms: number) => void;
+}
+
+export function buildClock(given: Given): ScenarioClock | undefined {
   const clock = given.runtime?.clock;
   if (clock === undefined) {
     return;
   }
 
   let current = clock.start - clock.stepMs;
-  return () => {
-    current += clock.stepMs;
-    return current;
+  return {
+    now: () => {
+      current += clock.stepMs;
+      return current;
+    },
+    advance: (ms: number) => {
+      current += ms;
+    },
   };
 }
 
@@ -106,7 +237,14 @@ function toResult(
 
   switch (action.result) {
     case "transitionTo": {
-      const target = action.to as string;
+      // Resolvable, not just a literal, because an escalation carries its target on the
+      // trigger and the handler is what applies it.
+      const target = resolve(action.to, context);
+      if (typeof target !== "string") {
+        throw new Error(
+          `transitionTo target must resolve to a state name, got ${JSON.stringify(target)}`
+        );
+      }
       return action.values === undefined
         ? transitionTo(target)
         : transitionTo(target, resolveValues(action.values, context));

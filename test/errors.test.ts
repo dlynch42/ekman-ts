@@ -50,6 +50,7 @@ describe("EkmanError", () => {
       "TRIGGER_DROPPED",
       "HANDLER_TIMEOUT",
       "COMMIT_FENCED",
+      "CONSTRAINT_VIOLATED",
       "DUPLICATE_ENTITY",
       "DUPLICATE_STATE_HANDLER",
       "MISSING_INITIAL_STATE",

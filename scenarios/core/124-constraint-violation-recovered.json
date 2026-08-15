@@ -1,0 +1,64 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/124-constraint-violation-recovered",
+  "name": "a refused result is classified as a constraint violation, so an error handler can catch it and commit something legal instead",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "pending",
+        "constraints": {
+          "transitions": {
+            "allow": { "pending": ["blocked"] }
+          }
+        },
+        "onError": {
+          "ConstraintViolation": {
+            "result": "transitionTo",
+            "to": "blocked",
+            "values": { "reason": "not a legal move" }
+          }
+        },
+        "states": [
+          {
+            "state": "pending",
+            "cases": [
+              {
+                "when": { "trigger": "ship" },
+                "do": { "result": "transitionTo", "to": "shipped" }
+              }
+            ]
+          },
+          { "state": "blocked", "else": { "result": "stay" } },
+          { "state": "shipped", "else": { "result": "stay" } }
+        ]
+      }
+    ]
+  },
+  "when": [{ "send": { "key": "orders:1", "trigger": { "type": "ship" } } }],
+  "then": {
+    "sends": [
+      {
+        "outcome": "committed",
+        "state": "blocked",
+        "seq": 1,
+        "values": { "reason": "not a legal move" }
+      }
+    ],
+    "events": {
+      "orders:1": [
+        { "type": "transition", "from": null, "to": "pending", "seq": 0 },
+        {
+          "type": "violation",
+          "seq": 0,
+          "policy": "reject",
+          "constraint": { "kind": "transition", "name": "transitions" },
+          "attempted": { "from": "pending", "to": "shipped" }
+        },
+        { "type": "transition", "from": "pending", "to": "blocked", "seq": 1 }
+      ]
+    },
+    "state": { "orders:1": { "state": "blocked", "seq": 1 } }
+  }
+}

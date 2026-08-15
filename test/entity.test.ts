@@ -162,16 +162,51 @@ describe("defineEntity validation", () => {
     ).toBe("UNKNOWN_TRIGGER");
   });
 
-  it("refuses constraints rather than ignoring them", () => {
+  it("refuses a constraint naming a state that has no handler", () => {
     expect(
       code(() =>
         defineEntity("orders", {
           initial: "a",
           states: { a: noop },
-          constraints: { graph: {} },
+          constraints: { transitions: { allow: { a: ["b" as "a"] } } },
         })
       )
-    ).toBe("NOT_IMPLEMENTED");
+    ).toBe("INVALID_CONFIG");
+  });
+
+  it("carries compiled constraints on the definition", () => {
+    const orders = defineEntity("orders", {
+      initial: "a",
+      states: { a: noop, b: noop },
+      constraints: { transitions: { allow: { a: ["b"] } } },
+    });
+
+    expect(orders.constraints?.transitions?.allow.get("a")).toEqual(
+      new Set(["b"])
+    );
+  });
+
+  it("leaves constraints undefined when none are declared", () => {
+    const orders = defineEntity("orders", {
+      initial: "a",
+      states: { a: noop },
+    });
+    expect(orders.constraints).toBeUndefined();
+  });
+
+  it("compiles an entirely off constraint set away to nothing", () => {
+    const orders = defineEntity("orders", {
+      initial: "a",
+      states: { a: noop, b: noop },
+      constraints: {
+        transitions: { policy: "off", allow: { a: ["b"] } },
+        guards: [{ on: "b", policy: "off", check: () => false }],
+      },
+    });
+
+    // Undefined rather than an empty structure, so "declared nothing" and "declared
+    // everything off" are the same path at dispatch time.
+    expect(orders.constraints).toBeUndefined();
   });
 });
 

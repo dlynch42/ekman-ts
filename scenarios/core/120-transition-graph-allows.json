@@ -1,0 +1,43 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/120-transition-graph-allows",
+  "name": "a declared transition commits and records no violation",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "pending",
+        "constraints": {
+          "transitions": {
+            "allow": { "pending": ["approved", "cancelled"] }
+          }
+        },
+        "states": [
+          {
+            "state": "pending",
+            "cases": [
+              {
+                "when": { "trigger": "approve" },
+                "do": { "result": "transitionTo", "to": "approved" }
+              }
+            ]
+          },
+          { "state": "approved", "else": { "result": "stay" } },
+          { "state": "cancelled", "else": { "result": "stay" } }
+        ]
+      }
+    ]
+  },
+  "when": [{ "send": { "key": "orders:1", "trigger": { "type": "approve" } } }],
+  "then": {
+    "sends": [{ "outcome": "committed", "state": "approved", "seq": 1 }],
+    "events": {
+      "orders:1": [
+        { "type": "transition", "from": null, "to": "pending", "seq": 0 },
+        { "type": "transition", "from": "pending", "to": "approved", "seq": 1 }
+      ]
+    },
+    "state": { "orders:1": { "state": "approved", "seq": 1 } }
+  }
+}

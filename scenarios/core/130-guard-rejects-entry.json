@@ -1,0 +1,85 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/130-guard-rejects-entry",
+  "name": "a guard on the target state refuses entry when its condition does not hold",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "deployments",
+        "initial": "pending",
+        "constraints": {
+          "guards": [
+            {
+              "name": "region-required",
+              "on": "deploying",
+              "check": {
+                "values": "region",
+                "exists": true,
+                "reason": "a deployment cannot start without a region"
+              }
+            }
+          ]
+        },
+        "states": [
+          {
+            "state": "pending",
+            "cases": [
+              {
+                "when": { "trigger": "start" },
+                "do": {
+                  "result": "transitionTo",
+                  "to": "deploying",
+                  "values": { "region": { "$trigger": "region" } }
+                }
+              }
+            ]
+          },
+          { "state": "deploying", "else": { "result": "stay" } }
+        ]
+      }
+    ]
+  },
+  "when": [
+    { "send": { "key": "deployments:a", "trigger": { "type": "start" } } },
+    {
+      "send": {
+        "key": "deployments:b",
+        "trigger": { "type": "start", "region": "us-west-2" }
+      }
+    }
+  ],
+  "then": {
+    "sends": [
+      { "outcome": "rejected", "code": "CONSTRAINT_VIOLATED" },
+      { "outcome": "committed", "state": "deploying", "seq": 1 }
+    ],
+    "events": {
+      "deployments:a": [
+        { "type": "transition", "from": null, "to": "pending", "seq": 0 },
+        {
+          "type": "violation",
+          "seq": 0,
+          "policy": "reject",
+          "constraint": { "kind": "guard", "name": "region-required" },
+          "reason": "a deployment cannot start without a region",
+          "attempted": { "from": "pending", "to": "deploying" }
+        }
+      ],
+      "deployments:b": [
+        { "type": "transition", "from": null, "to": "pending", "seq": 0 },
+        {
+          "type": "transition",
+          "from": "pending",
+          "to": "deploying",
+          "seq": 1,
+          "values": { "region": "us-west-2" }
+        }
+      ]
+    },
+    "state": {
+      "deployments:a": { "state": "pending", "seq": 0 },
+      "deployments:b": { "state": "deploying", "seq": 1 }
+    }
+  }
+}

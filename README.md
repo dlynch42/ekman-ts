@@ -37,6 +37,13 @@ export const deployments = defineEntity("deployments", {
   },
   onError: { unauthorized: handleUnauthorized },
   unknown: "reject",
+  // Opt-in strictness, each piece with its own reject / warn / off dial
+  constraints: {
+    transitions: { allow: { pending: ["deploying"], deploying: ["live", "failed"] } },
+    guards:      [{ on: "deploying", check: (next) => next.values.region !== undefined }],
+    invariants:  [{ name: "attempts-sane", check: (next) => next.values.attempts >= 0 }],
+    temporal:    [{ in: "deploying", within: 10 * MINUTE, escalateTo: "failed" }],
+  },
 })
 
 // Configure the runtime once at the entrypoint
@@ -62,7 +69,11 @@ ekman.query({ entity: "deployments", state: "deploying", olderThan: "5m" })
 ekman.history("deployments:abc123")
 ```
 
-Every instance gets a human-readable key, its own state and values, a bounded inbox that serializes its triggers, and an append-only transition history. Unknown states and triggers fail loudly. Constraints (transition graphs, guards, invariants, time-in-state bounds) are opt-in, each with a `reject` / `warn` / `off` dial.
+Every instance gets a human-readable key, its own state and values, a bounded inbox that serializes its triggers, and an append-only transition history. Unknown states and triggers fail loudly.
+
+Constraints (transition graphs, guards, invariants, time-in-state bounds) are opt-in, each with a `reject` / `warn` / `off` dial. `warn` is the point of the dial: turn a constraint on in `warn`, read the violations your real traffic produces, and switch to `reject` once you know what your graph actually is. Violations land in the same per-key stream as transitions under either policy, so "everything that would have been refused last week" is one query rather than a log-scraping exercise. A refused result is classified, so `onError` can catch it and commit something legal instead.
+
+A time-in-state bound fires as a *trigger*, never as a write. The runtime hands your handler the escalation and your handler decides, exactly as with any other input, which keeps every state change attributable to one piece of your code. Evaluate on your own schedule with `temporal: { sweepMs }`, or call `await ekman.sweep()` yourself.
 
 The inbox is bounded in **triggers, not bytes**: `capacity` is how many triggers may wait behind the one being handled, and is unrelated to `memory`, which is the byte budget. A `capacity` of 0 means one at a time with no backlog. When it fills, the overflow policy decides, and the sender always finds out. `reject` is backpressure (`INBOX_OVERFLOW`, the trigger did not land); `drop-newest` and `drop-oldest` are shedding (`TRIGGER_DROPPED`, the trigger is gone on purpose). Overflow is always visible in telemetry, and never in the transition history unless you ask for it with `recordOverflow`.
 

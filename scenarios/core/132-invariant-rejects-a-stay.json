@@ -1,0 +1,87 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/132-invariant-rejects-a-stay",
+  "name": "an invariant is checked on a stay that changes values, and refuses the update without moving the instance",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "accounts",
+        "initial": "open",
+        "values": { "balance": 10 },
+        "constraints": {
+          "invariants": [
+            {
+              "name": "balance-non-negative",
+              "in": ["open"],
+              "check": {
+                "values": "balance",
+                "gte": 0,
+                "reason": "balance may not go below zero"
+              }
+            }
+          ]
+        },
+        "states": [
+          {
+            "state": "open",
+            "cases": [
+              {
+                "when": { "trigger": "overdraw" },
+                "do": { "result": "stay", "values": { "balance": -5 } }
+              },
+              {
+                "when": { "trigger": "deposit" },
+                "do": { "result": "stay", "values": { "balance": 20 } }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    { "send": { "key": "accounts:1", "trigger": { "type": "overdraw" } } },
+    { "send": { "key": "accounts:1", "trigger": { "type": "deposit" } } }
+  ],
+  "then": {
+    "sends": [
+      { "outcome": "rejected", "code": "CONSTRAINT_VIOLATED" },
+      {
+        "outcome": "committed",
+        "state": "open",
+        "seq": 1,
+        "values": { "balance": 20 }
+      }
+    ],
+    "events": {
+      "accounts:1": [
+        {
+          "type": "transition",
+          "from": null,
+          "to": "open",
+          "seq": 0,
+          "values": { "balance": 10 }
+        },
+        {
+          "type": "violation",
+          "seq": 0,
+          "policy": "reject",
+          "constraint": { "kind": "invariant", "name": "balance-non-negative" },
+          "reason": "balance may not go below zero",
+          "attempted": { "from": "open", "to": "open" }
+        },
+        {
+          "type": "transition",
+          "from": "open",
+          "to": "open",
+          "seq": 1,
+          "values": { "balance": 20 }
+        }
+      ]
+    },
+    "state": {
+      "accounts:1": { "state": "open", "seq": 1, "values": { "balance": 20 } }
+    }
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/131-guard-check-that-throws-is-a-violation",
+  "name": "a check that throws counts as a violation rather than as a pass",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "pending",
+        "constraints": {
+          "guards": [
+            {
+              "name": "broken",
+              "on": "approved",
+              "check": { "values": "any", "exists": true, "throw": "boom" }
+            }
+          ]
+        },
+        "states": [
+          {
+            "state": "pending",
+            "cases": [
+              {
+                "when": { "trigger": "approve" },
+                "do": { "result": "transitionTo", "to": "approved" }
+              }
+            ]
+          },
+          { "state": "approved", "else": { "result": "stay" } }
+        ]
+      }
+    ]
+  },
+  "when": [{ "send": { "key": "orders:1", "trigger": { "type": "approve" } } }],
+  "then": {
+    "sends": [{ "outcome": "rejected", "code": "CONSTRAINT_VIOLATED" }],
+    "events": {
+      "orders:1": [
+        { "type": "transition", "from": null, "to": "pending", "seq": 0 },
+        {
+          "type": "violation",
+          "policy": "reject",
+          "constraint": { "kind": "guard", "name": "broken" }
+        }
+      ]
+    },
+    "state": { "orders:1": { "state": "pending", "seq": 0 } }
+  }
+}

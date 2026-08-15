@@ -1,0 +1,117 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/140-temporal-escalates-as-a-trigger",
+  "name": "a temporal bound fires as a trigger through normal dispatch, so the handler is what moves the instance",
+  "level": "core",
+  "given": {
+    "runtime": { "clock": { "start": 0, "stepMs": 0 } },
+    "entities": [
+      {
+        "name": "deployments",
+        "initial": "pending",
+        "constraints": {
+          "temporal": [
+            {
+              "name": "deploy-timeout",
+              "in": "deploying",
+              "within": 600000,
+              "escalateTo": "stalled",
+              "trigger": "deploy.stalled"
+            }
+          ]
+        },
+        "states": [
+          {
+            "state": "pending",
+            "cases": [
+              {
+                "when": { "trigger": "start" },
+                "do": { "result": "transitionTo", "to": "deploying" }
+              }
+            ]
+          },
+          {
+            "state": "deploying",
+            "cases": [
+              {
+                "when": { "trigger": "deploy.stalled" },
+                "do": {
+                  "result": "transitionTo",
+                  "to": { "$trigger": "escalateTo" },
+                  "values": { "stalledAfterMs": { "$trigger": "sinceMs" } }
+                }
+              }
+            ]
+          },
+          { "state": "stalled", "else": { "result": "stay" } }
+        ]
+      }
+    ]
+  },
+  "when": [
+    { "send": { "key": "deployments:a", "trigger": { "type": "start" } } },
+    { "advance": 600000 },
+    { "sweep": true }
+  ],
+  "then": {
+    "sends": [{ "outcome": "committed", "state": "deploying", "seq": 1 }],
+    "telemetry": [
+      {
+        "type": "constraint.violated",
+        "kind": "temporal",
+        "constraint": "deploy-timeout",
+        "policy": "reject",
+        "state": "deploying"
+      },
+      {
+        "type": "constraint.escalated",
+        "constraint": "deploy-timeout",
+        "elapsedMs": 600000,
+        "escalateTo": "stalled",
+        "delivered": true
+      }
+    ],
+    "events": {
+      "deployments:a": [
+        {
+          "type": "transition",
+          "from": null,
+          "to": "pending",
+          "seq": 0,
+          "at": 0
+        },
+        {
+          "type": "transition",
+          "from": "pending",
+          "to": "deploying",
+          "seq": 1,
+          "at": 0
+        },
+        {
+          "type": "violation",
+          "seq": 1,
+          "at": 600000,
+          "policy": "reject",
+          "constraint": { "kind": "temporal", "name": "deploy-timeout" },
+          "cause": { "type": "deploy.stalled", "id": "t2" }
+        },
+        {
+          "type": "transition",
+          "from": "deploying",
+          "to": "stalled",
+          "seq": 2,
+          "at": 600000,
+          "values": { "stalledAfterMs": 600000 },
+          "cause": { "type": "deploy.stalled", "id": "t2" }
+        }
+      ]
+    },
+    "state": {
+      "deployments:a": {
+        "state": "stalled",
+        "seq": 2,
+        "values": { "stalledAfterMs": 600000 }
+      }
+    }
+  }
+}

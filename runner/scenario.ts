@@ -22,6 +22,7 @@ export interface Given {
     readonly clock?: { readonly start: number; readonly stepMs: number };
     readonly inbox?: InboxSpec;
     readonly execution?: PolicySpec;
+    readonly temporal?: { readonly sweepMs?: number };
   };
   readonly entities: readonly EntitySpec[];
 }
@@ -55,6 +56,62 @@ export interface EntitySpec {
   /** Entity-wide execution policy, over the runtime's and under any state's. */
   readonly policy?: PolicySpec;
   readonly states: readonly StateSpec[];
+  readonly constraints?: ConstraintsSpec;
+  /** Recovery handlers keyed by error classification, with `*` as the fallback. */
+  readonly onError?: Readonly<Record<string, DoSpec>>;
+}
+
+export type ViolationPolicySpec = "reject" | "warn" | "off";
+
+export interface ConstraintsSpec {
+  readonly transitions?: {
+    readonly policy?: ViolationPolicySpec;
+    readonly allow: Readonly<Record<string, readonly string[]>>;
+  };
+  readonly guards?: readonly {
+    readonly name?: string;
+    readonly on: string;
+    readonly policy?: ViolationPolicySpec;
+    readonly check: CheckSpec;
+  }[];
+  readonly invariants?: readonly {
+    readonly name?: string;
+    readonly in?: readonly string[];
+    readonly policy?: ViolationPolicySpec;
+    readonly check: CheckSpec;
+  }[];
+  readonly temporal?: readonly {
+    readonly name?: string;
+    readonly in: string;
+    readonly within: number;
+    readonly escalateTo?: string;
+    readonly trigger?: string;
+    readonly policy?: ViolationPolicySpec;
+  }[];
+}
+
+/**
+ * A guard or invariant condition, expressed as data.
+ *
+ * One source (`values`, `trigger`, or `state`) and one predicate (`exists`, `equals`,
+ * `gte`, or `lte`), which is enough to express every condition the suite needs without a
+ * expression language every port would then have to implement identically.
+ */
+export interface CheckSpec {
+  /** Dot path into the values being proposed. Empty string is the whole map. */
+  readonly values?: string;
+  /** Dot path into the trigger. */
+  readonly trigger?: string;
+  /** Read the proposed state name. */
+  readonly state?: true;
+  readonly exists?: boolean;
+  readonly equals?: unknown;
+  readonly gte?: number;
+  readonly lte?: number;
+  /** Reported as the violation's reason when the check does not hold. */
+  readonly reason?: string;
+  /** Throw instead of answering, exercising the broken-check path. */
+  readonly throw?: string;
 }
 
 export interface StateSpec {
@@ -76,7 +133,8 @@ export interface CaseSpec {
 
 export interface DoSpec {
   readonly result?: "transitionTo" | "stay" | "fail";
-  readonly to?: string;
+  /** A state name, or a value expression resolving to one. */
+  readonly to?: unknown;
   readonly values?: unknown;
   readonly error?: string;
   readonly errorName?: string;
@@ -94,7 +152,14 @@ export type Step =
    * Wall-clock pause. For work the runtime is still doing after every send has settled,
    * which is exactly the case a fenced zombie exercises.
    */
-  | { readonly wait: number };
+  | { readonly wait: number }
+  /**
+   * Move the declared clock forward. Time-in-state is measured on that clock, so this is
+   * how a scenario ages an instance without waiting.
+   */
+  | { readonly advance: number }
+  /** Evaluate temporal constraints once and settle whatever they escalate. */
+  | { readonly sweep: true };
 
 export interface TriggerSpec {
   readonly type: string;
@@ -143,6 +208,18 @@ export function isWaitStep(
   step: Step
 ): step is Extract<Step, { wait: number }> {
   return "wait" in step;
+}
+
+export function isAdvanceStep(
+  step: Step
+): step is Extract<Step, { advance: number }> {
+  return "advance" in step;
+}
+
+export function isSweepStep(
+  step: Step
+): step is Extract<Step, { sweep: true }> {
+  return "sweep" in step;
 }
 
 /** The scenarios directory, resolved relative to this file so the cwd does not matter. */

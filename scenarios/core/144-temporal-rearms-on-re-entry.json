@@ -1,0 +1,74 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/144-temporal-rearms-on-re-entry",
+  "name": "leaving and re-entering a watched state restarts its clock and arms the bound again",
+  "level": "core",
+  "given": {
+    "runtime": { "clock": { "start": 0, "stepMs": 0 } },
+    "entities": [
+      {
+        "name": "deployments",
+        "initial": "deploying",
+        "constraints": {
+          "temporal": [{ "name": "stuck", "in": "deploying", "within": 100 }]
+        },
+        "states": [
+          {
+            "state": "deploying",
+            "cases": [
+              {
+                "when": { "trigger": "constraint.temporal" },
+                "do": { "result": "transitionTo", "to": "idle" }
+              }
+            ]
+          },
+          {
+            "state": "idle",
+            "cases": [
+              {
+                "when": { "trigger": "redeploy" },
+                "do": { "result": "transitionTo", "to": "deploying" }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    { "send": { "key": "deployments:a", "trigger": { "type": "start" } } },
+    { "advance": 500 },
+    { "sweep": true },
+    { "send": { "key": "deployments:a", "trigger": { "type": "redeploy" } } },
+    { "sweep": true },
+    { "advance": 500 },
+    { "sweep": true }
+  ],
+  "then": {
+    "events": {
+      "deployments:a": [
+        { "type": "transition", "from": null, "to": "deploying", "seq": 0 },
+        {
+          "type": "transition",
+          "from": "deploying",
+          "to": "deploying",
+          "seq": 1
+        },
+        {
+          "type": "violation",
+          "seq": 1,
+          "constraint": { "kind": "temporal", "name": "stuck" }
+        },
+        { "type": "transition", "from": "deploying", "to": "idle", "seq": 2 },
+        { "type": "transition", "from": "idle", "to": "deploying", "seq": 3 },
+        {
+          "type": "violation",
+          "seq": 3,
+          "constraint": { "kind": "temporal", "name": "stuck" }
+        },
+        { "type": "transition", "from": "deploying", "to": "idle", "seq": 4 }
+      ]
+    },
+    "state": { "deployments:a": { "state": "idle", "seq": 4 } }
+  }
+}

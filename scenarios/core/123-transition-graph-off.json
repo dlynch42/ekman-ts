@@ -1,0 +1,43 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/123-transition-graph-off",
+  "name": "an off constraint is not evaluated and records nothing",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "pending",
+        "constraints": {
+          "transitions": {
+            "policy": "off",
+            "allow": { "pending": ["approved"] }
+          }
+        },
+        "states": [
+          {
+            "state": "pending",
+            "cases": [
+              {
+                "when": { "trigger": "ship" },
+                "do": { "result": "transitionTo", "to": "shipped" }
+              }
+            ]
+          },
+          { "state": "approved", "else": { "result": "stay" } },
+          { "state": "shipped", "else": { "result": "stay" } }
+        ]
+      }
+    ]
+  },
+  "when": [{ "send": { "key": "orders:1", "trigger": { "type": "ship" } } }],
+  "then": {
+    "sends": [{ "outcome": "committed", "state": "shipped", "seq": 1 }],
+    "events": {
+      "orders:1": [
+        { "type": "transition", "from": null, "to": "pending", "seq": 0 },
+        { "type": "transition", "from": "pending", "to": "shipped", "seq": 1 }
+      ]
+    }
+  }
+}

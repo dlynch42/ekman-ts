@@ -1,0 +1,62 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/121-transition-graph-rejects",
+  "name": "an undeclared transition is refused, records a violation, and leaves the instance where it was",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "pending",
+        "constraints": {
+          "transitions": {
+            "policy": "reject",
+            "allow": { "pending": ["approved"], "approved": ["shipped"] }
+          }
+        },
+        "states": [
+          {
+            "state": "pending",
+            "cases": [
+              {
+                "when": { "trigger": "ship" },
+                "do": { "result": "transitionTo", "to": "shipped" }
+              }
+            ]
+          },
+          { "state": "approved", "else": { "result": "stay" } },
+          { "state": "shipped", "else": { "result": "stay" } }
+        ]
+      }
+    ]
+  },
+  "when": [{ "send": { "key": "orders:1", "trigger": { "type": "ship" } } }],
+  "then": {
+    "sends": [{ "outcome": "rejected", "code": "CONSTRAINT_VIOLATED" }],
+    "telemetry": [
+      {
+        "type": "constraint.violated",
+        "key": "orders:1",
+        "kind": "transition",
+        "constraint": "transitions",
+        "policy": "reject",
+        "state": "pending"
+      }
+    ],
+    "events": {
+      "orders:1": [
+        { "type": "transition", "from": null, "to": "pending", "seq": 0 },
+        {
+          "type": "violation",
+          "key": "orders:1",
+          "seq": 0,
+          "policy": "reject",
+          "constraint": { "kind": "transition", "name": "transitions" },
+          "attempted": { "from": "pending", "to": "shipped" },
+          "cause": { "type": "ship", "id": "t1" }
+        }
+      ]
+    },
+    "state": { "orders:1": { "state": "pending", "seq": 0 } }
+  }
+}

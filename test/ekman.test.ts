@@ -828,3 +828,205 @@ describe("remaining edges", () => {
     }
   });
 });
+
+/** A clock frozen until something moves it, which is what elapsed time needs. */
+const frozenClock = (start = 0) => {
+  let t = start;
+  return {
+    now: () => t,
+    advance: (ms: number) => {
+      t += ms;
+    },
+  };
+};
+
+const stalling = defineEntity("stalling", {
+  initial: "deploying",
+  states: {
+    deploying: (_i, trigger) =>
+      trigger.type === "constraint.temporal"
+        ? transitionTo("stalled", { after: trigger.sinceMs as number })
+        : stay(),
+    stalled: () => stay(),
+  },
+  constraints: {
+    temporal: [{ name: "too-slow", in: "deploying", within: 100 }],
+  },
+});
+
+describe("sweeping for temporal constraints", () => {
+  it("does nothing when no entity declares one", async () => {
+    const ekman = new Ekman({ entities: [orders] });
+    await ekman.entities.orders.send("1", { type: "approve", actor: "amy" });
+
+    expect(await ekman.sweep()).toBe(0);
+    await ekman.close();
+  });
+
+  it("fires once the bound has elapsed and reports how many fired", async () => {
+    const clock = frozenClock();
+    const ekman = new Ekman({ entities: [stalling], now: clock.now });
+    await ekman.entities.stalling.send("a", { type: "start" });
+
+    expect(await ekman.sweep()).toBe(0);
+    clock.advance(100);
+    expect(await ekman.sweep()).toBe(1);
+
+    expect(ekman.entities.stalling.inspect("a")).toMatchObject({
+      state: "stalled",
+      values: { after: 100 },
+    });
+    await ekman.close();
+  });
+
+  it("returns immediately rather than overlapping a pass already running", async () => {
+    const clock = frozenClock();
+    const ekman = new Ekman({ entities: [stalling], now: clock.now });
+    await ekman.entities.stalling.send("a", { type: "start" });
+    clock.advance(500);
+
+    // Both are started before either is awaited, so the second one meets the first
+    // mid-pass. Overlapping passes would double-fire, which the guard exists to prevent.
+    const [first, second] = await Promise.all([ekman.sweep(), ekman.sweep()]);
+
+    expect(first + second).toBe(1);
+    await ekman.close();
+  });
+
+  it("reports an escalation that could not be delivered rather than swallowing it", async () => {
+    const stuck = defineEntity("stuck", {
+      initial: "waiting",
+      states: { waiting: () => stay(), other: () => stay() },
+      // The entity recognizes only this one trigger type, so its own escalation is
+      // refused on arrival. Contrived, but it is the same shape as the realistic case:
+      // an instance stranded in a state whose handler was removed.
+      triggers: ["begin"],
+      constraints: {
+        temporal: [{ name: "waited", in: "waiting", within: 10 }],
+      },
+    });
+
+    const clock = frozenClock();
+    const unhandled: unknown[] = [];
+    const events: TelemetryEvent[] = [];
+    const ekman = new Ekman({
+      entities: [stuck],
+      now: clock.now,
+      onUnhandled: (error) => unhandled.push(error),
+      telemetry: { "*": (event) => events.push(event) },
+    });
+
+    await ekman.entities.stuck.send("a", { type: "begin" });
+    clock.advance(50);
+    expect(await ekman.sweep()).toBe(1);
+
+    expect((unhandled[0] as EkmanError).code).toBe("UNKNOWN_TRIGGER");
+    expect(events.find((e) => e.type === "constraint.escalated")).toMatchObject(
+      { delivered: false, constraint: "waited" }
+    );
+    await ekman.close();
+  });
+
+  it("sweeps on its own interval when one is configured", async () => {
+    const clock = frozenClock();
+    const ekman = new Ekman({
+      entities: [stalling],
+      now: clock.now,
+      temporal: { sweepMs: 1 },
+    });
+
+    await ekman.entities.stalling.send("a", { type: "start" });
+    clock.advance(500);
+
+    await vi.waitFor(() =>
+      expect(ekman.entities.stalling.inspect("a")).toMatchObject({
+        state: "stalled",
+      })
+    );
+
+    await ekman.close();
+  });
+
+  it("stops sweeping once closed", async () => {
+    const clock = frozenClock();
+    const ekman = new Ekman({
+      entities: [stalling],
+      now: clock.now,
+      temporal: { sweepMs: 1 },
+    });
+
+    await ekman.entities.stalling.send("a", { type: "start" });
+    await ekman.close();
+    await ekman.close(); // idempotent: shutdown code should not have to check
+
+    clock.advance(500);
+    await new Promise((done) => setTimeout(done, 20));
+
+    expect(ekman.entities.stalling.inspect("a")).toMatchObject({
+      state: "deploying",
+    });
+  });
+
+  it.each([0, -1, Number.NaN])(
+    "refuses a sweep interval of %s at construction",
+    (sweepMs) => {
+      expect(
+        () => new Ekman({ entities: [stalling], temporal: { sweepMs } })
+      ).toThrow(EkmanError);
+    }
+  );
+
+  it("skips a key that left the watched state while the pass was running", async () => {
+    // A pass walks a snapshot of the keys in a state. An escalation is dispatched, so
+    // anything it does can move a *different* instance out from under the rest of the
+    // walk. The sweep has to notice rather than escalate against a stale reading.
+    const holder: { ekman?: Ekman } = {};
+
+    const gossip = defineEntity("gossip", {
+      initial: "waiting",
+      states: {
+        waiting: async (instance, trigger) => {
+          if (
+            trigger.type === "constraint.temporal" &&
+            instance.key === "gossip:a"
+          ) {
+            await holder.ekman?.send("gossip:b", { type: "move" });
+          }
+          return trigger.type === "move" ? transitionTo("done") : stay();
+        },
+        done: () => stay(),
+      },
+      constraints: {
+        temporal: [{ name: "waited", in: "waiting", within: 10 }],
+      },
+    });
+
+    const clock = frozenClock();
+    const ekman = new Ekman({ entities: [gossip], now: clock.now });
+    holder.ekman = ekman;
+
+    await ekman.entities.gossip.send("a", { type: "start" });
+    await ekman.entities.gossip.send("b", { type: "start" });
+    clock.advance(100);
+
+    // Only `a` fires. By the time the walk reaches `b` it has already moved to `done`,
+    // which nothing watches.
+    expect(await ekman.sweep()).toBe(1);
+    expect(ekman.entities.gossip.inspect("b")).toMatchObject({ state: "done" });
+    await ekman.close();
+  });
+
+  it("skips an instance the index no longer agrees with", async () => {
+    const clock = frozenClock();
+    const ekman = new Ekman({ entities: [stalling], now: clock.now });
+
+    await ekman.entities.stalling.send("a", { type: "start" });
+    clock.advance(500);
+    await ekman.sweep();
+
+    // Now in `stalled`, which nothing watches. A second pass finds the key gone from the
+    // watched bucket and must not fire again.
+    expect(await ekman.sweep()).toBe(0);
+    await ekman.close();
+  });
+});
