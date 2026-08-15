@@ -90,6 +90,24 @@ Telemetry is a separate stream from history, by design. Queue depth, handler dur
 
 The server runtime is the reference target. The behavioral contract is written so client and embedded implementations remain possible.
 
+## Conformance
+
+Ekman's behaviour is defined by a language-agnostic scenario suite in [`scenarios/`](./scenarios),
+which every implementation copies verbatim and runs through its own public API. Passing the
+scenarios at a level is what it means to conform at that level.
+
+| Level | Status | Covers |
+|---|---|---|
+| Core | **passing** | Entities, dispatch, commit, ordering, bounded inbox, execution policy, fencing, telemetry |
+| Durable | not claimed | Durable store, replay, snapshot on evict, queries |
+| Coordinated | not claimed | Multi-runtime conflict detection |
+
+```
+npm run conformance
+```
+
+Reports pass or fail per scenario per level, and exits non-zero if a claimed level fails.
+
 ## Roadmap
 
 - **v0.1**: TypeScript reference implementation. Entities, dispatch, per-key inbox, retries/timeouts/fencing, memory budget, memory/file stores, transition history.

@@ -4,12 +4,7 @@
   "title": "Ekman conformance scenario",
   "description": "One conformance scenario. See scenarios/README.md for prose documentation.",
   "type": "object",
-  "required": [
-    "id",
-    "name",
-    "level",
-    "given"
-  ],
+  "required": ["id", "name", "level", "given"],
   "additionalProperties": false,
   "properties": {
     "$schema": {
@@ -24,11 +19,7 @@
       "minLength": 1
     },
     "level": {
-      "enum": [
-        "core",
-        "durable",
-        "coordinated"
-      ]
+      "enum": ["core", "durable", "coordinated"]
     },
     "given": {
       "$ref": "#/$defs/given"
@@ -46,9 +37,7 @@
   "$defs": {
     "given": {
       "type": "object",
-      "required": [
-        "entities"
-      ],
+      "required": ["entities"],
       "additionalProperties": false,
       "properties": {
         "runtime": {
@@ -57,10 +46,7 @@
           "properties": {
             "clock": {
               "type": "object",
-              "required": [
-                "start",
-                "stepMs"
-              ],
+              "required": ["start", "stepMs"],
               "additionalProperties": false,
               "properties": {
                 "start": {
@@ -83,11 +69,7 @@
                   "minimum": 0
                 },
                 "overflow": {
-                  "enum": [
-                    "reject",
-                    "drop-newest",
-                    "drop-oldest"
-                  ]
+                  "enum": ["reject", "drop-newest", "drop-oldest"]
                 },
                 "recordOverflow": {
                   "type": "boolean"
@@ -110,11 +92,7 @@
     },
     "entity": {
       "type": "object",
-      "required": [
-        "name",
-        "initial",
-        "states"
-      ],
+      "required": ["name", "initial", "states"],
       "additionalProperties": false,
       "properties": {
         "name": {
@@ -129,9 +107,7 @@
           "type": "object"
         },
         "unknown": {
-          "enum": [
-            "reject"
-          ]
+          "enum": ["reject"]
         },
         "triggers": {
           "type": "array",
@@ -153,9 +129,7 @@
     },
     "stateSpec": {
       "type": "object",
-      "required": [
-        "state"
-      ],
+      "required": ["state"],
       "additionalProperties": false,
       "properties": {
         "state": {
@@ -166,9 +140,7 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": [
-              "do"
-            ],
+            "required": ["do"],
             "additionalProperties": false,
             "properties": {
               "when": {
@@ -205,11 +177,7 @@
       "additionalProperties": false,
       "properties": {
         "result": {
-          "enum": [
-            "transitionTo",
-            "stay",
-            "fail"
-          ]
+          "enum": ["transitionTo", "stay", "fail"]
         },
         "to": {
           "type": "string",
@@ -232,14 +200,10 @@
       },
       "anyOf": [
         {
-          "required": [
-            "result"
-          ]
+          "required": ["result"]
         },
         {
-          "required": [
-            "throw"
-          ]
+          "required": ["throw"]
         }
       ],
       "allOf": [
@@ -250,21 +214,15 @@
                 "const": "transitionTo"
               }
             },
-            "required": [
-              "result"
-            ]
+            "required": ["result"]
           },
           "then": {
-            "required": [
-              "to"
-            ]
+            "required": ["to"]
           }
         },
         {
           "if": {
-            "required": [
-              "to"
-            ]
+            "required": ["to"]
           },
           "then": {
             "properties": {
@@ -283,10 +241,7 @@
       "properties": {
         "send": {
           "type": "object",
-          "required": [
-            "key",
-            "trigger"
-          ],
+          "required": ["key", "trigger"],
           "additionalProperties": false,
           "properties": {
             "key": {
@@ -294,9 +249,7 @@
             },
             "trigger": {
               "type": "object",
-              "required": [
-                "type"
-              ],
+              "required": ["type"],
               "properties": {
                 "type": {
                   "type": "string"
@@ -322,14 +275,10 @@
       },
       "oneOf": [
         {
-          "required": [
-            "send"
-          ]
+          "required": ["send"]
         },
         {
-          "required": [
-            "drain"
-          ]
+          "required": ["drain"]
         }
       ]
     },
@@ -341,16 +290,11 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": [
-              "outcome"
-            ],
+            "required": ["outcome"],
             "additionalProperties": false,
             "properties": {
               "outcome": {
-                "enum": [
-                  "committed",
-                  "rejected"
-                ]
+                "enum": ["committed", "rejected"]
               },
               "state": {
                 "type": "string"
@@ -376,18 +320,10 @@
               "type": "object",
               "properties": {
                 "type": {
-                  "enum": [
-                    "transition",
-                    "rejected",
-                    "violation",
-                    "restore"
-                  ]
+                  "enum": ["transition", "rejected", "violation", "restore"]
                 },
                 "from": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
+                  "type": ["string", "null"]
                 },
                 "to": {
                   "type": "string"
@@ -414,9 +350,7 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": [
-              "type"
-            ],
+            "required": ["type"],
             "properties": {
               "type": {
                 "enum": [
@@ -436,10 +370,7 @@
         "state": {
           "type": "object",
           "additionalProperties": {
-            "type": [
-              "object",
-              "null"
-            ],
+            "type": ["object", "null"],
             "additionalProperties": false,
             "properties": {
               "state": {
@@ -457,9 +388,7 @@
         },
         "buildError": {
           "type": "object",
-          "required": [
-            "code"
-          ],
+          "required": ["code"],
           "additionalProperties": false,
           "properties": {
             "code": {
@@ -507,10 +436,7 @@
           "additionalProperties": false,
           "properties": {
             "kind": {
-              "enum": [
-                "fixed",
-                "exponential"
-              ]
+              "enum": ["fixed", "exponential"]
             },
             "delayMs": {
               "type": "integer",
@@ -529,9 +455,7 @@
               "minimum": 0
             }
           },
-          "required": [
-            "kind"
-          ]
+          "required": ["kind"]
         }
       }
     }
