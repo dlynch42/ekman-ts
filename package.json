@@ -38,6 +38,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
     "conformance": "tsx runner/cli.ts",
     "lint": "eslint .",
     "format": "prettier --write .",
