@@ -1,8 +1,9 @@
 import type { AuditSink } from "./audit";
 import type { CompiledConstraints, ConstraintsConfig } from "./constraints";
-import type { EkmanEvent, TransitionEvent } from "./events";
+import type { TransitionEvent } from "./events";
 import type { MemoryConfig } from "./memory";
 import type { ExecutionPolicy } from "./policy";
+import type { HistoryResult, QueryCriteria, QueryResult } from "./query";
 import type { HandlerResult } from "./results";
 import type { Store } from "./store";
 // Type-only, and so erased: `telemetry.ts` names `OverflowPolicy` from here, and this
@@ -249,7 +250,10 @@ export interface EntityHandle<
   /** Fire and forget. Wraps `send` and swallows nothing: failures surface as telemetry. */
   post: (id: string, trigger: T) => void;
   inspect: (id: string) => InstanceSnapshot<S, V> | undefined;
-  history: (id: string) => readonly EkmanEvent<S, V>[];
+  /** The full per-key stream, read through the store when one is configured. */
+  history: (id: string) => Promise<HistoryResult<S, V>>;
+  /** This entity's instances by state and time in state. */
+  query: (criteria?: Omit<QueryCriteria, "entity">) => Promise<QueryResult>;
 }
 
 type HandleFor<D> =

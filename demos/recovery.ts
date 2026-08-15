@@ -91,9 +91,23 @@ async function main(): Promise<void> {
   console.log("\nafter the restart:");
   report(second);
 
-  console.log("\nalpha's stream, as this runtime saw it:");
-  for (const event of second.entities.deployments.history("alpha")) {
+  // The whole life of the instance, read back through the store: what the first runtime
+  // wrote, the point this one picked it up, and what it has done since.
+  console.log("\nalpha's stream, from before the crash to now:");
+  const { events, complete } =
+    await second.entities.deployments.history("alpha");
+  for (const event of events) {
     console.log(`  ${describe(event)}`);
+  }
+  console.log(`  (complete: ${complete})`);
+
+  // What is stuck, and for how long: the question the whole operational layer exists for.
+  const stuck = await second.entities.deployments.query({ state: "failed" });
+  console.log("\nanything left failed:");
+  for (const instance of stuck.instances) {
+    console.log(
+      `  ${instance.key}  ${instance.state}  age=${instance.ageMs}ms`
+    );
   }
 
   await second.close();

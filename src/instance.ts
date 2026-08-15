@@ -202,6 +202,20 @@ export class InstanceRecord<
     return this.#pending !== undefined;
   }
 
+  /**
+   * Resolves once every write this instance has queued has reached the store.
+   *
+   * Rejections and violations are written without being awaited, so a read of the store
+   * taken immediately after one could miss it. Anything reading the durable stream waits
+   * on this first, which is cheaper than making every refusal await its own write.
+   *
+   * Never rejects: the chain it returns is the non-rejecting one, and a failed write has
+   * already been reported through `onUnhandled`.
+   */
+  flushed(): Promise<void> {
+    return this.#writes;
+  }
+
   /** The immutable view a handler receives. */
   snapshot(): InstanceSnapshot<S, V> {
     return Object.freeze({

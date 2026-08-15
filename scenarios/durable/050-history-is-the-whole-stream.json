@@ -1,0 +1,66 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "durable/050-history-is-the-whole-stream",
+  "name": "history interleaves transitions, refusals, violations and restores, and covers the instance's whole life rather than this process's view of it",
+  "level": "durable",
+  "given": {
+    "runtime": {
+      "store": [{ "kind": "file" }],
+      "inbox": { "recordOverflow": true }
+    },
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "open",
+        "triggers": ["advance", "nudge"],
+        "constraints": {
+          "transitions": { "policy": "warn", "allow": { "open": ["open"] } }
+        },
+        "states": [
+          {
+            "state": "open",
+            "cases": [
+              {
+                "when": { "trigger": "advance" },
+                "do": { "result": "transitionTo", "to": "closed" }
+              }
+            ],
+            "else": { "result": "stay", "values": { "nudged": true } }
+          },
+          { "state": "closed", "else": { "result": "stay" } }
+        ]
+      }
+    ]
+  },
+  "when": [
+    { "send": { "key": "orders:1", "trigger": { "type": "nudge" } } },
+    { "send": { "key": "orders:1", "trigger": { "type": "unrecognized" } } },
+    { "send": { "key": "orders:1", "trigger": { "type": "advance" } } },
+    { "restart": true },
+    { "send": { "key": "orders:1", "trigger": { "type": "nudge" } } }
+  ],
+  "then": {
+    "sends": [
+      { "outcome": "committed", "seq": 1 },
+      { "outcome": "rejected", "code": "UNKNOWN_TRIGGER" },
+      { "outcome": "committed", "state": "closed", "seq": 2 },
+      { "outcome": "committed", "state": "closed", "seq": 3 }
+    ],
+    "history": {
+      "orders:1": {
+        "events": [
+          "transition@0",
+          "transition@1",
+          "rejected@1",
+          "violation@1",
+          "transition@2",
+          "restored@2",
+          "transition@3"
+        ],
+        "complete": true,
+        "reasons": []
+      }
+    },
+    "state": { "orders:1": { "state": "closed", "seq": 3 } }
+  }
+}

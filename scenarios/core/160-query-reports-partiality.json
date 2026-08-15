@@ -1,0 +1,49 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/160-query-reports-partiality",
+  "name": "a memory-only runtime answers from what it retains and says the answer is partial, rather than presenting it as complete",
+  "level": "core",
+  "given": {
+    "runtime": { "clock": { "start": 0, "stepMs": 0 } },
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "open",
+        "states": [
+          {
+            "state": "open",
+            "cases": [
+              {
+                "when": { "trigger": "close" },
+                "do": { "result": "transitionTo", "to": "closed" }
+              }
+            ]
+          },
+          { "state": "closed", "else": { "result": "stay" } }
+        ]
+      }
+    ]
+  },
+  "when": [
+    { "send": { "key": "orders:1", "trigger": { "type": "touch" } } },
+    { "send": { "key": "orders:2", "trigger": { "type": "close" } } }
+  ],
+  "then": {
+    "queries": [
+      {
+        "entity": "orders",
+        "state": "open",
+        "keys": ["orders:1"],
+        "complete": false,
+        "reasons": ["no-durable-store"]
+      }
+    ],
+    "history": {
+      "orders:1": {
+        "events": ["transition@0", "transition@1"],
+        "complete": false,
+        "reasons": ["no-durable-store"]
+      }
+    }
+  }
+}

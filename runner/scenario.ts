@@ -8,11 +8,11 @@ export type Level = (typeof LEVELS)[number];
 /**
  * Levels this implementation claims.
  *
- * Durable also requires queries, which land in the next phase. Until then the durable
- * scenarios run and must pass, but the level is not claimed: a partial claim is worse than
- * no claim, because someone will believe it.
+ * A level is claimed only when everything it requires is implemented, not when its
+ * scenarios happen to pass: a partial claim is worse than no claim, because someone will
+ * believe it. Coordinated needs multi-runtime conflict handling, which is not built.
  */
-export const CLAIMED_LEVELS: readonly Level[] = ["core"];
+export const CLAIMED_LEVELS: readonly Level[] = ["core", "durable"];
 
 /** Levels whose scenarios are executed, claimed or not. */
 export const RUN_LEVELS: readonly Level[] = ["core", "durable"];
@@ -243,6 +243,29 @@ export interface Then {
   };
   /** Events each audit sink received, by sink name, as `<type>@<seq>`. */
   readonly audit?: Readonly<Record<string, readonly string[]>>;
+  /** Queries to run after everything has settled, each with the answer it must give. */
+  readonly queries?: readonly QueryExpectation[];
+  /** Per-key history reads, for what `then.events` cannot say. */
+  readonly history?: Readonly<Record<string, HistoryExpectation>>;
+}
+
+export interface QueryExpectation {
+  readonly entity: string;
+  readonly state?: string;
+  readonly olderThan?: number | string;
+  readonly limit?: number;
+  /** Matching keys, oldest in state first. */
+  readonly keys: readonly string[];
+  readonly complete?: boolean;
+  /** Asserted as a set when present. */
+  readonly reasons?: readonly string[];
+}
+
+export interface HistoryExpectation {
+  /** The stream as `<type>@<seq>`, in order. */
+  readonly events?: readonly string[];
+  readonly complete?: boolean;
+  readonly reasons?: readonly string[];
 }
 
 export interface SendExpectation {

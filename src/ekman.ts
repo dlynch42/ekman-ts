@@ -11,8 +11,17 @@ import { InstanceRecord } from "./instance";
 import { parseKey } from "./key";
 import type { ResolvedMemoryConfig } from "./memory";
 import { MemoryLedger, resolveMemoryConfig } from "./memory";
+import type {
+  HistoryResult,
+  Partiality,
+  QueryCriteria,
+  QueryMatch,
+  QueryResult,
+} from "./query";
+import { mergeRestores, parseDuration } from "./query";
 import type { ResolvedStack } from "./stack";
 import { resolveStack } from "./stack";
+import type { Store } from "./store";
 import type { TelemetryEvent } from "./telemetry";
 import { emit, telemetryNow } from "./telemetry";
 import { TemporalIndex } from "./temporal";
@@ -192,16 +201,112 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   }
 
   /**
-   * The per-key ordered event stream.
+   * The per-key ordered event stream: transitions, refusals, violations and restores.
    *
-   * Memory-only in this phase, so it covers what this runtime has seen since it started
-   * and nothing before that.
+   * Reads through the commit authority when one is configured, so it covers the instance's
+   * whole life and not only what this process happened to see. With no store it answers
+   * from what is resident, and says so: `complete` is false and `reasons` explains why.
    */
-  history<S extends string = string, V extends Values = Values>(
+  async history<S extends string = string, V extends Values = Values>(
     key: string
-  ): readonly EkmanEvent<S, V>[] {
-    const instance = this.#instances.get(parseKey(key).key);
-    return (instance?.events ?? []) as readonly EkmanEvent<S, V>[];
+  ): Promise<HistoryResult<S, V>> {
+    const parsed = parseKey(key).key;
+    const instance = this.#instances.get(parsed);
+    const { authority } = this.#stack;
+
+    if (authority === undefined) {
+      return Object.freeze({
+        key: parsed,
+        events: (instance?.events ?? []) as readonly EkmanEvent<S, V>[],
+        complete: false,
+        reasons: NO_DURABLE_STORE,
+        sources: RESIDENT_ONLY,
+      });
+    }
+
+    // Refusals and violations are written without being awaited, so without this a read
+    // taken immediately after one could miss it and report a stream with a hole in it.
+    await instance?.flushed();
+
+    const stored = (await authority.read(parsed)) as readonly EkmanEvent<
+      S,
+      V
+    >[];
+
+    return Object.freeze({
+      key: parsed,
+      // Restores are never persisted, so they are woven back in here. Without that, a
+      // stream read after a reload would give no sign that anything was reloaded.
+      events: mergeRestores(
+        stored,
+        (instance?.events ?? []) as readonly EkmanEvent<S, V>[]
+      ),
+      complete: this.#stack.durable,
+      reasons: this.#stack.durable ? NONE : NO_DURABLE_STORE,
+      sources: Object.freeze([authority.name, "resident"]),
+    });
+  }
+
+  /**
+   * Find instances by state and by how long they have been in it.
+   *
+   * "Everything stuck in `deploying` for more than five minutes" is the question this
+   * exists for. Resident instances and stored ones are unioned, with the resident view
+   * winning on any key that appears in both, because it is the more current of the two.
+   *
+   * The answer always says whether it is complete. A memory-only runtime can only report
+   * what it retains, and reporting that as if it were everything is the one thing a query
+   * must never do.
+   */
+  async query(criteria: QueryCriteria): Promise<QueryResult> {
+    const at = this.#now();
+    const olderThanMs =
+      criteria.olderThan === undefined
+        ? undefined
+        : parseDuration(criteria.olderThan);
+
+    const reasons = new Set<Partiality>();
+    const sources = ["resident"];
+    const matches = new Map<string, QueryMatch>();
+
+    for (const match of this.#residentMatches(criteria, olderThanMs, at)) {
+      matches.set(match.key, match);
+    }
+
+    const { authority } = this.#stack;
+    if (authority === undefined) {
+      reasons.add("no-durable-store");
+    } else {
+      sources.push(authority.name);
+      await this.#scanInto(
+        matches,
+        authority,
+        criteria,
+        olderThanMs,
+        at,
+        reasons
+      );
+      if (!this.#stack.durable) {
+        reasons.add("no-durable-store");
+      }
+    }
+
+    // Applied after the union, so a limit cannot silently prefer resident instances over
+    // stored ones or the other way round.
+    const ordered = [...matches.values()].sort(byAgeThenKey);
+    const limited =
+      criteria.limit === undefined ? ordered : ordered.slice(0, criteria.limit);
+
+    if (limited.length < ordered.length) {
+      reasons.add("limit-reached");
+    }
+
+    return Object.freeze({
+      instances: Object.freeze(limited),
+      complete: reasons.size === 0,
+      reasons: Object.freeze([...reasons]),
+      sources: Object.freeze(sources),
+    });
   }
 
   /** Keys of every resident instance. */
@@ -287,6 +392,8 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
         this.post(definition.key(id), trigger),
       inspect: (id: string) => this.inspect(definition.key(id)),
       history: (id: string) => this.history(definition.key(id)),
+      query: (criteria: Omit<QueryCriteria, "entity"> = {}) =>
+        this.query({ ...criteria, entity: definition.name }),
     }) as EntityHandle;
   }
 
@@ -679,18 +786,15 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     constraints: readonly CompiledTemporal[],
     at: number
   ): Promise<number> {
-    const instance = this.#instances.get(key);
-
-    // The index is maintained at commit, so a key found here is in this state. The guard
-    // costs nothing and means a future indexing bug degrades into a missed escalation
-    // rather than one aimed at the wrong state.
-    if (instance === undefined || instance.state !== state) {
+    const aged = this.#ageOf(key, state, at);
+    if (aged === undefined) {
       return 0;
     }
 
+    const { instance, elapsedMs } = aged;
     let fired = 0;
+
     for (const constraint of constraints) {
-      const elapsedMs = at - instance.enteredAt;
       if (elapsedMs < constraint.within || instance.hasFired(constraint.name)) {
         continue;
       }
@@ -702,6 +806,113 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     }
 
     return fired;
+  }
+
+  /**
+   * How long a resident key has been in a state, or undefined if it is not there.
+   *
+   * The single place time-in-state is measured. A temporal constraint asks with a bound
+   * per constraint; a query asks with one bound for everything. Two implementations of the
+   * same question is how the two answers start disagreeing, so there is one.
+   *
+   * The state guard costs nothing and means a future indexing bug degrades into a missed
+   * escalation rather than one aimed at the wrong state.
+   */
+  #ageOf(
+    key: string,
+    state: string,
+    at: number
+  ): { instance: AnyInstance; elapsedMs: number } | undefined {
+    const instance = this.#instances.get(key);
+    if (instance === undefined || instance.state !== state) {
+      return;
+    }
+    return { instance, elapsedMs: at - instance.enteredAt };
+  }
+
+  /** Resident instances matching the criteria, read through the same index the sweep uses. */
+  *#residentMatches(
+    criteria: QueryCriteria,
+    olderThanMs: number | undefined,
+    at: number
+  ): Generator<QueryMatch> {
+    const states =
+      criteria.state === undefined
+        ? this.#temporal.states(criteria.entity)
+        : [criteria.state];
+
+    for (const state of states) {
+      for (const key of this.#temporal.keys(criteria.entity, state)) {
+        const aged = this.#ageOf(key, state, at);
+        if (aged === undefined || (olderThanMs ?? 0) > aged.elapsedMs) {
+          continue;
+        }
+
+        yield {
+          key,
+          entity: criteria.entity,
+          state,
+          seq: aged.instance.seq,
+          enteredAt: aged.instance.enteredAt,
+          ageMs: aged.elapsedMs,
+          resident: true,
+        };
+      }
+    }
+  }
+
+  /**
+   * Add the store's matches, leaving any key the resident view already answered.
+   *
+   * Resident wins because it is the more current of the two: the store lags by whatever is
+   * queued behind the last commit, and an instance in memory is by definition up to date.
+   */
+  async #scanInto(
+    matches: Map<string, QueryMatch>,
+    authority: Store,
+    criteria: QueryCriteria,
+    olderThanMs: number | undefined,
+    at: number,
+    reasons: Set<Partiality>
+  ): Promise<void> {
+    const result = await authority.scan({
+      entity: criteria.entity,
+      now: at,
+      ...(criteria.state === undefined ? {} : { state: criteria.state }),
+      ...(olderThanMs === undefined ? {} : { olderThanMs }),
+    });
+
+    if (!result.complete) {
+      reasons.add("limit-reached");
+    }
+
+    // A store that could not apply a filter says so, and the runtime applies it here
+    // rather than returning rows the caller did not ask for.
+    const unsupported = new Set(result.unsupported);
+    if (unsupported.size > 0) {
+      reasons.add("unsupported-criteria");
+    }
+
+    for (const match of result.matches) {
+      if (matches.has(match.key)) {
+        continue;
+      }
+
+      const ageMs = at - match.enteredAt;
+      const wrongState =
+        unsupported.has("state") &&
+        criteria.state !== undefined &&
+        match.state !== criteria.state;
+
+      if (
+        wrongState ||
+        (unsupported.has("olderThan") && (olderThanMs ?? 0) > ageMs)
+      ) {
+        continue;
+      }
+
+      matches.set(match.key, { ...match, ageMs, resident: false });
+    }
   }
 
   /**
@@ -792,6 +1003,20 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   #emit(event: TelemetryEvent): void {
     emit(this.#runtime.telemetry, event, this.#onUnhandled);
   }
+}
+
+const NONE: readonly Partiality[] = Object.freeze([]);
+const NO_DURABLE_STORE: readonly Partiality[] = Object.freeze([
+  "no-durable-store" as const,
+]);
+const RESIDENT_ONLY: readonly string[] = Object.freeze(["resident"]);
+
+/**
+ * Oldest first, which is the order the question is asked in: "what has been stuck longest".
+ * Ties break on the key so a limited answer is the same answer twice.
+ */
+function byAgeThenKey(a: QueryMatch, b: QueryMatch): number {
+  return b.ageMs - a.ageMs || a.key.localeCompare(b.key);
 }
 
 function defaultOnUnhandled(error: unknown): void {

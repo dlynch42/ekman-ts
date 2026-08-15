@@ -525,9 +525,10 @@ begins, which is what makes a stream that starts mid-life explicable rather than
 It is deliberately not persisted: writing a restore back would turn every read into a write,
 and would be worst exactly under a small budget, where reloads are the whole point.
 
-Note what that means for `then.events` after a reload. The assertion reads the stream this
-runtime has, which begins at the `restored` event. What came before it is in the store, not
-in memory.
+A history read weaves restores back into the stored stream, placing each one after
+everything the store held at or below the sequence it restored to. So `then.events` and
+`then.history` both show the whole life of the instance with the reloads marked, and a
+stream that picks up mid-life is explicable rather than mysterious.
 
 ### `then.telemetry`
 
@@ -630,6 +631,71 @@ accounting, not an exact figure, because the exact number depends on key names.
 `audit` lists what each sink received, as `<type>@<seq>`, keyed by sink name. Initialization
 is a commit, so it appears as `transition@0`.
 
+### `then.queries`
+
+Queries run after everything has settled, each with the answer it must give.
+
+```json
+[
+  {
+    "entity": "deployments",
+    "state": "deploying",
+    "olderThan": "5m",
+    "keys": ["deployments:old", "deployments:middle"],
+    "complete": true,
+    "reasons": []
+  }
+]
+```
+
+| Field | Meaning |
+|---|---|
+| `entity` | Required. |
+| `state`, `olderThan`, `limit` | The criteria. `olderThan` is milliseconds or a duration such as `"5m"`. |
+| `keys` | Matching keys, **oldest in state first**. An exact list, in order. |
+| `complete` | Whether the answer is the whole answer. |
+| `reasons` | Why not, asserted as a set. |
+
+Ordering is oldest-first, because that is the order the question is asked in, with ties
+broken on the key so a limited answer is the same answer twice.
+
+Time in state is measured from the last **move**. A values-only commit leaves the clock
+running, because the instance has not gone anywhere. This is the same measurement a
+temporal constraint uses, and a port that implements it twice will eventually disagree
+with itself.
+
+`olderThan` is inclusive: an instance that has been in a state for exactly the bound
+matches.
+
+Partiality reasons:
+
+| Reason | Meaning |
+|---|---|
+| `no-durable-store` | The answer covers only what the runtime and any ephemeral store retain. |
+| `unsupported-criteria` | A store could not evaluate a filter, so the runtime applied it afterwards. |
+| `limit-reached` | The answer was truncated. |
+
+A result is `complete` exactly when there are no reasons. A memory-only runtime is never
+complete, even when it happens to hold everything, because it cannot know that it does.
+
+### `then.history`
+
+For what `then.events` cannot say: how far the stream reaches, and whether it is whole.
+
+```json
+{
+  "orders:1": {
+    "events": ["transition@0", "rejected@0", "transition@1", "restored@1"],
+    "complete": true,
+    "reasons": []
+  }
+}
+```
+
+Events are summarized as `<type>@<seq>`, in order. With a store configured this is the
+instance's whole life, not this process's view of it: a scenario that restarts and then
+reads history sees what the previous runtime wrote.
+
 ### `then.buildError`
 
 Asserts that `given` is itself invalid and must be rejected when the runtime or entity is
@@ -705,6 +771,7 @@ Anything that cannot be made deterministic must not be asserted.
    | `13x` | guards and invariants |
    | `14x` | temporal constraints |
    | `15x` | memory budget and eviction |
+   | `16x` | queries against a memory-only runtime, and partiality |
 
    Durable scenarios number from `01x` again, in their own directory:
 
@@ -713,6 +780,8 @@ Anything that cannot be made deterministic must not be asserted.
    | `01x` | durability: commits surviving a restart, replay |
    | `02x` | eviction with a store: snapshot on evict, transparent reload |
    | `03x` | audit sinks |
+   | `04x` | queries by state and time in state |
+   | `05x` | history as the whole per-key stream |
 
 3. Assert the narrowest thing that proves the requirement. Over-asserting makes the suite
    brittle for the next port.

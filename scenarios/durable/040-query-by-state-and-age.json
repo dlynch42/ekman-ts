@@ -1,0 +1,97 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "durable/040-query-by-state-and-age",
+  "name": "instances can be found by state and by how long they have been in it, oldest first",
+  "level": "durable",
+  "given": {
+    "runtime": {
+      "clock": { "start": 0, "stepMs": 0 },
+      "store": [{ "kind": "file" }]
+    },
+    "entities": [
+      {
+        "name": "deployments",
+        "initial": "pending",
+        "states": [
+          {
+            "state": "pending",
+            "cases": [
+              {
+                "when": { "trigger": "start" },
+                "do": { "result": "transitionTo", "to": "deploying" }
+              }
+            ]
+          },
+          {
+            "state": "deploying",
+            "cases": [
+              {
+                "when": { "trigger": "finish" },
+                "do": { "result": "transitionTo", "to": "live" }
+              }
+            ]
+          },
+          { "state": "live", "else": { "result": "stay" } }
+        ]
+      }
+    ]
+  },
+  "when": [
+    { "send": { "key": "deployments:old", "trigger": { "type": "start" } } },
+    { "advance": 600000 },
+    { "send": { "key": "deployments:middle", "trigger": { "type": "start" } } },
+    { "advance": 240000 },
+    { "send": { "key": "deployments:fresh", "trigger": { "type": "start" } } },
+    { "send": { "key": "deployments:done", "trigger": { "type": "start" } } },
+    { "send": { "key": "deployments:done", "trigger": { "type": "finish" } } }
+  ],
+  "then": {
+    "queries": [
+      {
+        "entity": "deployments",
+        "state": "deploying",
+        "keys": ["deployments:old", "deployments:middle", "deployments:fresh"],
+        "complete": true,
+        "reasons": []
+      },
+      {
+        "entity": "deployments",
+        "state": "deploying",
+        "olderThan": "4m",
+        "keys": ["deployments:old", "deployments:middle"]
+      },
+      {
+        "entity": "deployments",
+        "state": "deploying",
+        "olderThan": "5m",
+        "keys": ["deployments:old"]
+      },
+      {
+        "entity": "deployments",
+        "state": "deploying",
+        "olderThan": 840000,
+        "keys": ["deployments:old"]
+      },
+      {
+        "entity": "deployments",
+        "state": "deploying",
+        "olderThan": 840001,
+        "keys": []
+      },
+      {
+        "entity": "deployments",
+        "state": "live",
+        "keys": ["deployments:done"]
+      },
+      {
+        "entity": "deployments",
+        "keys": [
+          "deployments:old",
+          "deployments:middle",
+          "deployments:done",
+          "deployments:fresh"
+        ]
+      }
+    ]
+  }
+}

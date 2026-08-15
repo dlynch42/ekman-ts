@@ -8,6 +8,8 @@ import {
   ScenarioStorage,
 } from "./build";
 import type {
+  HistoryExpectation,
+  QueryExpectation,
   Scenario,
   SendExpectation,
   StateExpectation,
@@ -109,12 +111,14 @@ async function execute(scenario: Scenario, failures: string[]): Promise<void> {
     );
 
     assertSends(scenario.then?.sends, outcomes, failures);
-    assertEvents(scenario, active.ekman, failures);
+    await assertEvents(scenario, active.ekman, failures);
     assertTelemetry(scenario.then?.telemetry, telemetry, failures);
     assertState(scenario.then?.state, active.ekman, failures);
     assertResident(scenario.then?.resident, active.ekman, failures);
     assertMemory(scenario.then?.memory, active.ekman, failures);
     assertAudit(scenario.then?.audit, audit, failures);
+    await assertQueries(scenario.then?.queries, active.ekman, failures);
+    await assertHistory(scenario.then?.history, active.ekman, failures);
   } finally {
     // A scenario that configured an automatic sweep leaves an interval behind otherwise,
     // and a durable one leaves a directory.
@@ -273,11 +277,11 @@ function assertSends(
   });
 }
 
-function assertEvents(
+async function assertEvents(
   scenario: Scenario,
   ekman: Ekman,
   failures: string[]
-): void {
+): Promise<void> {
   const expected = scenario.then?.events;
   if (expected === undefined) {
     return;
@@ -290,7 +294,8 @@ function assertEvents(
       : new Set<string>();
 
   for (const [key, wantEvents] of Object.entries(expected)) {
-    const gotEvents = ekman.history(key);
+    // biome-ignore lint/performance/noAwaitInLoops: one key at a time keeps the failure messages in scenario order
+    const { events: gotEvents } = await ekman.history(key);
 
     if (wantEvents.length !== gotEvents.length) {
       failures.push(
@@ -475,6 +480,87 @@ function assertAudit(
       failures.push(
         `audit["${sink}"]: expected [${want.join(", ")}], got [${got.join(", ")}]`
       );
+    }
+  }
+}
+
+async function assertQueries(
+  expected: readonly QueryExpectation[] | undefined,
+  ekman: Ekman,
+  failures: string[]
+): Promise<void> {
+  if (expected === undefined) {
+    return;
+  }
+
+  for (const [i, want] of expected.entries()) {
+    // biome-ignore lint/performance/noAwaitInLoops: one query at a time keeps failures in scenario order
+    const got = await ekman.query({
+      entity: want.entity,
+      ...(want.state === undefined ? {} : { state: want.state }),
+      ...(want.olderThan === undefined ? {} : { olderThan: want.olderThan }),
+      ...(want.limit === undefined ? {} : { limit: want.limit }),
+    });
+
+    const keys = got.instances.map((instance) => instance.key);
+    if (keys.join(",") !== want.keys.join(",")) {
+      failures.push(
+        `queries[${i}].keys: expected [${want.keys.join(", ")}], got [${keys.join(", ")}]`
+      );
+    }
+
+    if (want.complete !== undefined && want.complete !== got.complete) {
+      failures.push(
+        `queries[${i}].complete: expected ${want.complete}, got ${got.complete}`
+      );
+    }
+
+    if (want.reasons !== undefined) {
+      const sorted = [...got.reasons].sort().join(",");
+      if (sorted !== [...want.reasons].sort().join(",")) {
+        failures.push(
+          `queries[${i}].reasons: expected [${want.reasons.join(", ")}], got [${got.reasons.join(", ")}]`
+        );
+      }
+    }
+  }
+}
+
+async function assertHistory(
+  expected: Readonly<Record<string, HistoryExpectation>> | undefined,
+  ekman: Ekman,
+  failures: string[]
+): Promise<void> {
+  if (expected === undefined) {
+    return;
+  }
+
+  for (const [key, want] of Object.entries(expected)) {
+    // biome-ignore lint/performance/noAwaitInLoops: one key at a time keeps failures in scenario order
+    const got = await ekman.history(key);
+
+    if (want.events !== undefined) {
+      const summary = got.events.map((event) => `${event.type}@${event.seq}`);
+      if (summary.join(",") !== want.events.join(",")) {
+        failures.push(
+          `history["${key}"].events: expected [${want.events.join(", ")}], got [${summary.join(", ")}]`
+        );
+      }
+    }
+
+    if (want.complete !== undefined && want.complete !== got.complete) {
+      failures.push(
+        `history["${key}"].complete: expected ${want.complete}, got ${got.complete}`
+      );
+    }
+
+    if (want.reasons !== undefined) {
+      const sorted = [...got.reasons].sort().join(",");
+      if (sorted !== [...want.reasons].sort().join(",")) {
+        failures.push(
+          `history["${key}"].reasons: expected [${want.reasons.join(", ")}], got [${got.reasons.join(", ")}]`
+        );
+      }
     }
   }
 }

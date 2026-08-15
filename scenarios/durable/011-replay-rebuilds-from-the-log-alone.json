@@ -56,6 +56,25 @@
     },
     "events": {
       "counters:1": [
+        { "type": "transition", "from": null, "to": "counting", "seq": 0 },
+        {
+          "type": "transition",
+          "from": "counting",
+          "to": "counting",
+          "seq": 1
+        },
+        {
+          "type": "transition",
+          "from": "counting",
+          "to": "counting",
+          "seq": 2
+        },
+        {
+          "type": "transition",
+          "from": "counting",
+          "to": "counting",
+          "seq": 3
+        },
         {
           "type": "restored",
           "seq": 3,

@@ -123,7 +123,7 @@ describe("initialization", () => {
     const ekman = new Ekman({ entities: [orders] });
     await ekman.send("orders:1", { type: "approve", actor: "amy" });
 
-    const [init] = transitions(ekman.history("orders:1"));
+    const [init] = transitions((await ekman.history("orders:1")).events);
     expect(init).toMatchObject({
       from: null,
       to: "pending",
@@ -136,9 +136,9 @@ describe("initialization", () => {
     const ekman = new Ekman({ entities: [orders] });
     await ekman.send("orders:1", { type: "approve", actor: "amy" });
 
-    const nullFrom = transitions(ekman.history("orders:1")).filter(
-      (e) => e.from === null
-    );
+    const nullFrom = transitions(
+      (await ekman.history("orders:1")).events
+    ).filter((e) => e.from === null);
     expect(nullFrom).toHaveLength(1);
   });
 
@@ -155,10 +155,10 @@ describe("initialization", () => {
     expect(result.values).toEqual({ total: 1, currency: "usd" });
   });
 
-  it("reports nothing for a key never addressed", () => {
+  it("reports nothing for a key never addressed", async () => {
     const ekman = new Ekman({ entities: [orders] });
     expect(ekman.inspect("orders:never")).toBeUndefined();
-    expect(ekman.history("orders:never")).toEqual([]);
+    expect((await ekman.history("orders:never")).events).toEqual([]);
     expect(ekman.residentKeys).toEqual([]);
   });
 });
@@ -206,7 +206,9 @@ describe("handler results", () => {
       seq: 0,
       values: {},
     });
-    expect(transitions(ekman.history("orders:1"))).toHaveLength(1);
+    expect(transitions((await ekman.history("orders:1")).events)).toHaveLength(
+      1
+    );
   });
 
   it("treats a thrown error as fail", async () => {
@@ -325,9 +327,9 @@ describe("unknown policy", () => {
       "UNKNOWN_STATE"
     );
 
-    const rejected = ekman
-      .history("dead:1")
-      .filter((e) => e.type === "rejected");
+    const rejected = (await ekman.history("dead:1")).events.filter(
+      (e) => e.type === "rejected"
+    );
     expect(rejected).toHaveLength(1);
     expect(rejected[0]).toMatchObject({ code: "UNKNOWN_STATE", seq: 1 });
   });
@@ -345,9 +347,9 @@ describe("unknown policy", () => {
       "UNKNOWN_TRIGGER"
     );
 
-    const rejected = ekman
-      .history("strict:1")
-      .filter((e) => e.type === "rejected");
+    const rejected = (await ekman.history("strict:1")).events.filter(
+      (e) => e.type === "rejected"
+    );
     expect(rejected).toHaveLength(1);
     expect(rejected[0]).toMatchObject({ code: "UNKNOWN_TRIGGER" });
   });
@@ -385,16 +387,18 @@ describe("sequence and events", () => {
       await ekman.send("counter:1", { type: "tick" });
     }
 
-    expect(transitions(ekman.history("counter:1")).map((e) => e.seq)).toEqual([
-      0, 1, 2, 3, 4, 5,
-    ]);
+    expect(
+      transitions((await ekman.history("counter:1")).events).map((e) => e.seq)
+    ).toEqual([0, 1, 2, 3, 4, 5]);
   });
 
   it("records the trigger as the cause, with a deterministic id", async () => {
     const ekman = new Ekman({ entities: [orders], now: steppingClock() });
     await ekman.send("orders:1", { type: "approve", actor: "amy" });
 
-    const [init, approved] = transitions(ekman.history("orders:1"));
+    const [init, approved] = transitions(
+      (await ekman.history("orders:1")).events
+    );
     expect(init?.cause).toEqual({ type: "init", id: "t1" });
     expect(approved?.cause).toEqual({ type: "approve", id: "t1" });
   });
@@ -406,7 +410,9 @@ describe("sequence and events", () => {
       actor: "amy",
       id: "msg-991",
     });
-    expect(transitions(ekman.history("orders:1"))[1]?.cause.id).toBe("msg-991");
+    expect(
+      transitions((await ekman.history("orders:1")).events)[1]?.cause.id
+    ).toBe("msg-991");
   });
 
   it("stamps events from the injected clock", async () => {
@@ -416,9 +422,9 @@ describe("sequence and events", () => {
     });
     await ekman.send("orders:1", { type: "approve", actor: "amy" });
 
-    expect(transitions(ekman.history("orders:1")).map((e) => e.at)).toEqual([
-      1000, 2000,
-    ]);
+    expect(
+      transitions((await ekman.history("orders:1")).events).map((e) => e.at)
+    ).toEqual([1000, 2000]);
   });
 
   it("freezes committed values so a handler cannot mutate them afterwards", async () => {
@@ -624,7 +630,8 @@ describe("telemetry", () => {
     });
 
     // Runtime metadata stays out of the domain stream.
-    for (const event of ekman.entities.orders.history("1")) {
+    const { events } = await ekman.entities.orders.history("1");
+    for (const event of events) {
       expect(event).not.toHaveProperty("durationMs");
       expect(event).not.toHaveProperty("depth");
     }
@@ -700,10 +707,16 @@ describe("uncovered surface", () => {
     const ekman = new Ekman({ entities: [orders] });
     await ekman.entities.orders.send("1", { type: "approve", actor: "amy" });
 
-    expect(ekman.entities.orders.history("1")).toEqual(
-      ekman.history("orders:1")
+    expect(await ekman.entities.orders.history("1")).toEqual(
+      await ekman.history("orders:1")
     );
-    expect(ekman.entities.orders.history("1")).toHaveLength(2);
+
+    const history = await ekman.entities.orders.history("1");
+    expect(history.events).toHaveLength(2);
+    // Memory-only, so the answer covers what this runtime retains and says so rather than
+    // presenting it as the whole story.
+    expect(history.complete).toBe(false);
+    expect(history.reasons).toEqual(["no-durable-store"]);
   });
 
   it("reads a snapshot through the handle", async () => {

@@ -690,6 +690,61 @@
             "items": { "type": "string" }
           }
         },
+        "queries": {
+          "description": "Queries run after everything settles, each with the answer it must give.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["entity", "keys"],
+            "additionalProperties": false,
+            "properties": {
+              "entity": { "type": "string", "minLength": 1 },
+              "state": { "type": "string", "minLength": 1 },
+              "olderThan": {
+                "description": "Milliseconds, or a duration such as 5m. Inclusive at the bound.",
+                "oneOf": [
+                  { "type": "integer", "minimum": 0 },
+                  {
+                    "type": "string",
+                    "pattern": "^\\d+(\\.\\d+)?(ms|s|m|h|d)$"
+                  }
+                ]
+              },
+              "limit": { "type": "integer", "minimum": 0 },
+              "keys": {
+                "description": "Matching keys, oldest in state first, ties broken on the key.",
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "complete": { "type": "boolean" },
+              "reasons": {
+                "description": "Asserted as a set.",
+                "type": "array",
+                "items": { "$ref": "#/$defs/partiality" }
+              }
+            }
+          }
+        },
+        "history": {
+          "description": "Per-key history reads, for what then.events cannot say.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "events": {
+                "description": "The stream as <type>@<seq>, in order.",
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "complete": { "type": "boolean" },
+              "reasons": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/partiality" }
+              }
+            }
+          }
+        },
         "buildError": {
           "type": "object",
           "required": ["code"],
@@ -701,6 +756,10 @@
           }
         }
       }
+    },
+    "partiality": {
+      "description": "Why an answer is not the whole answer. A result is complete exactly when there are none.",
+      "enum": ["no-durable-store", "unsupported-criteria", "limit-reached"]
     },
     "errorCode": {
       "enum": [

@@ -4,7 +4,7 @@
 
 Define your states. Attach handlers. Configure the runtime. Ekman owns the mechanics around state (per-instance memory, ordered processing, transitions, constraints, retries, persistence, history) without requiring a separate orchestration platform.
 
-> **Status: design phase.** TypeScript reference implementation first, Go to follow. Feedback welcome.
+> **Status: v0.1 in progress.** The TypeScript reference implementation passes the Core and Durable conformance levels. Go to follow. Feedback welcome.
 
 ---
 
@@ -66,8 +66,8 @@ await ekman.entities.deployments.send("abc123", message)
 await ekman.send("deployments:abc123", message)
 
 // Debug and operate
-ekman.query({ entity: "deployments", state: "deploying", olderThan: "5m" })
-ekman.history("deployments:abc123")
+await ekman.query({ entity: "deployments", state: "deploying", olderThan: "5m" })
+await ekman.history("deployments:abc123")
 ```
 
 Every instance gets a human-readable key, its own state and values, a bounded inbox that serializes its triggers, and an append-only transition history. Unknown states and triggers fail loudly.
@@ -105,6 +105,37 @@ npm run demo:recovery       # commit, crash, restart, everything resumes
 npm run demo:memory-bound   # 5000 instances inside a 64 KB budget
 ```
 
+## Asking the questions you actually have
+
+"What is stuck in `deploying`, and for how long" is the question that makes a state runtime worth embedding, and the one homegrown versions never answer.
+
+```ts
+const stuck = await ekman.query({
+  entity: "deployments",
+  state: "deploying",
+  olderThan: "5m",         // or a number of milliseconds
+})
+
+for (const instance of stuck.instances) {
+  console.log(instance.key, instance.state, instance.ageMs)
+}
+```
+
+Results come back oldest-first, which is the order the question is asked in. Time in state is measured from the last **move**, so a handler that updates a progress counter every second does not keep resetting the clock on something that has not gone anywhere. That is the same measurement a time-in-state constraint uses, deliberately: two implementations of one question is how two answers start disagreeing.
+
+`history(key)` returns the whole per-key stream, reading through the store: transitions, refused triggers, constraint violations, and reloads, in order, so "what happened to this instance" is one call.
+
+Every result says whether it is the whole answer:
+
+```ts
+const { instances, complete, reasons } = await ekman.query({ entity: "deployments" })
+if (!complete) {
+  // e.g. ["no-durable-store"], ["limit-reached"], ["unsupported-criteria"]
+}
+```
+
+A memory-only runtime can only report what it retains, and a store that cannot evaluate a filter says so rather than quietly ignoring it. Returning a partial answer as if it were complete is the one thing a query here will never do, because an operator acting on "nothing is stuck" needs that to have meant it.
+
 ## What it is not
 
 - **Not an orchestration platform.** No mandatory server, cluster, sidecar, or control plane.
@@ -132,12 +163,11 @@ scenarios at a level is what it means to conform at that level.
 | Level | Status | Covers |
 |---|---|---|
 | Core | **passing** | Entities, dispatch, commit, ordering, bounded inbox, execution policy, fencing, constraints, memory budget, telemetry |
-| Durable | scenarios passing, not yet claimed | Durable store, replay, snapshot on evict, audit; queries still to come |
+| Durable | **passing** | Durable store, replay, snapshot on evict, conditional append, audit, queries |
 | Coordinated | not claimed | Multi-runtime conflict detection |
 
-A level whose scenarios pass is not automatically claimed. Durable also requires the query
-API, so its scenarios run and pass today while the level stays unclaimed. A partial claim is
-worse than no claim.
+A level is claimed only when everything it requires is implemented, not when its scenarios
+happen to pass. A partial claim is worse than no claim, because somebody will believe it.
 
 ```
 npm run conformance

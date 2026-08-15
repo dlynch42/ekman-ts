@@ -231,11 +231,17 @@ describe("reloading", () => {
     const second = new Ekman({ entities: [orders], store });
     await second.entities.orders.send("1", { type: "poke" });
 
-    expect(second.entities.orders.history("1")[0]).toMatchObject({
-      type: "restored",
-      seq: 1,
-      from: "replay",
-    });
+    const { events } = await second.entities.orders.history("1");
+
+    // The whole stream, including what the first runtime wrote, with the restore woven in
+    // at the point this runtime picked the key up.
+    expect(events.map((event) => `${event.type}@${event.seq}`)).toEqual([
+      "transition@0",
+      "transition@1",
+      "restored@1",
+      "transition@2",
+    ]);
+    expect(events[2]).toMatchObject({ type: "restored", from: "replay" });
     await second.close();
   });
 
@@ -248,7 +254,7 @@ describe("reloading", () => {
 
     const result = await ekman.entities.orders.send("1", { type: "poke" });
     expect(result.seq).toBe(1);
-    expect(ekman.entities.orders.history("1")[0]).toMatchObject({
+    expect((await ekman.entities.orders.history("1")).events[0]).toMatchObject({
       type: "transition",
       from: null,
       seq: 0,

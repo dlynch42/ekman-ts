@@ -1,0 +1,34 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/161-query-limit-is-reported",
+  "name": "a truncated answer reports itself as truncated, so a limit is never mistaken for the whole set",
+  "level": "core",
+  "given": {
+    "runtime": { "clock": { "start": 0, "stepMs": 0 } },
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "open",
+        "states": [{ "state": "open", "else": { "result": "stay" } }]
+      }
+    ]
+  },
+  "when": [
+    { "send": { "key": "orders:1", "trigger": { "type": "t" } } },
+    { "advance": 100 },
+    { "send": { "key": "orders:2", "trigger": { "type": "t" } } },
+    { "advance": 100 },
+    { "send": { "key": "orders:3", "trigger": { "type": "t" } } }
+  ],
+  "then": {
+    "queries": [
+      {
+        "entity": "orders",
+        "limit": 2,
+        "keys": ["orders:1", "orders:2"],
+        "complete": false,
+        "reasons": ["no-durable-store", "limit-reached"]
+      }
+    ]
+  }
+}

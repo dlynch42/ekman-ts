@@ -63,6 +63,14 @@ export type {
 } from "./memory";
 export { accountBytes, EVICTION_POLICIES } from "./memory";
 export type {
+  HistoryResult,
+  Partiality,
+  QueryCriteria,
+  QueryMatch,
+  QueryResult,
+} from "./query";
+export { parseDuration } from "./query";
+export type {
   FailResult,
   HandlerResult,
   StayResult,
