@@ -7,7 +7,7 @@ import type { EkmanEvent } from "./events";
 import { InstanceRecord } from "./instance";
 import { parseKey } from "./key";
 import type { TelemetryEvent } from "./telemetry";
-import { emit, triggerRef } from "./telemetry";
+import { emit, telemetryNow, triggerRef } from "./telemetry";
 import type {
   AnyEntityDefinition,
   CommitResult,
@@ -287,7 +287,9 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     trigger: Trigger,
     depth: number
   ): Promise<CommitResult> {
-    const startedAt = this.#now();
+    // Wall clock, not the injected one: duration is telemetry, and the injected clock
+    // belongs to the domain event stream.
+    const startedAt = telemetryNow();
     // Captured before dispatch, because a committed result has already moved it on.
     const { state, key, entity } = instance;
     const common = {
@@ -321,7 +323,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     startedAt: number,
     outcome: "committed" | "failed" | "refused"
   ): void {
-    const at = this.#now();
+    const at = telemetryNow();
     this.#emit({
       type: "handler.settled",
       ...common,

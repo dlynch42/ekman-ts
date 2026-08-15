@@ -152,6 +152,21 @@ export function emit(
   }
 }
 
+/**
+ * Wall-clock stamp for a telemetry event.
+ *
+ * Deliberately *not* the runtime's injected clock. That clock exists to make the domain
+ * event stream deterministic, and a scenario asserts on the `at` it produces. If
+ * telemetry drew from it too, every telemetry event added in a later phase would shift
+ * the timestamps in the domain stream, and a second implementation would have to match
+ * this one's internal count of clock reads for the shared scenarios to pass.
+ *
+ * Two streams, two time sources. Domain history is reproducible; telemetry is wall time.
+ */
+export function telemetryNow(): number {
+  return Date.now();
+}
+
 /** The correlating half of a trigger, for telemetry that should not carry a payload. */
 export function triggerRef(trigger: {
   type: string;

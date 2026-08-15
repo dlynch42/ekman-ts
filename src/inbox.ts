@@ -3,7 +3,7 @@ import type { ErrorCode } from "./errors";
 import { EkmanError } from "./errors";
 import type { EventCause } from "./events";
 import type { TelemetryEvent } from "./telemetry";
-import { emit, triggerRef } from "./telemetry";
+import { emit, telemetryNow, triggerRef } from "./telemetry";
 import type { CommitResult, Trigger } from "./types";
 
 /**
@@ -34,7 +34,7 @@ export type OverflowRecorder = (args: {
  *
  * Phase 1 serialized with a promise chain, which was enough to keep one handler per key
  * but offered no handle on a queued trigger. `drop-oldest` needs exactly that handle, so
- * the chain is now an explicit queue with a pump.
+ * the chain is now an explicit queue with a drain loop over it.
  *
  * The queue holds triggers that are *waiting*. The one being handled has already been
  * shifted off, so the limit bounds the backlog and not the backlog plus the work.
@@ -91,10 +91,13 @@ export class Inbox {
    * order. Nothing may be awaited between a caller's `send()` and the push here.
    */
   enqueue(trigger: Trigger, run: Runner): Promise<CommitResult> {
-    if (this.#queue.length >= this.#config.maxQueued) {
-      return this.#overflow(trigger, run);
+    // A trigger that can start immediately never waits, so it is not measured against a
+    // limit on waiting. This is what makes `maxQueued: 0` mean "one at a time, no
+    // backlog" rather than "refuse everything".
+    if (this.idle || this.#queue.length < this.#config.maxQueued) {
+      return this.#accept(trigger, run);
     }
-    return this.#accept(trigger, run);
+    return this.#overflow(trigger, run);
   }
 
   #accept(trigger: Trigger, run: Runner): Promise<CommitResult> {
@@ -110,10 +113,19 @@ export class Inbox {
       depth: this.#queue.length,
       maxQueued: this.#config.maxQueued,
       trigger: triggerRef(trigger),
-      at: this.#deps.now(),
+      at: telemetryNow(),
     });
 
-    this.#pump();
+    // Starting the drain here, synchronously, is what lets a trigger arriving at an idle
+    // inbox go straight to its handler without ever counting as waiting.
+    if (!this.#running) {
+      this.#running = true;
+      // The drain settles each entry's own promise, so nothing awaits it here. If the
+      // loop itself ever breaks there is no caller to receive that, and it goes where
+      // every other uncaught runtime failure does rather than becoming a bare rejection.
+      this.#drain().catch(this.#deps.onUnhandled);
+    }
+
     return settled;
   }
 
@@ -134,7 +146,7 @@ export class Inbox {
           maxQueued,
           overflow,
           trigger: triggerRef(trigger),
-          at: this.#deps.now(),
+          at: telemetryNow(),
         })
       );
     }
@@ -155,7 +167,7 @@ export class Inbox {
           maxQueued,
           overflow,
           trigger: triggerRef(trigger),
-          at: this.#deps.now(),
+          at: telemetryNow(),
         })
       );
     }
@@ -172,7 +184,7 @@ export class Inbox {
         maxQueued,
         overflow,
         trigger: triggerRef(oldest.trigger),
-        at: this.#deps.now(),
+        at: telemetryNow(),
       })
     );
 
@@ -209,33 +221,18 @@ export class Inbox {
     emit(this.#deps.telemetry, event, this.#deps.onUnhandled);
   }
 
-  /** Start the pump if it is not already running. */
-  #pump(): void {
-    if (this.#running) {
-      return;
-    }
-
-    const next = this.#queue.shift();
-    if (next === undefined) {
-      return;
-    }
-
-    this.#running = true;
-    // The drain loop settles each entry's own promise, so nothing here awaits it. If the
-    // loop itself ever breaks, that is a runtime failure with no caller to receive it,
-    // and it goes where every other one does rather than becoming a bare rejection.
-    this.#drain(next).catch(this.#deps.onUnhandled);
-  }
-
   /**
    * Run queued triggers one at a time until the queue empties.
    *
    * A loop rather than recursion, so a deep backlog cannot grow the stack. `#running`
    * is cleared with no await between the final shift and the assignment, so nothing can
-   * observe an empty-but-still-running inbox and skip its own pump.
+   * observe an empty-but-still-running inbox and decline to start its own drain.
+   *
+   * Only ever started from `#accept`, immediately after a push, so the first shift
+   * always finds something.
    */
-  async #drain(first: Entry): Promise<void> {
-    let entry: Entry | undefined = first;
+  async #drain(): Promise<void> {
+    let entry: Entry | undefined = this.#queue.shift();
 
     while (entry !== undefined) {
       try {
