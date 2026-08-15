@@ -9,6 +9,7 @@
  * The `type` strings are the cross-implementation contract. Every port emits these names
  * with these fields; how a port lets you subscribe is its own business.
  */
+import type { ConstraintKind } from "./events";
 import type { FenceReason } from "./fence";
 import type { OverflowPolicy } from "./types";
 
@@ -127,6 +128,44 @@ export interface CommitFencedEvent extends TelemetryBase {
   readonly trigger: TriggerRef;
 }
 
+/**
+ * A constraint did not hold.
+ *
+ * The authoritative record of this is the violation event in the key's own stream. This is
+ * the mirror an operator alerts on, because a rising rate of violations is a runtime
+ * signal even when each individual one is a domain fact. Telemetry never travels the other
+ * way: nothing in this file reaches a key's history.
+ */
+export interface ConstraintViolatedEvent extends TelemetryBase {
+  readonly type: "constraint.violated";
+  readonly kind: ConstraintKind;
+  readonly constraint: string;
+  /** `warn` means the commit went ahead regardless. */
+  readonly policy: "reject" | "warn";
+  /** The state the instance was in when the constraint was checked. */
+  readonly state: string;
+  readonly reason: string;
+  readonly trigger: TriggerRef;
+}
+
+/**
+ * A temporal constraint fired and its escalation trigger was delivered.
+ *
+ * Separate from the violation itself because delivery can fail on its own: the instance
+ * may have no handler for the state it is stuck in, which is precisely the situation a
+ * temporal constraint is there to surface.
+ */
+export interface ConstraintEscalatedEvent extends TelemetryBase {
+  readonly type: "constraint.escalated";
+  readonly constraint: string;
+  readonly state: string;
+  /** How long the instance had been in the state when it fired. */
+  readonly elapsedMs: number;
+  readonly escalateTo: string | undefined;
+  readonly trigger: TriggerRef;
+  readonly delivered: boolean;
+}
+
 export type TelemetryEvent =
   | InboxEnqueuedEvent
   | InboxRejectedEvent
@@ -135,7 +174,9 @@ export type TelemetryEvent =
   | HandlerSettledEvent
   | HandlerRetriedEvent
   | HandlerTimedOutEvent
-  | CommitFencedEvent;
+  | CommitFencedEvent
+  | ConstraintViolatedEvent
+  | ConstraintEscalatedEvent;
 
 export type TelemetryEventType = TelemetryEvent["type"];
 

@@ -40,9 +40,41 @@ export interface RejectedEvent {
   readonly reason: string;
 }
 
+/** Which kind of constraint produced a violation. */
+export type ConstraintKind = "transition" | "guard" | "invariant" | "temporal";
+
+/**
+ * A constraint that did not hold.
+ *
+ * Recorded under `reject` as well as under `warn`, distinguished by `policy`. The stream
+ * an operator already reads is the right place for both: "every violation in the last
+ * hour" should not have to union two sources, and a rejection nobody can find is not much
+ * better than a silent one.
+ *
+ * A violation is not a commit, so it carries the sequence of the commit it followed
+ * without advancing it.
+ */
+export interface ViolationEvent<S extends string = string> {
+  readonly type: "violation";
+  readonly key: string;
+  readonly seq: number;
+  readonly at: number;
+  readonly cause: EventCause;
+  readonly constraint: { readonly kind: ConstraintKind; readonly name: string };
+  /** `warn` means the commit proceeded anyway. `reject` means it did not. */
+  readonly policy: "reject" | "warn";
+  readonly reason: string;
+  /**
+   * The change that was being attempted. Absent on a temporal violation, which is not
+   * attached to a result.
+   */
+  readonly attempted?: { readonly from: S; readonly to: S };
+}
+
 export type EkmanEvent<S extends string = string, V extends Values = Values> =
   | TransitionEvent<S, V>
-  | RejectedEvent;
+  | RejectedEvent
+  | ViolationEvent<S>;
 
 /** Only transition events reconstruct state. Everything else is a record of what happened. */
 export function isTransitionEvent<S extends string, V extends Values>(
@@ -61,4 +93,10 @@ export function rejectedEvent(
   event: Omit<RejectedEvent, "type">
 ): RejectedEvent {
   return Object.freeze({ type: "rejected" as const, ...event });
+}
+
+export function violationEvent<S extends string>(
+  event: Omit<ViolationEvent<S>, "type">
+): ViolationEvent<S> {
+  return Object.freeze({ type: "violation" as const, ...event });
 }

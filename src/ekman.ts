@@ -1,5 +1,6 @@
 import type { RuntimeDeps } from "./config";
 import { resolveInboxConfig } from "./config";
+import type { CompiledTemporal } from "./constraints";
 import type { DispatchDeps } from "./dispatch";
 import { dispatch } from "./dispatch";
 import { EkmanError } from "./errors";
@@ -7,7 +8,8 @@ import type { EkmanEvent } from "./events";
 import { InstanceRecord } from "./instance";
 import { parseKey } from "./key";
 import type { TelemetryEvent } from "./telemetry";
-import { emit } from "./telemetry";
+import { emit, telemetryNow } from "./telemetry";
+import { TemporalIndex } from "./temporal";
 import type {
   AnyEntityDefinition,
   CommitResult,
@@ -54,11 +56,22 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   readonly #onUnhandled: (error: unknown) => void;
   readonly #runtime: RuntimeDeps;
   readonly #deps: DispatchDeps;
+  /** Where every resident instance sits. Read by temporal constraints and by queries. */
+  readonly #temporal = new TemporalIndex();
+  #sweepTimer: ReturnType<typeof setInterval> | undefined;
+  /**
+   * Declared here and assigned in the constructor rather than initialized inline. An
+   * inline `= false` narrows the field to the literal `false`, after which the re-entry
+   * guard that reads it looks statically dead. The inbox's `#running` carries the same
+   * note for the same reason.
+   */
+  #sweeping: boolean;
   #triggerSeq = 0;
 
   constructor(config: EkmanConfig<D> = {}) {
     this.#now = config.now ?? Date.now;
     this.#onUnhandled = config.onUnhandled ?? defaultOnUnhandled;
+    this.#sweeping = false;
 
     // Resolved here, at construction, so an unsatisfiable inbox configuration fails at
     // startup rather than at the first overload.
@@ -80,6 +93,8 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       handles[definition.name] = this.#register(definition);
     }
     this.entities = Object.freeze(handles) as EntityHandles<D>;
+
+    this.#startSweeping(config.temporal?.sweepMs);
   }
 
   /**
@@ -173,6 +188,46 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     return [...this.#instances.keys()];
   }
 
+  /**
+   * Evaluate every temporal constraint once and deliver whatever escalations are due.
+   *
+   * Returns how many constraints fired. Resolves once each escalation has been processed,
+   * so a caller that awaits it can then read the resulting state, which is what makes a
+   * temporal constraint testable without waiting on wall time.
+   *
+   * The clock is read once per pass. Every violation a pass records is true at that one
+   * instant, rather than at whichever moment the walk happened to reach it.
+   *
+   * Overlapping passes are not useful, so a call made while one is running returns 0
+   * immediately rather than queueing behind it.
+   */
+  async sweep(): Promise<number> {
+    if (this.#sweeping) {
+      return 0;
+    }
+
+    this.#sweeping = true;
+    try {
+      return await this.#sweepOnce();
+    } finally {
+      this.#sweeping = false;
+    }
+  }
+
+  /**
+   * Release what the runtime is holding: currently the automatic sweep interval.
+   *
+   * Safe to call more than once. A runtime that was never given a `sweepMs` still has one
+   * of these, so shutdown code does not have to know how it was configured.
+   */
+  async close(): Promise<void> {
+    if (this.#sweepTimer !== undefined) {
+      clearInterval(this.#sweepTimer);
+      this.#sweepTimer = undefined;
+    }
+    await Promise.resolve();
+  }
+
   #register(definition: AnyDefinition): EntityHandle {
     const existing = this.#definitions.get(definition.name);
 
@@ -225,12 +280,21 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       );
     }
 
+    const id = this.#nextTriggerId();
+    return (trigger.id === undefined ? { ...trigger, id } : trigger) as Trigger;
+  }
+
+  /**
+   * The next id from the per-runtime counter.
+   *
+   * Formatted `t1`, `t2`, and so on rather than as a UUID, so a conformance scenario can
+   * assert on an event's cause without a matcher. The counter advances whenever a trigger
+   * is accepted, including one the runtime raises itself, which is what keeps the
+   * numbering the same for every implementation that follows the same rule.
+   */
+  #nextTriggerId(): string {
     this.#triggerSeq += 1;
-    return (
-      trigger.id === undefined
-        ? { ...trigger, id: `t${this.#triggerSeq}` }
-        : trigger
-    ) as Trigger;
+    return `t${this.#triggerSeq}`;
   }
 
   /** Load or lazily initialize the instance. Initialization is a commit at sequence 0. */
@@ -255,6 +319,9 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     });
 
     this.#instances.set(key, instance);
+    // Initialization is an entry into the initial state, so the clock on time-in-state
+    // starts here rather than at the first transition.
+    this.#temporal.enter(key, definition.name, definition.initial);
     return instance;
   }
 
@@ -287,7 +354,176 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     trigger: Trigger,
     depth: number
   ): Promise<CommitResult> {
-    return dispatch(instance, definition, trigger, this.#deps, depth);
+    return dispatch(instance, definition, trigger, this.#deps, depth).then(
+      (result) => {
+        // Only a move re-indexes. A commit that changed values alone leaves the instance
+        // where it was, and its time in state keeps running.
+        if (result.event.from !== result.event.to) {
+          this.#temporal.enter(instance.key, instance.entity, result.state);
+        }
+        return result;
+      }
+    );
+  }
+
+  #startSweeping(sweepMs: number | undefined): void {
+    if (sweepMs === undefined) {
+      return;
+    }
+
+    if (!(Number.isFinite(sweepMs) && sweepMs > 0)) {
+      throw new EkmanError(
+        "INVALID_CONFIG",
+        `temporal sweepMs must be a positive number of milliseconds, received ${JSON.stringify(sweepMs)}. ` +
+          "Omit it to sweep only when sweep() is called."
+      );
+    }
+
+    this.#sweepTimer = setInterval(() => {
+      this.sweep().catch(this.#onUnhandled);
+    }, sweepMs);
+
+    // Sweeping is background work. A runtime that is otherwise finished should be allowed
+    // to exit rather than being held open by its own housekeeping.
+    this.#sweepTimer.unref?.();
+  }
+
+  async #sweepOnce(): Promise<number> {
+    const at = this.#now();
+    let fired = 0;
+
+    for (const definition of this.#definitions.values()) {
+      const byState = definition.constraints?.temporalByState;
+      if (byState === undefined) {
+        continue;
+      }
+
+      for (const [state, constraints] of byState) {
+        for (const key of this.#temporal.keys(definition.name, state)) {
+          // biome-ignore lint/performance/noAwaitInLoops: an escalation dispatches like any other trigger, and a pass that fired several should report every one of them as processed
+          fired += await this.#sweepInstance(key, state, constraints, at);
+        }
+      }
+    }
+
+    return fired;
+  }
+
+  /** Evaluate one instance against the constraints watching the state it is in. */
+  async #sweepInstance(
+    key: string,
+    state: string,
+    constraints: readonly CompiledTemporal[],
+    at: number
+  ): Promise<number> {
+    const instance = this.#instances.get(key);
+
+    // The index is maintained at commit, so a key found here is in this state. The guard
+    // costs nothing and means a future indexing bug degrades into a missed escalation
+    // rather than one aimed at the wrong state.
+    if (instance === undefined || instance.state !== state) {
+      return 0;
+    }
+
+    let fired = 0;
+    for (const constraint of constraints) {
+      const elapsedMs = at - instance.enteredAt;
+      if (elapsedMs < constraint.within || instance.hasFired(constraint.name)) {
+        continue;
+      }
+
+      instance.markFired(constraint.name);
+      fired += 1;
+      // biome-ignore lint/performance/noAwaitInLoops: two constraints on one state fire in declaration order, and the second observes what the first produced
+      await this.#escalate(instance, constraint, elapsedMs, at);
+    }
+
+    return fired;
+  }
+
+  /**
+   * Record a temporal violation and, unless it is only a warning, deliver its escalation.
+   *
+   * The escalation goes through `send()`, so it queues behind whatever the instance is
+   * already doing and dispatches against the state it is in when its turn comes. The
+   * runtime never writes state on its own: `escalateTo` rides on the trigger, and the
+   * handler decides.
+   */
+  async #escalate(
+    instance: AnyInstance,
+    constraint: CompiledTemporal,
+    elapsedMs: number,
+    at: number
+  ): Promise<void> {
+    // Allocated even for a warning, so the recorded violation always has a cause that can
+    // be traced, and so the counter advances identically under either policy.
+    const id = this.#nextTriggerId();
+    const trigger = {
+      type: constraint.trigger,
+      id,
+      constraint: constraint.name,
+      state: constraint.in,
+      sinceMs: elapsedMs,
+      ...(constraint.escalateTo === undefined
+        ? {}
+        : { escalateTo: constraint.escalateTo }),
+    } as Trigger;
+
+    const reason =
+      `has been in "${constraint.in}" for ${elapsedMs}ms, over its bound of ` +
+      `${constraint.within}ms`;
+
+    instance.violation({
+      violation: {
+        kind: "temporal",
+        name: constraint.name,
+        policy: constraint.policy,
+        reason,
+      },
+      at,
+      cause: { type: constraint.trigger, id },
+    });
+
+    this.#emit({
+      type: "constraint.violated",
+      key: instance.key,
+      entity: instance.entity,
+      state: constraint.in,
+      kind: "temporal",
+      constraint: constraint.name,
+      policy: constraint.policy,
+      reason,
+      trigger: { type: constraint.trigger, id },
+      at: telemetryNow(),
+    });
+
+    if (constraint.policy === "warn") {
+      return;
+    }
+
+    let delivered = true;
+    try {
+      await this.send(instance.key, trigger);
+    } catch (error) {
+      // An escalation that cannot be delivered is itself worth knowing about: the usual
+      // cause is that the state an instance is stuck in has no handler, which is exactly
+      // the situation the constraint was watching for.
+      delivered = false;
+      this.#onUnhandled(error);
+    }
+
+    this.#emit({
+      type: "constraint.escalated",
+      key: instance.key,
+      entity: instance.entity,
+      constraint: constraint.name,
+      state: constraint.in,
+      elapsedMs,
+      escalateTo: constraint.escalateTo,
+      trigger: { type: constraint.trigger, id },
+      delivered,
+      at: telemetryNow(),
+    });
   }
 
   #emit(event: TelemetryEvent): void {

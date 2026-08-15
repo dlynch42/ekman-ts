@@ -20,15 +20,34 @@
 // biome-ignore-all lint/performance/noBarrelFile: this is the package entry point declared in `exports`, so one public surface is the point. File-scoped rather than line-scoped because the rule reports on whichever export sorts second, which moves as the surface grows.
 export type { ResolvedInboxConfig } from "./config";
 export { DEFAULT_CAPACITY, OVERFLOW_POLICIES } from "./config";
+export type {
+  ConstraintCheck,
+  ConstraintsConfig,
+  GuardConstraint,
+  InvariantConstraint,
+  ProposedCommit,
+  TemporalConstraint,
+  TransitionConstraint,
+  ViolationPolicy,
+} from "./constraints";
+export { DEFAULT_TEMPORAL_TRIGGER } from "./constraints";
 export { Ekman } from "./ekman";
 export { defineEntity, statesFromEntries } from "./entity";
 export type { EkmanErrorOptions, ErrorCode } from "./errors";
-export { EkmanError, ERROR_CODES, isEkmanError } from "./errors";
+export {
+  ConstraintViolationError,
+  EkmanError,
+  ERROR_CODES,
+  isConstraintViolation,
+  isEkmanError,
+} from "./errors";
 export type {
+  ConstraintKind,
   EkmanEvent,
   EventCause,
   RejectedEvent,
   TransitionEvent,
+  ViolationEvent,
 } from "./events";
 export { isTransitionEvent } from "./events";
 export type { ParsedKey } from "./key";
@@ -41,8 +60,13 @@ export type {
 } from "./results";
 export { fail, stay, transitionTo } from "./results";
 export type {
+  CommitFencedEvent,
+  ConstraintEscalatedEvent,
+  ConstraintViolatedEvent,
+  HandlerRetriedEvent,
   HandlerSettledEvent,
   HandlerStartedEvent,
+  HandlerTimedOutEvent,
   InboxDroppedEvent,
   InboxEnqueuedEvent,
   InboxRejectedEvent,
@@ -66,6 +90,7 @@ export type {
   InboxConfig,
   InstanceSnapshot,
   OverflowPolicy,
+  TemporalConfig,
   Trigger,
   TriggerLike,
   UnknownPolicy,

@@ -1,3 +1,4 @@
+import { compileConstraints } from "./constraints";
 import { EkmanError } from "./errors";
 import { buildKey } from "./key";
 import type { ExecutionPolicy } from "./policy";
@@ -37,15 +38,6 @@ export function defineEntity<
   T extends TriggerLike = Trigger,
 >(name: N, config: EntityConfig<S, V, T>): EntityDefinition<N, S, V, T> {
   assertEntityName(name);
-
-  if (config.constraints !== undefined) {
-    throw new EkmanError(
-      "NOT_IMPLEMENTED",
-      `entity "${name}" declares constraints, which are not implemented yet. ` +
-        "Remove the field rather than leaving it set: a constraint that is configured " +
-        "but not enforced is worse than no constraint."
-    );
-  }
 
   const states = new Map<string, StateEntry<S, V, T>>(
     (Object.entries(config.states) as [string, StateConfig<S, V, T>][]).map(
@@ -96,6 +88,17 @@ export function defineEntity<
   }) as Readonly<V>;
   const classify = config.classify ?? defaultClassify;
 
+  // Compiled last, because every constraint names states and the check is worth making
+  // against the states that survived validation rather than against the raw config.
+  const constraints =
+    config.constraints === undefined
+      ? undefined
+      : compileConstraints<S, V, T>(
+          name,
+          config.constraints,
+          new Set(states.keys())
+        );
+
   return Object.freeze({
     name,
     initial,
@@ -105,6 +108,7 @@ export function defineEntity<
     states,
     errorHandlers,
     classify,
+    constraints,
     key: (id: string) => buildKey(name, id),
   });
 }

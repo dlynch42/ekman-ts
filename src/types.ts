@@ -1,3 +1,4 @@
+import type { CompiledConstraints, ConstraintsConfig } from "./constraints";
 import type { EkmanEvent, TransitionEvent } from "./events";
 import type { ExecutionPolicy } from "./policy";
 import type { HandlerResult } from "./results";
@@ -179,10 +180,13 @@ export interface EntityConfig<
   >;
   readonly classify?: (error: Error) => string;
   /**
-   * Not implemented yet. Setting it throws `NOT_IMPLEMENTED` rather than being quietly
-   * ignored, so a config that looks like it constrains something actually does.
+   * The strictness dial: transition graph, guards, invariants, and time-in-state bounds,
+   * each with its own `reject` / `warn` / `off` policy.
+   *
+   * Entirely opt-in. An entity that declares none is unconstrained, and one whose
+   * constraints are all `off` costs exactly the same.
    */
-  readonly constraints?: unknown;
+  readonly constraints?: ConstraintsConfig<NoInfer<S>, NoInfer<V>, NoInfer<T>>;
 }
 
 /** A validated, runtime-free entity definition. Safe to share across runtimes. */
@@ -201,6 +205,11 @@ export interface EntityDefinition<
   readonly states: ReadonlyMap<string, StateEntry<S, V, T>>;
   readonly errorHandlers: ReadonlyMap<string, ErrorHandler<S, V>>;
   readonly classify: (error: Error) => string;
+  /**
+   * Compiled constraints, or undefined when the entity declares none. Constraints set to
+   * `off` compile away entirely, so undefined and "all off" are the same fast path.
+   */
+  readonly constraints: CompiledConstraints<S, V, T> | undefined;
   /** Build a full key from an id, without needing a runtime. */
   key: (id: string) => string;
 }
@@ -290,6 +299,23 @@ export interface InboxConfig {
   readonly recordOverflow?: boolean;
 }
 
+/**
+ * How temporal constraints are evaluated.
+ *
+ * Evaluation is a sweep rather than a timer per instance, so one pass costs the states
+ * that are actually watched and nothing else. `sweep()` runs a pass on demand; `sweepMs`
+ * additionally runs one on an interval.
+ */
+export interface TemporalConfig {
+  /**
+   * Milliseconds between automatic sweeps. Omitted means no automatic sweeping, and
+   * `sweep()` is the only way a temporal constraint fires.
+   *
+   * The interval does not hold the process open.
+   */
+  readonly sweepMs?: number;
+}
+
 export interface EkmanConfig<
   D extends readonly AnyEntityDefinition[] = readonly AnyEntityDefinition[],
 > {
@@ -297,6 +323,8 @@ export interface EkmanConfig<
   readonly entities?: D;
   /** Bounded per-key inbox settings. */
   readonly inbox?: InboxConfig;
+  /** How often, if ever, temporal constraints are swept for automatically. */
+  readonly temporal?: TemporalConfig;
   /**
    * Default execution policy for every handler in the runtime: attempts, timeout, and
    * backoff.

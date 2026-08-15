@@ -1,3 +1,5 @@
+import type { ConstraintKind } from "./events";
+
 /**
  * Stable error codes. These strings are part of the public contract and are shared
  * verbatim with every other Ekman implementation, so the conformance suite can assert
@@ -24,6 +26,8 @@ export const ERROR_CODES = [
   "HANDLER_TIMEOUT",
   /** A commit was refused because its attempt had been superseded. */
   "COMMIT_FENCED",
+  /** A result did not satisfy a constraint whose policy is `reject`. */
+  "CONSTRAINT_VIOLATED",
   /** Two entities were registered under one name. */
   "DUPLICATE_ENTITY",
   /** Two handlers were declared for one state. */
@@ -52,7 +56,12 @@ export interface EkmanErrorOptions {
  * that rather than on the message.
  */
 export class EkmanError extends Error {
-  override readonly name = "EkmanError";
+  /**
+   * Typed as `string` rather than as its own literal so a subclass can narrow the
+   * classification. Error handlers are keyed on this by default, so a subclass that could
+   * not change it would be indistinguishable from any other Ekman failure.
+   */
+  override readonly name: string = "EkmanError";
   readonly code: ErrorCode;
   /**
    * `declare` on purpose: under `useDefineForClassFields` a plain optional field is
@@ -80,6 +89,41 @@ export class EkmanError extends Error {
       this.stack = composeStack(this.name, message, this.stack);
     }
   }
+}
+
+/**
+ * A result that a constraint refused.
+ *
+ * A distinct class purely so its `name` differs, because error classification is
+ * `error.name` by default. That is what lets an entity register a recovery for exactly
+ * this failure alongside its domain ones:
+ *
+ * ```ts
+ * onError: { ConstraintViolation: (instance, error) => stay({ blocked: error.message }) }
+ * ```
+ */
+export class ConstraintViolationError extends EkmanError {
+  override readonly name = "ConstraintViolation";
+  readonly kind: ConstraintKind;
+  /** The constraint's declared or derived name, matching the recorded violation event. */
+  readonly constraint: string;
+
+  constructor(args: {
+    kind: ConstraintKind;
+    constraint: string;
+    key: string;
+    reason: string;
+  }) {
+    super("CONSTRAINT_VIOLATED", args.reason, { key: args.key });
+    this.kind = args.kind;
+    this.constraint = args.constraint;
+  }
+}
+
+export function isConstraintViolation(
+  value: unknown
+): value is ConstraintViolationError {
+  return value instanceof ConstraintViolationError;
 }
 
 /**

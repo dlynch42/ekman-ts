@@ -1,8 +1,9 @@
 import type { RuntimeDeps } from "./config";
+import type { Violation } from "./constraints";
 import type { ErrorCode } from "./errors";
 import { EkmanError } from "./errors";
 import type { EkmanEvent, EventCause, TransitionEvent } from "./events";
-import { rejectedEvent, transitionEvent } from "./events";
+import { rejectedEvent, transitionEvent, violationEvent } from "./events";
 import { assertCommittable, CommitToken, fenceViolation } from "./fence";
 import { Inbox } from "./inbox";
 import type { InstanceSnapshot, Values } from "./types";
@@ -25,7 +26,16 @@ export class InstanceRecord<
   #state: S;
   #values: Readonly<V>;
   #seq: number;
+  #enteredAt: number;
   readonly #events: EkmanEvent<S, V>[] = [];
+  /**
+   * Temporal constraints that have already fired for the current state.
+   *
+   * Cleared on every state change, so a constraint fires once per entry rather than on
+   * every sweep for as long as the instance sits there. Without this an interval sweep
+   * over one stuck instance produces an unbounded stream of identical escalations.
+   */
+  readonly #firedTemporal = new Set<string>();
 
   /**
    * This key's bounded FIFO inbox: what keeps exactly one handler running per key and
@@ -55,6 +65,7 @@ export class InstanceRecord<
     this.#state = args.initial;
     this.#values = args.initialValues;
     this.#seq = 0;
+    this.#enteredAt = args.at;
 
     // Initialization is itself a commit, at sequence 0, and it is the only event whose
     // `from` is null. Recording it is what makes the stream replayable on its own.
@@ -85,6 +96,26 @@ export class InstanceRecord<
 
   get events(): readonly EkmanEvent<S, V>[] {
     return this.#events;
+  }
+
+  /**
+   * When this instance entered its current state, on the runtime's clock.
+   *
+   * Initialization counts as entering the initial state. A commit that only changes values
+   * leaves this alone, because the instance has not gone anywhere. This is what temporal
+   * constraints and time-in-state queries both measure against.
+   */
+  get enteredAt(): number {
+    return this.#enteredAt;
+  }
+
+  /** Whether a temporal constraint has already fired since this state was entered. */
+  hasFired(constraint: string): boolean {
+    return this.#firedTemporal.has(constraint);
+  }
+
+  markFired(constraint: string): void {
+    this.#firedTemporal.add(constraint);
   }
 
   /**
@@ -154,10 +185,16 @@ export class InstanceRecord<
     });
 
     // One synchronous block, no awaits: state, values, sequence and event land together.
+    const moved = next.state !== this.#state;
     this.#state = next.state;
     this.#values = next.values;
     this.#seq = event.seq;
     this.#events.push(event);
+
+    if (moved) {
+      this.#enteredAt = next.at;
+      this.#firedTemporal.clear();
+    }
 
     return event;
   }
@@ -183,6 +220,33 @@ export class InstanceRecord<
         cause: args.cause,
         code: args.code,
         reason: args.reason,
+      })
+    );
+  }
+
+  /**
+   * Record a constraint that did not hold.
+   *
+   * Written under `reject` and under `warn` alike, and like a rejection it carries the
+   * current sequence without advancing it. A `warn` violation lands immediately before the
+   * commit it did not stop, which is what makes the pair readable in order.
+   */
+  violation(args: {
+    violation: Violation;
+    at: number;
+    cause: EventCause;
+    attempted?: { from: S; to: S };
+  }): void {
+    this.#events.push(
+      violationEvent<S>({
+        key: this.key,
+        seq: this.#seq,
+        at: args.at,
+        cause: args.cause,
+        constraint: { kind: args.violation.kind, name: args.violation.name },
+        policy: args.violation.policy,
+        reason: args.violation.reason,
+        ...(args.attempted === undefined ? {} : { attempted: args.attempted }),
       })
     );
   }

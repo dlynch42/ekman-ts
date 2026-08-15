@@ -1,5 +1,7 @@
+import type { ProposedCommit } from "./constraints";
+import { checkConstraints, rejection, violationError } from "./constraints";
 import { resolveErrorHandler } from "./entity";
-import { EkmanError } from "./errors";
+import { EkmanError, isConstraintViolation } from "./errors";
 import type { EventCause } from "./events";
 import type { CommitToken } from "./fence";
 import { fenceReason } from "./fence";
@@ -239,10 +241,40 @@ async function runAttempt<S extends string, V extends Values>(
           handlerCtx,
           deps,
           cause,
-          token
+          token,
+          trigger
         );
       }
-      return commit(instance, result, deps, cause, token);
+
+      try {
+        return commit(
+          instance,
+          definition,
+          result,
+          trigger,
+          deps,
+          cause,
+          token
+        );
+      } catch (error) {
+        // A constraint refusal is a failure with its own classification, so it gets the
+        // same chance at an error handler that a failing handler gets. A recovery commit
+        // is checked too, and a recovery that violates something has nowhere further to
+        // go, which is what stops this from recurring.
+        if (isConstraintViolation(error)) {
+          return handleFailure(
+            instance,
+            definition,
+            error,
+            handlerCtx,
+            deps,
+            cause,
+            token,
+            trigger
+          );
+        }
+        throw error;
+      }
     }
   );
 
@@ -360,7 +392,8 @@ async function handleFailure<S extends string, V extends Values>(
   ctx: HandlerContext,
   deps: DispatchDeps,
   cause: EventCause,
-  token: CommitToken
+  token: CommitToken,
+  trigger: Trigger
 ): Promise<CommitResult<S, V>> {
   const errorHandler = resolveErrorHandler(definition, error);
 
@@ -376,7 +409,17 @@ async function handleFailure<S extends string, V extends Values>(
 
     if (isHandlerResult(recovery)) {
       if (recovery.kind !== "fail") {
-        return commit(instance, recovery, deps, cause, token);
+        // A recovery is a commit, so it faces the same constraints. If it violates one it
+        // throws from here, and there is no second error handler to catch it.
+        return commit(
+          instance,
+          definition,
+          recovery,
+          trigger,
+          deps,
+          cause,
+          token
+        );
       }
       throw failed(instance.key, error, recovery.error);
     }
@@ -386,12 +429,81 @@ async function handleFailure<S extends string, V extends Values>(
 }
 
 function failed(key: string, error: Error, from?: Error): EkmanError {
+  // A constraint refusal that nothing recovered keeps its own code all the way to the
+  // sender. Rewrapping it as a generic handler failure would throw away the one thing
+  // §5.3-style classification exists to carry.
+  if (from === undefined && isConstraintViolation(error)) {
+    return error;
+  }
+
   const suffix =
     from === undefined ? "" : ` (error handler also failed: ${from.message})`;
   return new EkmanError("HANDLER_FAILED", `${error.message}${suffix}`, {
     key,
     cause: error,
   });
+}
+
+/**
+ * Check every constraint that applies to a proposed commit, record what did not hold, and
+ * refuse the result if any of it was set to `reject`.
+ *
+ * Violations are written to the key's stream before the commit they precede, under `warn`
+ * as well as under `reject`. They are mirrored into telemetry because an operator wants to
+ * alert on them; the stream is the record, telemetry is the alarm.
+ */
+function applyConstraints<S extends string, V extends Values>(
+  instance: InstanceRecord<S, V>,
+  definition: EntityDefinition<string, S, V, Trigger>,
+  deps: DispatchDeps,
+  args: {
+    next: ProposedCommit<S, V>;
+    trigger: Trigger;
+    cause: EventCause;
+    transitioning: boolean;
+    mutatingValues: boolean;
+  }
+): void {
+  const violations = checkConstraints(definition.constraints, {
+    instance: instance.snapshot(),
+    next: args.next,
+    trigger: args.trigger,
+    transitioning: args.transitioning,
+    mutatingValues: args.mutatingValues,
+  });
+
+  if (violations.length === 0) {
+    return;
+  }
+
+  const attempted = { from: instance.state, to: args.next.state };
+
+  for (const violation of violations) {
+    instance.violation({
+      violation,
+      at: deps.now(),
+      cause: args.cause,
+      attempted,
+    });
+
+    deps.emit({
+      type: "constraint.violated",
+      key: instance.key,
+      entity: instance.entity,
+      state: instance.state,
+      kind: violation.kind,
+      constraint: violation.name,
+      policy: violation.policy,
+      reason: violation.reason,
+      trigger: triggerRef(args.trigger),
+      at: telemetryNow(),
+    });
+  }
+
+  const refused = rejection(violations);
+  if (refused !== undefined) {
+    throw violationError(refused, instance.key);
+  }
 }
 
 /**
@@ -402,12 +514,16 @@ function failed(key: string, error: Error, from?: Error): EkmanError {
  */
 function commit<S extends string, V extends Values>(
   instance: InstanceRecord<S, V>,
+  definition: EntityDefinition<string, S, V, Trigger>,
   result: TransitionToResult<S, V> | StayResult<V>,
+  trigger: Trigger,
   deps: DispatchDeps,
   cause: EventCause,
   token: CommitToken
 ): CommitResult<S, V> {
-  if (!instance.committable(token)) {
+  const committable = instance.committable(token);
+
+  if (!committable) {
     deps.emit({
       type: "commit.fenced",
       key: instance.key,
@@ -427,6 +543,19 @@ function commit<S extends string, V extends Values>(
     result.values === undefined
       ? instance.values
       : sealValues(result.values, instance.key);
+
+  // Constraints are skipped for an attempt that cannot commit anyway. Recording a
+  // violation for a result that was never going to land would put noise in the stream
+  // about work the runtime had already abandoned.
+  if (committable) {
+    applyConstraints(instance, definition, deps, {
+      next: { state, values },
+      trigger,
+      cause,
+      transitioning: result.kind === "transitionTo",
+      mutatingValues: result.values !== undefined,
+    });
+  }
 
   const event = instance.commit(
     { state, values, at: deps.now(), cause },

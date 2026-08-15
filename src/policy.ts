@@ -66,7 +66,8 @@ export const DEFAULT_BACKOFF: Backoff = {
  * Codes that describe a trigger the runtime refused rather than work that failed.
  *
  * Retrying one of these cannot change the outcome: the state still has no handler, the
- * trigger type is still unrecognized, the token is still fenced.
+ * trigger type is still unrecognized, the token is still fenced, the constraint still does
+ * not hold.
  */
 const NOT_RETRYABLE = new Set([
   "INVALID_KEY",
@@ -76,6 +77,7 @@ const NOT_RETRYABLE = new Set([
   "INBOX_OVERFLOW",
   "TRIGGER_DROPPED",
   "COMMIT_FENCED",
+  "CONSTRAINT_VIOLATED",
   "INVALID_CONFIG",
   "NOT_IMPLEMENTED",
 ]);
