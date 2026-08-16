@@ -47,13 +47,20 @@ export interface InstanceSnapshot<
 export interface HandlerContext {
   readonly key: string;
   readonly entity: string;
-  /** 1 for the first attempt. Retries are a later phase; this is always 1 for now. */
+  /**
+   * 1 for the first attempt, incrementing for each retry the execution policy allows.
+   *
+   * Read it to make a handler behave differently on a later try. Do not count with it: it
+   * is runtime state, and putting it in committed values makes it domain state.
+   */
   readonly attempt: number;
   /**
    * Cooperative cancellation. Handlers that can abort early should watch this.
    *
-   * It never aborts yet. Timeouts arrive in a later phase, and when they do the fence
-   * covers handlers that ignore this signal, so watching it stays optional.
+   * It aborts when the attempt times out. Watching it stays optional, because a handler
+   * that ignores it is covered by the fence instead: the attempt's commit token is
+   * invalidated at the same moment, so the abandoned handler's eventual result is refused.
+   * The signal is the courtesy; the fence is the guarantee.
    */
   readonly signal: AbortSignal;
 }
