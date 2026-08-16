@@ -27,3 +27,6 @@ build/
 
 # Testing
 coverage/
+
+# Example app state, written at runtime
+examples/**/data/
