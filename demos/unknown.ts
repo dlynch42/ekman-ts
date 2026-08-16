@@ -1,7 +1,7 @@
 /**
  * Unknown is never silent.
  *
- * Run with `npm run demo:unknown-is-never-silent`.
+ * Run with `npm run demo:unknown`.
  *
  * The default behaviour of most dispatch code, when handed something it does not
  * recognize, is nothing. A `switch` with no `default`. An `if` chain that falls off the

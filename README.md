@@ -80,7 +80,7 @@ A time-in-state bound fires as a *trigger*, never as a write. The runtime hands 
 npm run demo:no-going-backwards   # a redelivered message tries to rewind an order
 ```
 
-That one is worth running. Queues redeliver, and a handler written to "just apply the message" will happily walk a shipped order back to `paid` without anything failing. The same naive handler runs three times: unconstrained, in `warn`, and in `reject`.
+That one is worth running. Queues redeliver, and a handler written to "just apply the message" will happily walk a shipped order back to `paid` without anything failing. The same naive handler runs three times: unconstrained, in `warn`, and in `reject`. It is one of ten runnable demos, listed [further down](#demos).
 
 The inbox is bounded in **triggers, not bytes**: `capacity` is how many triggers may wait behind the one being handled, and is unrelated to `memory`, which is the byte budget. A `capacity` of 0 means one at a time with no backlog. When it fills, the overflow policy decides, and the sender always finds out. `reject` is backpressure (`INBOX_OVERFLOW`, the trigger did not land); `drop-newest` and `drop-oldest` are shedding (`TRIGGER_DROPPED`, the trigger is gone on purpose). Overflow is always visible in telemetry, and never in the transition history unless you ask for it with `recordOverflow`.
 
@@ -109,6 +109,7 @@ Eviction only ever touches idle instances, and only once a key goes idle, so a c
 ```
 npm run demo:recovery       # commit, crash, restart, everything resumes
 npm run demo:memory-bound   # 5000 instances inside a 64 KB budget
+npm run demo:durability     # four configurations the runtime refuses to start with
 ```
 
 ## Asking the questions you actually have
@@ -141,6 +142,55 @@ if (!complete) {
 ```
 
 A memory-only runtime can only report what it retains, and a store that cannot evaluate a filter says so rather than quietly ignoring it. Returning a partial answer as if it were complete is the one thing a query here will never do, because an operator acting on "nothing is stuck" needs that to have meant it.
+
+## Demos
+
+Every claim on this page has something runnable behind it. Each demo asserts rather than
+only printing, so a broken claim fails the run instead of scrolling past, and each one ends
+by saying what its output means.
+
+| Command | What it makes checkable |
+|---|---|
+| `demo:ordering` | Five triggers at one slow key, doing a read-modify-write with an `await` in the middle, and not one lost update. No lock anywhere in the handler. Ends with a full queue refusing a trigger. |
+| `demo:fencing` | A handler that ignores its timeout, runs to completion, tries to commit, and is refused. Plus `commit.raced`, the honest counterpart, where a commit that already reached the store stands. |
+| `demo:stuck` | "Everything stuck in `deploying` for more than five minutes", as a query and as a constraint, on one injected clock. Two handlers accept the escalation and one declines it. |
+| `demo:no-going-backwards` | A redelivered message tries to rewind an order. The same naive handler runs unconstrained, under `warn`, and under `reject`. |
+| `demo:recovery` | Commit, crash without ceremony, restart, and everything resumes in its exact state with history intact. |
+| `demo:memory-bound` | 5000 instances inside a 64 KB budget. Cold ones evict with a snapshot and reload transparently. |
+| `demo:durability` | Four configurations the runtime refuses to start with, each with the message it actually prints, then the layered stack they were protecting. |
+| `demo:execution-policy` | Retries, timeouts and backoff layered runtime → entity → state, field by field. A trigger queued behind a retrying attempt waits for it. |
+| `demo:audit` | One audit sink that throws, one that hangs forever, one that is merely slow. Every commit lands anyway. |
+| `demo:unknown` | A typo'd trigger type, and a deploy that removed a state instances were still sitting in. Both refused loudly and recorded. |
+
+## What it looks like in a real service
+
+[`examples/deploy-service`](./examples/deploy-service) is a small deployment tracker built
+the way you would actually build one: two entities, an HTTP API, a queue consumer, and one
+runtime shared by both.
+
+```
+examples/deploy-service/src/
+  entities/     deployment.ts, incident.ts    the domain: states, handlers, constraints
+  lib/          runtime.ts                    the single new Ekman({...}) for the process
+                metrics.ts, audit-log.ts,     telemetry and audit sinks
+                reactions.ts, config.ts
+  api/          server.ts, routes/            thin handlers: read request, send trigger
+  workers/      consumer.ts                   a queue driving the same runtime
+```
+
+```
+npm run example:api     # start it and poke it with curl
+npm run example:smoke   # boot it on an ephemeral port, drive it end to end, assert
+```
+
+The route handlers are the point. They read a request, `send()` a trigger, and shape the
+answer: no locks, no transactions, no read-modify-write, no retry loops. Two requests for
+the same deployment arriving at the same instant need nothing there to be safe. What error
+codes mean over HTTP is a lookup table, because every failure carries a stable one:
+`CONSTRAINT_VIOLATED` is a 409 and the client should stop, `INBOX_OVERFLOW` is a 503 with
+`Retry-After` and the client should not.
+
+Then stop the process and start it again. Everything is still there.
 
 ## What it is not
 
