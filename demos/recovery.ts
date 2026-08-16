@@ -11,13 +11,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  defineEntity,
-  Ekman,
-  fileStore,
-  stay,
-  transitionTo,
-} from "ekman";
+import { defineEntity, Ekman, fileStore, stay, transitionTo } from "ekman";
 
 type State = "pending" | "deploying" | "live" | "failed";
 interface Values extends Record<string, unknown> {
