@@ -11,7 +11,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { defineEntity, Ekman, fileStore, stay } from "../src/index";
+import { defineEntity, Ekman, fileStore, stay } from "ekman";
 
 const INSTANCES = 5000;
 const BUDGET = 64 * 1024;

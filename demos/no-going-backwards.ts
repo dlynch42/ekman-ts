@@ -12,8 +12,8 @@
  * which is what makes the lifecycle a rule rather than a hope.
  */
 
-import type { Handler } from "../src/index";
-import { defineEntity, Ekman, stay, transitionTo } from "../src/index";
+import type { Handler } from "ekman";
+import { defineEntity, Ekman, stay, transitionTo } from "ekman";
 
 type State = "pending" | "paid" | "shipped" | "delivered" | "cancelled";
 

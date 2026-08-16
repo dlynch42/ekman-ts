@@ -17,7 +17,7 @@ import {
   fileStore,
   stay,
   transitionTo,
-} from "../src/index";
+} from "ekman";
 
 type State = "pending" | "deploying" | "live" | "failed";
 interface Values extends Record<string, unknown> {
