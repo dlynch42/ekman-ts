@@ -43,6 +43,14 @@ export interface StoreCapabilities {
     readonly byState: boolean;
     readonly olderThan: boolean;
   };
+  /**
+   * Whether this store can delete a key's stream outright.
+   *
+   * Declared rather than assumed, because a store built on an append-only medium may have
+   * no way to remove anything. Saying so lets retention be refused exactly instead of
+   * appearing to work and quietly keeping everything.
+   */
+  readonly forget: boolean;
 }
 
 /** A point-in-time picture of an instance, enough to skip replaying from the beginning. */
@@ -144,6 +152,17 @@ export interface Store {
 
   /** Keys matching the criteria, with whatever the store could not evaluate declared. */
   readonly scan: (criteria: ScanCriteria) => Promise<ScanResult>;
+
+  /**
+   * Delete everything this store holds for a key: its stream and any snapshot.
+   *
+   * Present only when `capabilities.forget` says so. Deleting a key that was never here is
+   * not an error, so a retry after a partial sweep behaves the same as the first attempt.
+   *
+   * This destroys committed state. The runtime is what decides whether that is allowed and
+   * whether the key is idle enough for it; a store asked to forget just forgets.
+   */
+  readonly forget?: (key: string) => Promise<void>;
 
   /** Release anything held open. Optional, because a memory store holds nothing. */
   readonly close?: () => Promise<void>;

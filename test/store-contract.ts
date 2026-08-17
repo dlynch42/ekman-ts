@@ -357,4 +357,72 @@ export function storeContract(
 
     expect(stuck.matches.map((m) => m.key)).toEqual(["orders:1"]);
   });
+
+  it(`${name}: forgets a key completely, stream and snapshot alike`, async () => {
+    const store = make();
+    await store.append(
+      "orders:1",
+      commit("orders:1", 0, null, "a", 0),
+      EMPTY_SEQ
+    );
+    await store.append("orders:1", commit("orders:1", 1, "a", "b", 1000), 0);
+    await store.snapshot("orders:1", {
+      key: "orders:1",
+      entity: "orders",
+      state: "b",
+      values: { n: 1 },
+      seq: 1,
+      at: 1000,
+      enteredAt: 1000,
+    });
+    await store.append(
+      "orders:2",
+      commit("orders:2", 0, null, "a", 0),
+      EMPTY_SEQ
+    );
+
+    await store.forget?.("orders:1");
+
+    // Gone entirely, rather than reduced to a snapshot that would rebuild it on load.
+    expect(await store.load("orders:1")).toBeUndefined();
+    expect(await store.read("orders:1")).toEqual([]);
+
+    // And the neighbour it shares a store with is untouched, so a scan sees exactly one.
+    const found = await store.scan({ entity: "orders", now: 10_000 });
+    expect(found.matches.map((match) => match.key)).toEqual(["orders:2"]);
+  });
+
+  it(`${name}: lets a forgotten key be created again from the beginning`, async () => {
+    const store = make();
+    await store.append(
+      "orders:1",
+      commit("orders:1", 0, null, "a", 0),
+      EMPTY_SEQ
+    );
+    await store.append("orders:1", commit("orders:1", 1, "a", "b", 1000), 0);
+
+    await store.forget?.("orders:1");
+
+    // A genuinely new instance, back at the start. If the old sequence lingered anywhere
+    // this conditional append would be refused as a conflict.
+    await store.append(
+      "orders:1",
+      commit("orders:1", 0, null, "a", 0),
+      EMPTY_SEQ
+    );
+    expect((await store.load("orders:1"))?.seq).toBe(0);
+  });
+
+  it(`${name}: forgetting a key it never held is not an error`, async () => {
+    const store = make();
+    // So a sweep that dies halfway behaves the same way when it is retried.
+    await expect(store.forget?.("orders:nobody")).resolves.toBeUndefined();
+  });
+
+  it(`${name}: says whether it can forget at all`, () => {
+    // Declared rather than discovered by calling it: retention has to be refusable up
+    // front on a store that cannot delete.
+    const store = make();
+    expect(store.capabilities.forget).toBe(typeof store.forget === "function");
+  });
 }

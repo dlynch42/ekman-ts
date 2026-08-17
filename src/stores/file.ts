@@ -5,6 +5,7 @@ import {
   readdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   statSync,
   truncateSync,
   writeFileSync,
@@ -233,6 +234,7 @@ export class FileStore implements Store {
     conditionalAppend: true,
     multiWriter: false,
     scan: { byState: true, olderThan: true },
+    forget: true,
   });
   readonly authority?: boolean;
 
@@ -375,6 +377,23 @@ export class FileStore implements Store {
     return scanKeys(this.#keysOf(criteria.entity), criteria, (key) =>
       this.load(key)
     );
+  }
+
+  forget(key: string): Promise<void> {
+    // `force` so forgetting a key this store never held is not an error. A sweep that dies
+    // halfway and is retried should behave the same the second time.
+    rmSync(this.#logPath(key), { force: true });
+    rmSync(this.#snapshotPath(key), { force: true });
+
+    // The cached sequence has to go too, or a key created again under the same name would
+    // be appended at the old number and refused as a conflict.
+    this.#seq.delete(key);
+
+    // Zero when nothing is counting yet, which makes this a no-op rather than a special
+    // case: an unseeded store has a total of zero to take it off.
+    this.#total -= this.#bytes?.get(key) ?? 0;
+    this.#bytes?.delete(key);
+    return Promise.resolve();
   }
 
   /**

@@ -594,6 +594,44 @@ describe("retention", () => {
       );
     });
 
+    it("gives the bytes back when a key is forgotten", async () => {
+      const dir = freshDir();
+      const store = fileStore(dir, { retention: { totalBytes: 1024 * 1024 } });
+
+      await fill(store, "orders:1", 3);
+      await fill(store, "orders:2", 3);
+      const both = store.usage.bytes;
+
+      await store.forget("orders:1");
+
+      // The budget has to fall as well as rise, or a store that churns keys would report
+      // itself full while holding almost nothing.
+      expect(store.usage.logs).toBe(1);
+      expect(store.usage.bytes).toBeLessThan(both);
+      expect(store.usage.bytes).toBe(
+        readFileSync(logPathOf(dir, "orders:2")).byteLength
+      );
+    });
+
+    it("lets a forgotten key be created again under a full budget", async () => {
+      const dir = freshDir();
+      const store = fileStore(dir, {
+        retention: { totalBytes: 600, policy: "reject", perLogBytes: 0 },
+      });
+
+      await fill(store, "orders:1", 3);
+      await expect(
+        store.append("orders:2", move("orders:2", 0, {}), EMPTY_SEQ)
+      ).rejects.toThrow(WHEN_FULL);
+
+      // Forgetting the key that filled it makes room again, which is the whole point of
+      // pairing a budget with retention rather than just refusing forever.
+      await store.forget("orders:1");
+      await expect(
+        store.append("orders:2", move("orders:2", 0, {}), EMPTY_SEQ)
+      ).resolves.toBeUndefined();
+    });
+
     it("counts what was already on disk when it is first asked", async () => {
       const dir = freshDir();
       await fill(fileStore(dir), "orders:1", 3);

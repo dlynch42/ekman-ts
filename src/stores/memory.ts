@@ -29,6 +29,7 @@ export class MemoryStore implements Store {
     conditionalAppend: true,
     multiWriter: false,
     scan: { byState: true, olderThan: true },
+    forget: true,
   });
   readonly authority?: boolean;
 
@@ -94,6 +95,14 @@ export class MemoryStore implements Store {
 
   scan(criteria: ScanCriteria): Promise<ScanResult> {
     return scanKeys(this.keys, criteria, (key) => this.load(key));
+  }
+
+  forget(key: string): Promise<void> {
+    // Both halves, or a snapshot would outlive its stream and a later load would rebuild
+    // state for a key that is supposed to be gone.
+    this.#events.delete(key);
+    this.#snapshots.delete(key);
+    return Promise.resolve();
   }
 
   /** Keys this store holds anything for. */
