@@ -8,6 +8,11 @@ import type { Store } from "../src/store";
 import { defaultLogDir, fileStore } from "../src/stores/file";
 import { memoryStore } from "../src/stores/memory";
 
+const NOT_COMBINABLE = /cannot be combined/;
+const NOT_BUILT = /is not one this runtime builds/;
+const EMPTY_LIST = /empty list/;
+const ABSENCE_OF_A_STORE = /names the absence/;
+
 const dirs: string[] = [];
 function freshDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "ekman-stack-"));
@@ -185,15 +190,13 @@ describe("stores described rather than constructed", () => {
 
   it('refuses "none" beside a real layer', () => {
     // "no store, and also this store" is not a thing worth guessing at.
-    expect(() => resolveStack(["none", "memory"])).toThrow(
-      /cannot be combined/
-    );
+    expect(() => resolveStack(["none", "memory"])).toThrow(NOT_COMBINABLE);
   });
 
   it("refuses a kind it does not build", () => {
     // Naming an adapter core does not ship has to fail loudly, rather than look configured.
     const build = () => resolveStack("redis" as "memory");
-    expect(build).toThrow(/is not one this runtime builds/);
+    expect(build).toThrow(NOT_BUILT);
     try {
       build();
     } catch (error) {
@@ -202,7 +205,7 @@ describe("stores described rather than constructed", () => {
   });
 
   it("still refuses an empty list, which is a mistake rather than a choice", () => {
-    expect(() => resolveStack([])).toThrow(/empty list/);
+    expect(() => resolveStack([])).toThrow(EMPTY_LIST);
   });
 });
 
@@ -214,7 +217,7 @@ describe("createStore", () => {
   });
 
   it("refuses to build the absence of a store", () => {
-    expect(() => createStore("none" as "memory")).toThrow(/names the absence/);
+    expect(() => createStore("none" as "memory")).toThrow(ABSENCE_OF_A_STORE);
   });
 });
 
