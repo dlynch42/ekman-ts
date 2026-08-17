@@ -28,6 +28,7 @@ import {
   isEkmanError,
   transitionTo,
 } from "ekman";
+import { banner, check } from "./lib";
 
 const orders = defineEntity("orders", {
   initial: "open",
@@ -223,16 +224,6 @@ function wrap(message: string): string {
   }
   lines.push(line);
   return lines.join("\n    ");
-}
-
-function check(condition: boolean, message: string): void {
-  if (!condition) {
-    throw new Error(message);
-  }
-}
-
-function banner(title: string): void {
-  console.log(`\n${"=".repeat(78)}\n${title}\n${"=".repeat(78)}\n`);
 }
 
 main().catch((error: unknown) => {

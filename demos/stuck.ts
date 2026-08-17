@@ -23,6 +23,7 @@
 
 import type { EkmanEvent } from "ekman";
 import { defineEntity, Ekman, stay, transitionTo } from "ekman";
+import { banner, check } from "./lib";
 
 const SECOND = 1000;
 const MINUTE = 60 * SECOND;
@@ -280,16 +281,6 @@ function describe(event: EkmanEvent): string {
     return `${event.constraint.kind}:${event.constraint.name}  ${event.reason}`;
   }
   return event.type;
-}
-
-function check(condition: boolean, message: string): void {
-  if (!condition) {
-    throw new Error(message);
-  }
-}
-
-function banner(title: string): void {
-  console.log(`\n${"=".repeat(78)}\n${title}\n${"=".repeat(78)}\n`);
 }
 
 main().catch((error: unknown) => {

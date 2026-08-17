@@ -28,6 +28,7 @@ import {
   stay,
   transitionTo,
 } from "ekman";
+import { banner, check } from "./lib";
 
 // A named directory rather than a temporary one, cleared on the way in rather than out, so
 // the log this demo wrote is still there to read when it finishes. Its own subdirectory, so
@@ -225,16 +226,6 @@ async function settled(promise: Promise<unknown>): Promise<string> {
   } catch (error) {
     return isEkmanError(error) ? error.code : String(error);
   }
-}
-
-function check(condition: boolean, message: string): void {
-  if (!condition) {
-    throw new Error(message);
-  }
-}
-
-function banner(title: string): void {
-  console.log(`\n${"=".repeat(78)}\n${title}\n${"=".repeat(78)}\n`);
 }
 
 main().catch((error: unknown) => {

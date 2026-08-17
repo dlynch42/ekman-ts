@@ -25,6 +25,7 @@ import {
   replay,
   stay,
 } from "ekman";
+import { banner, check, row } from "./lib";
 
 /** Enough keys and rounds that the collisions are a rate rather than an anecdote. */
 const KEYS = 25;
@@ -331,23 +332,6 @@ function caught(run: () => unknown): unknown {
   } catch (error) {
     return error;
   }
-}
-
-function row(label: string, value: string | number, note?: string): void {
-  const shown = typeof value === "number" ? value.toLocaleString() : value;
-  console.log(
-    `  ${label.padEnd(22)}${shown.padStart(8)}${note === undefined ? "" : `   ${note}`}`
-  );
-}
-
-function check(condition: boolean, message: string): void {
-  if (!condition) {
-    throw new Error(message);
-  }
-}
-
-function banner(title: string): void {
-  console.log(`\n${"=".repeat(78)}\n${title}\n${"=".repeat(78)}\n`);
 }
 
 main().catch((error: unknown) => {

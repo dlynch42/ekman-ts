@@ -28,6 +28,7 @@ import {
   isEkmanError,
   transitionTo,
 } from "ekman";
+import { banner, check, delay } from "./lib";
 
 interface Values extends Record<string, unknown> {
   amount: number;
@@ -266,22 +267,6 @@ async function settled(promise: Promise<unknown>): Promise<string> {
   } catch (error) {
     return isEkmanError(error) ? error.code : String(error);
   }
-}
-
-function check(condition: boolean, message: string): void {
-  if (!condition) {
-    throw new Error(message);
-  }
-}
-
-function banner(title: string): void {
-  console.log(`\n${"=".repeat(78)}\n${title}\n${"=".repeat(78)}\n`);
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
 }
 
 main().catch((error: unknown) => {

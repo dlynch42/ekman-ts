@@ -29,6 +29,7 @@ import {
   stay,
   transitionTo,
 } from "ekman";
+import { banner, check, gauge, row } from "./lib";
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -541,37 +542,6 @@ async function caught(promise: Promise<unknown>): Promise<unknown> {
   } catch (error) {
     return error;
   }
-}
-
-function check(condition: boolean, message: string): void {
-  if (!condition) {
-    throw new Error(message);
-  }
-}
-
-/**
- * A bar against a ceiling, with the ceiling marked.
- *
- * Everything up to `|` is inside the budget and everything past it is not, so a store that
- * has blown through its allowance looks like one at a glance rather than needing the number
- * read and compared.
- */
-function row(label: string, value: string | number, note?: string): void {
-  const shown = typeof value === "number" ? value.toLocaleString() : value;
-  console.log(
-    `  ${label.padEnd(22)}${shown.padStart(14)}${note === undefined ? "" : `   ${note}`}`
-  );
-}
-
-function gauge(bytes: number, ceiling: number): string {
-  const width = 30;
-  const filled = Math.min(width, Math.round((bytes / ceiling) * width));
-  const over = Math.min(8, Math.round(((bytes - ceiling) / ceiling) * width));
-  return `${"█".repeat(filled).padEnd(width, "·")}|${(over > 0 ? "█".repeat(over) : "").padEnd(8, " ")}`;
-}
-
-function banner(title: string): void {
-  console.log(`\n${"=".repeat(78)}\n${title}\n${"=".repeat(78)}\n`);
 }
 
 main().catch((error: unknown) => {

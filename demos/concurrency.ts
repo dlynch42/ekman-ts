@@ -14,6 +14,7 @@
  */
 
 import { defineEntity, Ekman, stay } from "ekman";
+import { banner, check, delay, row } from "./lib";
 
 const KEYS = 200;
 const TRIGGERS_PER_KEY = 25;
@@ -277,27 +278,6 @@ function summary(run: Run, byHand: ByHand): void {
       "  parallelism, it is the removal of coordination the handler would otherwise have\n" +
       "  to contain."
   );
-}
-
-function row(label: string, value: string | number, note?: string): void {
-  const shown = typeof value === "number" ? value.toLocaleString() : value;
-  console.log(
-    `  ${label.padEnd(26)}${shown.padStart(12)}${note === undefined ? "" : `   ${note}`}`
-  );
-}
-
-function check(condition: boolean, message: string): void {
-  if (!condition) {
-    throw new Error(message);
-  }
-}
-
-function banner(title: string): void {
-  console.log(`\n${"=".repeat(78)}\n${title}\n${"=".repeat(78)}\n`);
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((done) => setTimeout(done, ms));
 }
 
 main().catch((error: unknown) => {

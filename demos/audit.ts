@@ -20,6 +20,7 @@ import { rmSync } from "node:fs";
 import { join } from "node:path";
 import type { AuditSink, EkmanEvent } from "ekman";
 import { defaultLogDir, defineEntity, Ekman, transitionTo } from "ekman";
+import { banner, check, delay } from "./lib";
 
 const COMMITS = 5;
 const ARCHIVE_MS = 250;
@@ -218,22 +219,6 @@ async function waitFor(
     // biome-ignore lint/performance/noAwaitInLoops: polling is sequential by definition
     await delay(5);
   }
-}
-
-function check(condition: boolean, message: string): void {
-  if (!condition) {
-    throw new Error(message);
-  }
-}
-
-function banner(title: string): void {
-  console.log(`\n${"=".repeat(78)}\n${title}\n${"=".repeat(78)}\n`);
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
 }
 
 main().catch((error: unknown) => {
