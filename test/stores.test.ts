@@ -20,9 +20,23 @@ import {
   fileStore,
   memoryStore,
   projectRoot,
+  replay,
   STORE_DIR_NAME,
 } from "../src/index";
+import type { LoadResult } from "../src/store";
+import type { FileStore, RetentionPolicy } from "../src/stores/file";
+import type { Values } from "../src/types";
 import { storeContract } from "./store-contract";
+
+const NEEDS_BUDGET = /needs a totalBytes to act on/;
+const NEEDS_ALLOW_DISCARD = /allowDiscard/;
+const NEEDS_BYTE_COUNT = /non-negative integer/;
+const WHEN_FULL = /retention totalBytes/;
+const NOT_A_POLICY = /is not recognized/;
+
+/** Where a key's log lives: sharded by entity, filename still the encoded key. */
+const logPathOf = (dir: string, key: string): string =>
+  join(dir, entityOf(key), `${encodeURIComponent(key)}.jsonl`);
 
 const temporaryDirs: string[] = [];
 
@@ -339,6 +353,289 @@ describe("the file store on disk", () => {
   });
 });
 
+describe("retention", () => {
+  const move = (key: string, seq: number, values: Values): EkmanEvent => ({
+    type: "transition",
+    key,
+    from: seq === 0 ? null : "a",
+    to: "a",
+    seq,
+    at: seq,
+    cause: { type: "poke", id: `t${seq}` },
+    values,
+  });
+
+  /** Append `count` events to one key, each padded so the log grows predictably. */
+  async function fill(
+    store: FileStore,
+    key: string,
+    count: number,
+    pad = 200
+  ): Promise<void> {
+    for (let seq = 0; seq < count; seq += 1) {
+      // biome-ignore lint/performance/noAwaitInLoops: sequence numbers have to land in order
+      await store.append(
+        key,
+        move(key, seq, { blob: "x".repeat(pad) }),
+        seq - 1
+      );
+    }
+  }
+
+  describe("what a bad configuration is told", () => {
+    it("refuses a policy with no budget to act on", () => {
+      expect(() =>
+        fileStore(freshDir(), { retention: { policy: "reject" } })
+      ).toThrow(NEEDS_BUDGET);
+    });
+
+    it("refuses a total budget that is not a byte count", () => {
+      expect(() =>
+        fileStore(freshDir(), { retention: { totalBytes: 10.5 } })
+      ).toThrow(NEEDS_BYTE_COUNT);
+    });
+
+    it("refuses a policy it does not recognize", () => {
+      expect(() =>
+        fileStore(freshDir(), {
+          retention: {
+            totalBytes: 1024,
+            policy: "evict" as RetentionPolicy,
+          },
+        })
+      ).toThrow(NOT_A_POLICY);
+    });
+
+    it("refuses to delete committed state without being asked explicitly", () => {
+      expect(() =>
+        fileStore(freshDir(), {
+          retention: { totalBytes: 1024, policy: "forget" },
+        })
+      ).toThrow(NEEDS_ALLOW_DISCARD);
+    });
+
+    it("refuses a byte count that is not one", () => {
+      expect(() =>
+        fileStore(freshDir(), { retention: { perLogBytes: -1 } })
+      ).toThrow(NEEDS_BYTE_COUNT);
+    });
+
+    it("accepts a budget with no policy, which measures without enforcing", () => {
+      const store = fileStore(freshDir(), { retention: { totalBytes: 1024 } });
+      expect(store.usage.maxBytes).toBe(1024);
+    });
+  });
+
+  describe("compaction", () => {
+    it("folds an oversized log into a snapshot and keeps the state", async () => {
+      const dir = freshDir();
+      const store = fileStore(dir, { retention: { perLogBytes: 512 } });
+
+      await fill(store, "orders:1", 12);
+
+      // The state is whatever the last event said, regardless of what was folded away.
+      const loaded = await store.load("orders:1");
+      const current = replay(loaded as LoadResult);
+      expect(current?.seq).toBe(11);
+      expect(current?.values.blob).toBe("x".repeat(200));
+
+      // And the log itself is now shorter than everything that was written to it.
+      const events = await store.read("orders:1");
+      expect(events.length).toBeLessThan(12);
+      expect(loaded?.snapshot?.seq).toBeGreaterThan(0);
+    });
+
+    it("survives a reopen, so compaction is not a resident-only trick", async () => {
+      const dir = freshDir();
+      await fill(
+        fileStore(dir, { retention: { perLogBytes: 512 } }),
+        "orders:1",
+        12
+      );
+
+      const reopened = fileStore(dir);
+      const current = replay((await reopened.load("orders:1")) as LoadResult);
+
+      expect(current?.seq).toBe(11);
+      expect(current?.values.blob).toBe("x".repeat(200));
+
+      // The sequence continues from where it was, rather than restarting at what survived.
+      await reopened.append("orders:1", move("orders:1", 12, {}), 11);
+      expect((await reopened.load("orders:1"))?.seq).toBe(12);
+    });
+
+    it("leaves a log alone when it holds nothing that could be snapshotted", async () => {
+      const dir = freshDir();
+      const store = fileStore(dir, { retention: { perLogBytes: 64 } });
+
+      // Refusals only, so there is no state to fold into a snapshot. Dropping them would
+      // destroy the only record that any of it happened.
+      for (let seq = 0; seq < 6; seq += 1) {
+        // biome-ignore lint/performance/noAwaitInLoops: appends have to land in order
+        await store.append(
+          "orders:1",
+          {
+            type: "rejected",
+            key: "orders:1",
+            seq: EMPTY_SEQ,
+            at: seq,
+            code: "UNKNOWN_TRIGGER",
+            reason: "never declared",
+            cause: { type: "nonsense", id: `t${seq}` },
+          },
+          EMPTY_SEQ
+        );
+      }
+
+      expect(await store.read("orders:1")).toHaveLength(6);
+    });
+
+    it("carries refusals through compaction and keeps the total honest", async () => {
+      const dir = freshDir();
+      // Bounded, so the byte accounting is live while compaction runs.
+      const store = fileStore(dir, {
+        retention: { perLogBytes: 512, totalBytes: 1024 * 1024 },
+      });
+
+      await store.append(
+        "orders:1",
+        {
+          type: "rejected",
+          key: "orders:1",
+          seq: EMPTY_SEQ,
+          at: 0,
+          code: "UNKNOWN_TRIGGER",
+          reason: "never declared",
+          cause: { type: "nonsense", id: "t0" },
+        },
+        EMPTY_SEQ
+      );
+      await fill(store, "orders:1", 10);
+
+      const events = await store.read("orders:1");
+
+      // The transitions were folded into the snapshot. The refusal was not: it is not a
+      // transition, so nothing about the snapshot accounts for it, and losing it would
+      // erase the only record that the trigger was ever turned away.
+      expect(events.filter((event) => event.type === "rejected")).toHaveLength(
+        1
+      );
+      expect(
+        events.filter((event) => event.type === "transition").length
+      ).toBeLessThan(10);
+
+      // And the accounted size followed the log back down rather than only ever growing.
+      expect(store.usage.bytes).toBe(
+        readFileSync(logPathOf(dir, "orders:1")).byteLength
+      );
+    });
+
+    it("keeps every event when compaction is switched off", async () => {
+      const dir = freshDir();
+      const store = fileStore(dir, { retention: { perLogBytes: 0 } });
+
+      await fill(store, "orders:1", 12);
+
+      expect(await store.read("orders:1")).toHaveLength(12);
+    });
+
+    it("keeps refusals that share a sequence with the snapshotted transition", async () => {
+      const dir = freshDir();
+      const store = fileStore(dir, { retention: { perLogBytes: 512 } });
+
+      await fill(store, "orders:1", 10);
+      // A rejection carries the sequence it followed rather than a new one, so it must not
+      // be mistaken for something the snapshot already accounts for.
+      await store.append(
+        "orders:1",
+        {
+          type: "rejected",
+          key: "orders:1",
+          seq: 9,
+          at: 99,
+          code: "UNKNOWN_TRIGGER",
+          reason: "the entity never declared this trigger",
+          cause: { type: "nonsense", id: "t99" },
+        },
+        9
+      );
+      await fill(store, "orders:1", 0);
+
+      const events = await store.read("orders:1");
+      expect(events.some((event) => event.type === "rejected")).toBe(true);
+    });
+  });
+
+  describe("the total budget", () => {
+    it("reports what it holds, unbounded by default", async () => {
+      const dir = freshDir();
+      const store = fileStore(dir);
+
+      expect(store.usage).toEqual({ bytes: 0, logs: 0, maxBytes: null });
+
+      await fill(store, "orders:1", 3);
+
+      expect(store.usage.logs).toBe(1);
+      expect(store.usage.bytes).toBeGreaterThan(0);
+    });
+
+    it("counts a write once when a budget makes it start counting mid-flight", async () => {
+      const dir = freshDir();
+      // Bounded, so accounting switches on. Compaction off, so nothing can quietly correct
+      // the total afterwards: the number has to be right the first time.
+      const store = fileStore(dir, {
+        retention: { totalBytes: 1024 * 1024, perLogBytes: 0 },
+      });
+
+      await fill(store, "orders:1", 1);
+
+      expect(store.usage.bytes).toBe(
+        readFileSync(logPathOf(dir, "orders:1")).byteLength
+      );
+    });
+
+    it("counts what was already on disk when it is first asked", async () => {
+      const dir = freshDir();
+      await fill(fileStore(dir), "orders:1", 3);
+
+      // A brand new store over the same directory has counted nothing yet. Reading usage
+      // is what seeds it, and it has to see the logs it inherited.
+      const reopened = fileStore(dir);
+      expect(reopened.usage.logs).toBe(1);
+      expect(reopened.usage.bytes).toBeGreaterThan(0);
+    });
+
+    it("refuses a new instance once full, and lets existing ones continue", async () => {
+      const dir = freshDir();
+      const store = fileStore(dir, {
+        retention: { totalBytes: 600, policy: "reject", perLogBytes: 0 },
+      });
+
+      await fill(store, "orders:1", 3);
+      expect(store.usage.bytes).toBeGreaterThan(600);
+
+      // The instance that already exists is untouched by the budget.
+      await expect(
+        store.append("orders:1", move("orders:1", 3, {}), 2)
+      ).resolves.toBeUndefined();
+
+      // A key this store has never seen is refused, and says so.
+      await expect(
+        store.append("orders:2", move("orders:2", 0, {}), EMPTY_SEQ)
+      ).rejects.toThrow(WHEN_FULL);
+    });
+
+    it("does not count anything when nobody is measuring", async () => {
+      // The accounting seeds lazily on purpose: a store with no budget that is never asked
+      // about should not pay for a walk of every file it owns.
+      const store = fileStore(freshDir());
+      await fill(store, "orders:1", 2);
+
+      expect(store.usage.logs).toBe(1);
+    });
+  });
+});
+
 describe("where a file store puts itself", () => {
   it("takes the directory it was given", () => {
     const dir = freshDir();
@@ -400,16 +697,12 @@ describe("a log whose last append did not finish", () => {
     values: {},
   });
 
-  /** Where a key's log lives: sharded by entity, filename still the encoded key. */
-  const logPath = (dir: string, key: string): string =>
-    join(dir, entityOf(key), `${encodeURIComponent(key)}.jsonl`);
-
   async function tornLog(): Promise<{ dir: string; path: string }> {
     const dir = freshDir();
     const store = fileStore(dir);
     await store.append("orders:1", event("orders:1", 0), EMPTY_SEQ);
 
-    const path = logPath(dir, "orders:1");
+    const path = logPathOf(dir, "orders:1");
     // A half-written line, exactly as a short write would leave it: no trailing newline.
     appendFileSync(path, '{"type":"transi', "utf8");
     return { dir, path };
@@ -445,7 +738,7 @@ describe("a log whose last append did not finish", () => {
 
     // Newline-terminated, so it landed intact and something else damaged it. Reporting that
     // as a healthy shorter log would hide real corruption.
-    appendFileSync(logPath(dir, "orders:1"), "not json at all\n", "utf8");
+    appendFileSync(logPathOf(dir, "orders:1"), "not json at all\n", "utf8");
 
     expect(() => fileStore(dir).load("orders:1")).toThrow(SyntaxError);
   });

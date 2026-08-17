@@ -53,6 +53,7 @@ describe("EkmanError", () => {
       "CONSTRAINT_VIOLATED",
       "STORE_CONFLICT",
       "STORE_UNAVAILABLE",
+      "STORE_FULL",
       "MEMORY_EXHAUSTED",
       "DUPLICATE_ENTITY",
       "DUPLICATE_STATE_HANDLER",

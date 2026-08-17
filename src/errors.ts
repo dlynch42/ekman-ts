@@ -32,6 +32,11 @@ export const ERROR_CODES = [
   "STORE_CONFLICT",
   /** The commit authority could not be reached, so the commit did not happen. */
   "STORE_UNAVAILABLE",
+  /**
+   * A store is at its retention budget and its policy refuses new instances rather than
+   * deleting existing ones. Instances the store already holds keep committing.
+   */
+  "STORE_FULL",
   /** The memory budget is full and the eviction policy refuses rather than evicting. */
   "MEMORY_EXHAUSTED",
   /** Two entities were registered under one name. */

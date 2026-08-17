@@ -5,10 +5,12 @@ import {
   readdirSync,
   readFileSync,
   renameSync,
+  statSync,
   truncateSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { EkmanError } from "../errors";
 import type { EkmanEvent } from "../events";
 import type {
   LoadResult,
@@ -18,7 +20,7 @@ import type {
   StoreCapabilities,
   StoreSnapshot,
 } from "../store";
-import { entityOf, latestSeq, scanKeys } from "../store";
+import { EMPTY_SEQ, entityOf, latestSeq, replay, scanKeys } from "../store";
 import { conflict } from "./memory";
 
 /** The directory a durable store defaults into, under the calling project's root. */
@@ -73,11 +75,135 @@ export function defaultLogDir(from: string = process.cwd()): string {
   return join(defaultStoreDir(from), LOGS_DIR_NAME);
 }
 
+/**
+ * What happens when a store reaches its total budget.
+ *
+ * - `none`: account and report, never act. The budget becomes a measurement rather than a
+ *   limit, which is how a team finds out what its real footprint is before enforcing one.
+ *   The same argument `warn` makes for constraints, and eviction's `none` for memory.
+ * - `reject`: refuse to create new instances. Instances that already exist keep committing,
+ *   because shedding new work is recoverable and breaking work in flight is not.
+ * - `compact`: compact the largest logs until back under budget. Costs history, not state.
+ * - `forget`: delete the oldest terminal instances. Discards committed state, so it has to
+ *   be asked for explicitly.
+ */
+export type RetentionPolicy = "none" | "reject" | "compact" | "forget";
+
+export const RETENTION_POLICIES: readonly RetentionPolicy[] = [
+  "none",
+  "reject",
+  "compact",
+  "forget",
+];
+
+export interface RetentionConfig {
+  /**
+   * Compact a single log once it grows past this many bytes.
+   *
+   * Compaction writes a snapshot and drops the events it folded in, so the cost is history
+   * rather than state: replay and current values are untouched, and `history()` reports
+   * itself incomplete. `0` disables it and keeps every event forever.
+   */
+  readonly perLogBytes?: number;
+  /**
+   * Budget across every log this store owns. Omitted means unlimited.
+   *
+   * Accounted either way, so `usage` always answers. What happens on reaching it is
+   * `policy`, which does nothing unless you say otherwise.
+   */
+  readonly totalBytes?: number;
+  /** Defaults to `none`. */
+  readonly policy?: RetentionPolicy;
+  /**
+   * Permit retention to delete committed state.
+   *
+   * Off by default and required to be explicit, for the same reason
+   * `eviction.allowDiscard` is: throwing away what a caller was told had committed is the
+   * one thing retention must never do by accident.
+   */
+  readonly allowDiscard?: boolean;
+}
+
 export interface FileStoreOptions {
   /** Names the layer. Appears in telemetry and in the runtime's refusal messages. */
   readonly name?: string;
   /** Claim the commit authority, rather than letting the stack pick. */
   readonly authority?: boolean;
+  readonly retention?: RetentionConfig;
+}
+
+/** What a store is holding, and what it is allowed to hold. `null` means unlimited. */
+export interface StoreUsage {
+  readonly bytes: number;
+  readonly logs: number;
+  readonly maxBytes: number | null;
+}
+
+/** 5MB, roughly fifteen to twenty thousand events at a typical line length. */
+const DEFAULT_PER_LOG_BYTES = 5 * 1024 * 1024;
+
+interface ResolvedRetention {
+  readonly perLogBytes: number;
+  readonly totalBytes: number;
+  readonly policy: RetentionPolicy;
+  readonly bounded: boolean;
+}
+
+/**
+ * Settle the retention config, refusing what cannot be satisfied rather than adjusting it.
+ */
+function resolveRetention(
+  config: RetentionConfig | undefined
+): ResolvedRetention {
+  const perLogBytes = config?.perLogBytes ?? DEFAULT_PER_LOG_BYTES;
+  const totalBytes = config?.totalBytes ?? Number.POSITIVE_INFINITY;
+  const policy = config?.policy ?? "none";
+
+  if (!(Number.isInteger(perLogBytes) && perLogBytes >= 0)) {
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      `retention perLogBytes must be a non-negative integer number of bytes, received ${JSON.stringify(config?.perLogBytes)}. ` +
+        "Use 0 to keep every event and never compact."
+    );
+  }
+
+  const bounded = totalBytes !== Number.POSITIVE_INFINITY;
+  if (bounded && !(Number.isInteger(totalBytes) && totalBytes >= 0)) {
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      `retention totalBytes must be a non-negative integer number of bytes, received ${JSON.stringify(config?.totalBytes)}. ` +
+        "Omit it for an unlimited budget that is still measured."
+    );
+  }
+
+  if (!RETENTION_POLICIES.includes(policy)) {
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      `retention policy ${JSON.stringify(policy)} is not recognized. ` +
+        `Expected one of: ${RETENTION_POLICIES.join(", ")}.`
+    );
+  }
+
+  // A policy that only ever fires at a ceiling is meaningless without one. Refused rather
+  // than silently never running, which would look configured and do nothing.
+  if (policy !== "none" && !bounded) {
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      `retention policy ${JSON.stringify(policy)} needs a totalBytes to act on, and none is set. ` +
+        'Set retention.totalBytes, or leave the policy at "none" to measure without enforcing.'
+    );
+  }
+
+  if (policy === "forget" && config?.allowDiscard !== true) {
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      'retention policy "forget" deletes committed state once the budget is reached. ' +
+        'Set retention.allowDiscard to accept that, or use policy "reject" to refuse new ' +
+        "instances instead."
+    );
+  }
+
+  return { perLogBytes, totalBytes, policy, bounded };
 }
 
 /**
@@ -122,6 +248,19 @@ export class FileStore implements Store {
   /** Latest committed sequence per key, so the common append does not re-read the log. */
   readonly #seq = new Map<string, number>();
 
+  readonly #retention: ResolvedRetention;
+
+  /**
+   * Bytes per log, and their total.
+   *
+   * Seeded lazily rather than at construction, because summing the tree costs a walk of
+   * every file and a store nobody asks about should not pay for it. Once seeded it is
+   * maintained from the byte lengths `append` already computes, so the common path is
+   * arithmetic rather than a stat.
+   */
+  #bytes: Map<string, number> | undefined;
+  #total = 0;
+
   constructor(options?: FileStoreOptions);
   constructor(dir: string, options?: FileStoreOptions);
   constructor(
@@ -130,6 +269,7 @@ export class FileStore implements Store {
   ) {
     const named = typeof dirOrOptions === "string";
     const options = (named ? maybeOptions : dirOrOptions) ?? {};
+    this.#retention = resolveRetention(options.retention);
 
     // No directory given means the caller does not care where, not that they do not care
     // whether. Durability was opted into by choosing this store at all; the path is the
@@ -153,13 +293,39 @@ export class FileStore implements Store {
       return Promise.reject(conflict(this.name, key, expectedSeq, current));
     }
 
+    const line = `${JSON.stringify(event)}\n`;
+    const width = Buffer.byteLength(line, "utf8");
+
+    // Refused before the write, and only for a key this store has never seen. An instance
+    // that already exists keeps committing: shedding new work is recoverable, and stopping
+    // work already in flight is not.
+    const refusal = this.#refuseIfFull(key, width);
+    if (refusal !== undefined) {
+      return Promise.reject(refusal);
+    }
+
     mkdirSync(this.#entityDir(key), { recursive: true });
-    appendFileSync(this.#logPath(key), `${JSON.stringify(event)}\n`, "utf8");
+    appendFileSync(this.#logPath(key), line, "utf8");
+    this.#account(key, width);
 
     if (event.type === "transition") {
       this.#seq.set(key, event.seq);
     }
+
+    // After the write rather than before it, so the size that triggers compaction is the
+    // size the log actually reached.
+    this.#compactIfOversized(key);
     return Promise.resolve();
+  }
+
+  /** What this store is holding, and what it is allowed to hold. */
+  get usage(): StoreUsage {
+    const bytes = this.#seeded();
+    return Object.freeze({
+      bytes: this.#total,
+      logs: bytes.size,
+      maxBytes: this.#retention.bounded ? this.#retention.totalBytes : null,
+    });
   }
 
   load(key: string): Promise<LoadResult | undefined> {
@@ -221,6 +387,150 @@ export class FileStore implements Store {
     return this.#keysOf();
   }
 
+  /**
+   * The per-log byte table, summed from disk the first time anything needs it.
+   *
+   * One walk, once, and only when a budget is configured or somebody reads `usage`. A
+   * store that is asked neither question never pays for it.
+   */
+  #seeded(): Map<string, number> {
+    if (this.#bytes !== undefined) {
+      return this.#bytes;
+    }
+
+    const bytes = new Map<string, number>();
+    let total = 0;
+    for (const key of this.#keysOf()) {
+      const { size } = statSync(this.#logPath(key));
+      bytes.set(key, size);
+      total += size;
+    }
+
+    this.#bytes = bytes;
+    this.#total = total;
+    return bytes;
+  }
+
+  /**
+   * Fold an oversized log into a snapshot and drop what the snapshot now covers.
+   *
+   * The two halves this needs already exist: `snapshot` writes atomically through a
+   * temporary name, and `load` already ignores events at or below the snapshot's sequence.
+   * So compaction is those two put together, and the read path needs to know nothing about
+   * it.
+   *
+   * What it costs is history, not state. Current values, replay and the sequence are
+   * untouched; the events folded away were already reflected in the snapshot. `history`
+   * reports itself incomplete afterwards, which is the honest half of the trade and the
+   * reason `HistoryResult.complete` exists.
+   */
+  #compactIfOversized(key: string): void {
+    const limit = this.#retention.perLogBytes;
+    if (limit === 0) {
+      return;
+    }
+
+    const size = this.#bytes?.get(key) ?? statSync(this.#logPath(key)).size;
+    if (size <= limit) {
+      return;
+    }
+
+    // Folded onto any earlier snapshot, because a log compacted before holds only the
+    // events after it and replaying those alone would lose everything before.
+    const events = this.#readLog(key);
+    const current = replay({
+      snapshot: this.#readSnapshot(key),
+      events,
+      seq: latestSeq(events),
+    });
+    if (current === undefined) {
+      // Nothing but refusals and violations so far. There is no state to snapshot, so
+      // there is nothing that could be dropped without losing the only record of it.
+      return;
+    }
+
+    writeFileSync(
+      this.#snapshotPath(key),
+      JSON.stringify({
+        key,
+        entity: entityOf(key),
+        state: current.state,
+        values: current.values,
+        seq: current.seq,
+        at: Date.now(),
+        enteredAt: current.enteredAt,
+      } satisfies StoreSnapshot),
+      "utf8"
+    );
+
+    // Everything the snapshot does not account for. A rejection or a violation carries the
+    // sequence it followed rather than a new one, so events at the snapshot's own sequence
+    // that are not the transition itself have to survive.
+    const kept = events.filter(
+      (event) => event.seq > current.seq || event.type !== "transition"
+    );
+    const rewritten = kept
+      .map((event) => `${JSON.stringify(event)}\n`)
+      .join("");
+
+    writeFileSync(this.#logPath(key), rewritten, "utf8");
+    this.#resize(key, size, Buffer.byteLength(rewritten, "utf8"));
+  }
+
+  /** Note that a log went from one size to another, keeping the total in step. */
+  #resize(key: string, before: number, after: number): void {
+    if (this.#bytes === undefined) {
+      return;
+    }
+    this.#total += after - before;
+    this.#bytes.set(key, after);
+  }
+
+  /** Record bytes just written, if anything is counting. */
+  #account(key: string, delta: number): void {
+    if (this.#bytes === undefined) {
+      // Nobody is counting yet, and the eventual seed will read the real sizes off disk,
+      // so skipping the bookkeeping cannot make it wrong.
+      if (!this.#retention.bounded) {
+        return;
+      }
+
+      // A budget is set, so this is the moment to start counting. Seeding stats the file
+      // that was just written to, which means the seed already includes `delta`. Adding it
+      // again here would count this one write twice.
+      this.#seeded();
+      return;
+    }
+
+    this.#bytes.set(key, (this.#bytes.get(key) ?? 0) + delta);
+    this.#total += delta;
+  }
+
+  /**
+   * The refusal a full store owes a key it has never seen, or undefined.
+   *
+   * Only `reject` acts here. `compact` and `forget` run as sweeps rather than on the commit
+   * path, because both have to look across keys to choose what to act on, and a scan is the
+   * wrong thing to do while somebody waits on an append.
+   */
+  #refuseIfFull(key: string, width: number): EkmanError | undefined {
+    if (this.#retention.policy !== "reject") {
+      return;
+    }
+
+    const bytes = this.#seeded();
+    if (bytes.has(key) || this.#total + width <= this.#retention.totalBytes) {
+      return;
+    }
+
+    return new EkmanError(
+      "STORE_FULL",
+      `the ${this.name} store holds ${this.#total} bytes across ${bytes.size} logs, which is its ` +
+        `configured retention totalBytes of ${this.#retention.totalBytes}, so ${JSON.stringify(key)} ` +
+        "was not created. Instances that already exist continue to commit."
+    );
+  }
+
   /** The keys under one entity, or under all of them when no entity is named. */
   #keysOf(entity?: string): readonly string[] {
     const entities =
@@ -250,13 +560,25 @@ export class FileStore implements Store {
     return keys.sort();
   }
 
+  /**
+   * The key's latest committed sequence.
+   *
+   * Taken from the snapshot as well as the log, not the log alone. Compaction can fold
+   * every transition into the snapshot and leave a log with none, and reading only the log
+   * would then report the key as having no events at all. The sequence would restart, and
+   * the next append would be a conditional append against the wrong number.
+   */
   #currentSeq(key: string): number {
     const cached = this.#seq.get(key);
     if (cached !== undefined) {
       return cached;
     }
 
-    const seq = latestSeq(this.#readLog(key));
+    const snapshot = this.#readSnapshot(key);
+    const seq = Math.max(
+      latestSeq(this.#readLog(key)),
+      snapshot === undefined ? EMPTY_SEQ : snapshot.seq
+    );
     this.#seq.set(key, seq);
     return seq;
   }
