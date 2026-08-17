@@ -77,7 +77,12 @@ export type {
   TransitionToResult,
 } from "./results";
 export { fail, stay, transitionTo } from "./results";
-export type { ResolvedStack } from "./stack";
+export type {
+  ResolvedStack,
+  StoreKind,
+  StoreLayer,
+  StoreSpec,
+} from "./stack";
 export { resolveStack } from "./stack";
 export type {
   LoadResult,
@@ -96,16 +101,22 @@ export {
   replay,
   scanKeys,
 } from "./store";
-export type { FileStoreOptions } from "./stores/file";
+// The built-in stores are configured by naming them (`store: "file"`), not by constructing
+// them, so their constructors are deliberately not part of the public surface. `Store`
+// stays exported: an adapter core does not ship is still passed as an instance.
+export type {
+  FileStoreOptions,
+  RetentionConfig,
+  RetentionPolicy,
+  StoreUsage,
+} from "./stores/file";
 export {
   defaultLogDir,
   defaultStoreDir,
-  FileStore,
-  fileStore,
   projectRoot,
+  RETENTION_POLICIES,
   STORE_DIR_NAME,
 } from "./stores/file";
-export { MemoryStore, memoryStore } from "./stores/memory";
 export type {
   AuditFailedEvent,
   CommitFencedEvent,

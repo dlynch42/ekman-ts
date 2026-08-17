@@ -17,14 +17,14 @@ import {
   defaultStoreDir,
   EMPTY_SEQ,
   entityOf,
-  fileStore,
-  memoryStore,
   projectRoot,
   replay,
   STORE_DIR_NAME,
 } from "../src/index";
 import type { LoadResult } from "../src/store";
 import type { FileStore, RetentionPolicy } from "../src/stores/file";
+import { fileStore } from "../src/stores/file";
+import { memoryStore } from "../src/stores/memory";
 import type { Values } from "../src/types";
 import { storeContract } from "./store-contract";
 

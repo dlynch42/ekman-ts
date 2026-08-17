@@ -5,7 +5,7 @@ import type { MemoryConfig } from "./memory";
 import type { ExecutionPolicy } from "./policy";
 import type { HistoryResult, QueryCriteria, QueryResult } from "./query";
 import type { HandlerResult } from "./results";
-import type { Store } from "./store";
+import type { StoreLayer } from "./stack";
 // Type-only, and so erased: `telemetry.ts` names `OverflowPolicy` from here, and this
 // names `TelemetrySink` from there. Neither import survives compilation, so the cycle
 // exists only for the typechecker, which resolves it fine.
@@ -347,8 +347,16 @@ export interface EkmanConfig<
    * authority: the last durable one, or the last one when none is durable, unless a layer
    * claims it with `authority: true`. Every other layer is a cache, written after the fact
    * and never able to fail a commit.
+   *
+   * ```ts
+   * store: "file"                                  // durable, in .ekman/logs
+   * store: ["memory", "file"]                      // layered, fastest first
+   * store: { kind: "file", dir: "/var/lib/svc" }   // somewhere specific
+   * store: ["memory", redisStore(client)]          // an adapter core does not ship
+   * store: "none"                                  // keeps nothing, and says so
+   * ```
    */
-  readonly store?: Store | readonly Store[];
+  readonly store?: StoreLayer | readonly StoreLayer[];
   /**
    * The resident memory budget and what happens when it is full.
    *

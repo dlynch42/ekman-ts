@@ -1,5 +1,90 @@
 import { EkmanError } from "./errors";
 import type { Store } from "./store";
+import type { FileStoreOptions } from "./stores/file";
+import { fileStore } from "./stores/file";
+import { memoryStore } from "./stores/memory";
+
+/**
+ * A store described rather than constructed.
+ *
+ * The built-ins are named, so configuring durability needs no imports and no call. What
+ * this deliberately does not become is an open registry: an adapter that carries its own
+ * dependency, such as Redis or Postgres, is passed as an instance instead, so that core
+ * never has to import a database client to understand a config object.
+ */
+export type StoreSpec =
+  | { readonly kind: "none" }
+  | {
+      readonly kind: "memory";
+      readonly name?: string;
+      readonly authority?: boolean;
+    }
+  | ({ readonly kind: "file"; readonly dir?: string } & FileStoreOptions);
+
+/** The shorthand for a spec that needs no options. */
+export type StoreKind = StoreSpec["kind"];
+
+/** One layer of the stack: named, described, or handed over already built. */
+export type StoreLayer = StoreKind | StoreSpec | Store;
+
+const STORE_KINDS: readonly StoreKind[] = ["none", "memory", "file"];
+
+/**
+ * Turn whatever `store` was configured as into layers.
+ *
+ * `"none"` produces no layer at all, which is not the same as an empty list. An empty list
+ * is a mistake and stays refused; `"none"` is somebody saying out loud that this runtime
+ * keeps nothing, and saying it is the point. For the same reason it cannot appear beside
+ * other layers: "no store, and also this store" has no meaning worth guessing at.
+ */
+function toLayers(store: StoreLayer | readonly StoreLayer[]): Store[] {
+  const configured = Array.isArray(store)
+    ? (store as readonly StoreLayer[])
+    : [store as StoreLayer];
+
+  const layers: Store[] = [];
+  for (const entry of configured) {
+    const spec: StoreSpec | Store =
+      typeof entry === "string" ? ({ kind: entry } as StoreSpec) : entry;
+
+    if (!("kind" in spec)) {
+      // Already a Store. Nothing to build.
+      layers.push(spec);
+      continue;
+    }
+
+    if (!STORE_KINDS.includes(spec.kind)) {
+      throw new EkmanError(
+        "INVALID_CONFIG",
+        `store kind ${JSON.stringify(spec.kind)} is not one this runtime builds. ` +
+          `Expected one of: ${STORE_KINDS.join(", ")}. Any other adapter is configured by ` +
+          "passing the store itself rather than naming it."
+      );
+    }
+
+    if (spec.kind === "none") {
+      if (configured.length > 1) {
+        throw new EkmanError(
+          "INVALID_CONFIG",
+          'store "none" says this runtime keeps nothing, so it cannot be combined with ' +
+            "other layers. Remove it, or make it the only entry."
+        );
+      }
+      continue;
+    }
+
+    if (spec.kind === "memory") {
+      const { kind: _kind, ...options } = spec;
+      layers.push(memoryStore(options));
+      continue;
+    }
+
+    const { kind: _kind, dir, ...options } = spec;
+    layers.push(dir === undefined ? fileStore(options) : fileStore(dir, options));
+  }
+
+  return layers;
+}
 
 /**
  * The store stack: one commit authority, everything else a cache.
@@ -31,21 +116,31 @@ export const EMPTY_STACK: ResolvedStack = Object.freeze({
 });
 
 export function resolveStack(
-  store: Store | readonly Store[] | undefined
+  store: StoreLayer | readonly StoreLayer[] | undefined
 ): ResolvedStack {
   if (store === undefined) {
     return EMPTY_STACK;
   }
 
-  const layers = Array.isArray(store) ? [...store] : [store as Store];
+  const configured = Array.isArray(store)
+    ? (store as readonly StoreLayer[])
+    : [store as StoreLayer];
 
-  if (layers.length === 0) {
+  if (configured.length === 0) {
     // An empty array is a configuration mistake, not a request for memory-only operation.
     // Omitting `store` says that, and says it unambiguously.
     throw new EkmanError(
       "INVALID_CONFIG",
       "store was configured as an empty list. Omit it entirely for a memory-only runtime."
     );
+  }
+
+  const layers = toLayers(configured);
+
+  // `"none"` is the one input that legitimately produces no layer. Everything below reasons
+  // about an authority, and there is not one to reason about.
+  if (layers.length === 0) {
+    return EMPTY_STACK;
   }
 
   assertUniqueNames(layers);
