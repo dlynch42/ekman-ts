@@ -11,9 +11,21 @@ import { defaultLogDir } from "ekman";
 const KB = 1024;
 const MINUTE_MS = 60_000;
 
-function num(name: string, fallback: number): number {
+/**
+ * An environment variable, or the fallback when it is unset **or empty**.
+ *
+ * Empty counts as unset on purpose. `DATA_DIR=` in a compose file or a half-filled
+ * template is not somebody asking for the empty path, and `??` alone would hand it over
+ * as one: the service would write its state to a garbage location and say nothing.
+ */
+function str(name: string, fallback: string): string {
   const raw = process.env[name];
-  if (raw === undefined || raw === "") {
+  return raw === undefined || raw === "" ? fallback : raw;
+}
+
+function num(name: string, fallback: number): number {
+  const raw = str(name, "");
+  if (raw === "") {
     return fallback;
   }
   const value = Number(raw);
@@ -37,7 +49,7 @@ export const config = Object.freeze({
    * with the demos; a standalone service would call `fileStore()` and take `.ekman/logs`
    * whole.
    */
-  dataDir: process.env.DATA_DIR ?? join(defaultLogDir(), "deploy-service"),
+  dataDir: str("DATA_DIR", join(defaultLogDir(), "deploy-service")),
 
   /** Resident memory allowance. Small here so eviction is observable in a demo. */
   memoryBytes: num("MEMORY_BYTES", 256 * KB),
@@ -60,7 +72,7 @@ export const config = Object.freeze({
   storageBytes: num("STORAGE_BYTES", 64 * KB * KB),
 
   /** How long a closed-out deployment is kept before a prune may remove it. */
-  retainFor: process.env.RETAIN_FOR ?? "30d",
+  retainFor: str("RETAIN_FOR", "30d"),
 
   /** Attempts and per-attempt timeout for the state that talks to the deploy API. */
   deployMaxAttempts: num("DEPLOY_MAX_ATTEMPTS", 4),
