@@ -10,6 +10,8 @@ import { fail, stay, transitionTo } from "../src/results";
 import type { TelemetryEvent } from "../src/telemetry";
 
 const NON_NEGATIVE_INTEGER = /non-negative integer/;
+const NOTHING_TO_COMPACT = /no configured store layer can compact/;
+const POSITIVE_MILLISECONDS = /positive number of milliseconds/;
 
 /** A clock that advances a fixed step per read, so `at` is assertable. */
 const steppingClock = (start = 1000, step = 1000) => {
@@ -1215,6 +1217,7 @@ describe("forgetting an instance", () => {
         multiWriter: false,
         scan: { byState: false, olderThan: false },
         forget: false,
+        compact: false,
       },
       append: () => Promise.resolve(),
       load: () => Promise.resolve(undefined),
@@ -1289,6 +1292,282 @@ describe("storage usage", () => {
     expect(ekman.storageUsage.maxBytes).toBe(4096);
 
     await ekman.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("sweeping storage", () => {
+  const tickets = defineEntity("tickets", {
+    initial: "open",
+    // Enough per commit that a handful of them pass a small budget.
+    states: { open: () => stay({ note: "x".repeat(200) }) },
+  });
+
+  /** A runtime over a fresh directory, with the store told what to do at its budget. */
+  const bounded = (
+    dir: string,
+    retention: { totalBytes: number; policy: "compact" | "reject" },
+    telemetry?: TelemetryEvent[]
+  ) =>
+    new Ekman({
+      entities: [tickets],
+      store: {
+        kind: "file",
+        dir,
+        // Per-log compaction off, so the sweep is the only thing that can reclaim and
+        // nothing happens on the commit path to muddy what is being measured.
+        retention: { perLogBytes: 0, ...retention },
+      },
+      ...(telemetry === undefined
+        ? {}
+        : { telemetry: { "*": (event) => telemetry.push(event) } }),
+    });
+
+  it("reclaims bytes without touching state", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ekman-sweep-"));
+    const ekman = bounded(dir, { totalBytes: 1200, policy: "compact" });
+
+    for (const id of ["t1", "t2", "t3"]) {
+      for (let i = 0; i < 4; i += 1) {
+        // biome-ignore lint/performance/noAwaitInLoops: commits have to land in order for the byte totals to mean anything
+        await ekman.entities.tickets.send(id, { type: "poke" });
+      }
+    }
+
+    const before = ekman.storageUsage.bytes;
+    const swept = await ekman.sweepStorage();
+
+    expect(swept.logs).toBeGreaterThan(0);
+    expect(swept.reclaimed).toBeGreaterThan(0);
+    expect(swept.overBudget).toEqual([]);
+    expect(ekman.storageUsage.bytes).toBeLessThan(before);
+
+    // The whole claim: history is what a sweep costs, and nothing else is.
+    const current = ekman.entities.tickets.inspect("t1");
+    expect(current?.seq).toBe(4);
+    expect(current?.values.note).toBe("x".repeat(200));
+    const { complete, reasons } = await ekman.entities.tickets.history("t1");
+    expect(complete).toBe(false);
+    expect(reasons).toContain("compacted");
+
+    await ekman.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("does not call a stream complete when every event of it was folded", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ekman-sweep-"));
+    const ekman = bounded(dir, { totalBytes: 1, policy: "compact" });
+    await ekman.entities.tickets.send("t1", { type: "poke" });
+    await ekman.sweepStorage();
+
+    // Compaction can fold every event a key has and leave an empty stream behind. Asking
+    // the events which sequence they start at cannot tell that apart from a key nothing
+    // ever addressed, and answering "complete" for a key that has plainly lived is the
+    // same lie in a rarer shape.
+    const { events, complete, reasons } =
+      await ekman.entities.tickets.history("t1");
+    expect(events).toHaveLength(0);
+    expect(complete).toBe(false);
+    expect(reasons).toContain("compacted");
+
+    // A key nothing ever addressed still answers the other way, because it has no
+    // snapshot behind it either.
+    const untouched = await ekman.entities.tickets.history("nobody");
+    expect(untouched.complete).toBe(true);
+
+    await ekman.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("names the layers it could not bring under their bound", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ekman-sweep-"));
+    // Below what the snapshots alone weigh, so the sweep reaches its floor still over.
+    const ekman = bounded(dir, { totalBytes: 1, policy: "compact" });
+    await ekman.entities.tickets.send("t1", { type: "poke" });
+
+    const swept = await ekman.sweepStorage();
+
+    // Named rather than counted, because "something is over" is not actionable.
+    expect(swept.overBudget).toEqual(["file"]);
+
+    await ekman.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("emits what each layer reclaimed, with no key on the event", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ekman-sweep-"));
+    const telemetry: TelemetryEvent[] = [];
+    const ekman = bounded(
+      dir,
+      { totalBytes: 600, policy: "compact" },
+      telemetry
+    );
+
+    for (let i = 0; i < 5; i += 1) {
+      // biome-ignore lint/performance/noAwaitInLoops: commits have to land in order
+      await ekman.entities.tickets.send("t1", { type: "poke" });
+    }
+    await ekman.sweepStorage();
+
+    // An interval sweep has no caller holding its result, so the event is the only way it
+    // could be observed at all.
+    const swept = telemetry.filter((event) => event.type === "storage.swept");
+    expect(swept).toHaveLength(1);
+    expect(swept[0]).toMatchObject({ store: "file", maxBytes: 600 });
+    // The one event here that belongs to a store rather than to an instance.
+    expect(swept[0]).not.toHaveProperty("key");
+
+    await ekman.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("skips layers that cannot compact, rather than refusing", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ekman-sweep-"));
+    const ekman = new Ekman({
+      entities: [tickets],
+      // A memory cache in front of a file authority. Sweeping the stack must not become
+      // an error just because one layer has nothing to reclaim.
+      store: ["memory", { kind: "file", dir }],
+    });
+    await ekman.entities.tickets.send("t1", { type: "poke" });
+
+    await expect(ekman.sweepStorage()).resolves.toEqual({
+      logs: 0,
+      reclaimed: 0,
+      overBudget: [],
+    });
+
+    await ekman.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("reports a layer that compacts without accounting for itself", async () => {
+    // `usage` is optional on the contract: an adapter can reclaim space and have no
+    // meaningful byte total to report, and inventing one for it would be worse than
+    // saying nothing. The sweep still has to work and still has to say what it did.
+    const silent = {
+      name: "silent",
+      capabilities: {
+        durability: "ephemeral" as const,
+        conditionalAppend: true,
+        multiWriter: false,
+        scan: { byState: false, olderThan: false },
+        forget: false,
+        compact: true,
+      },
+      append: () => Promise.resolve(),
+      load: () => Promise.resolve(undefined),
+      read: () => Promise.resolve([]),
+      snapshot: () => Promise.resolve(),
+      scan: () =>
+        Promise.resolve({ matches: [], unsupported: [], complete: true }),
+      compact: () =>
+        Promise.resolve({ logs: 2, reclaimed: 512, withinBudget: true }),
+    };
+
+    const telemetry: TelemetryEvent[] = [];
+    const ekman = new Ekman({
+      entities: [tickets],
+      store: silent,
+      telemetry: { "*": (event) => telemetry.push(event) },
+    });
+
+    await expect(ekman.sweepStorage()).resolves.toEqual({
+      logs: 2,
+      reclaimed: 512,
+      overBudget: [],
+    });
+    expect(
+      telemetry.find((event) => event.type === "storage.swept")
+    ).toMatchObject({ store: "silent", bytes: 0, maxBytes: null });
+
+    await ekman.close();
+  });
+
+  it("returns an empty pass rather than queueing behind one already running", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ekman-sweep-"));
+    const ekman = bounded(dir, { totalBytes: 400, policy: "compact" });
+    for (let i = 0; i < 4; i += 1) {
+      // biome-ignore lint/performance/noAwaitInLoops: commits have to land in order
+      await ekman.entities.tickets.send("t1", { type: "poke" });
+    }
+
+    // Overlapping passes are not useful: the second would walk a store the first is
+    // rewriting underneath it.
+    const [first, second] = await Promise.all([
+      ekman.sweepStorage(),
+      ekman.sweepStorage(),
+    ]);
+
+    expect(first.reclaimed).toBeGreaterThan(0);
+    expect(second).toEqual({ logs: 0, reclaimed: 0, overBudget: [] });
+
+    await ekman.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("refuses an interval that could never reclaim anything", () => {
+    // A setting that looks configured and does nothing is the failure this whole area of
+    // the config exists to refuse.
+    expect(
+      () =>
+        new Ekman({
+          entities: [tickets],
+          store: "memory",
+          storage: { sweepMs: 10 },
+        })
+    ).toThrow(NOTHING_TO_COMPACT);
+  });
+
+  it("refuses an interval that is not one", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ekman-sweep-"));
+    expect(
+      () =>
+        new Ekman({
+          entities: [tickets],
+          store: { kind: "file", dir },
+          storage: { sweepMs: 0 },
+        })
+    ).toThrow(POSITIVE_MILLISECONDS);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("reclaims on its own once an interval is set, and stops on close", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ekman-sweep-"));
+    const telemetry: TelemetryEvent[] = [];
+    const ekman = new Ekman({
+      entities: [tickets],
+      store: {
+        kind: "file",
+        dir,
+        retention: { perLogBytes: 0, totalBytes: 600, policy: "compact" },
+      },
+      storage: { sweepMs: 5 },
+      telemetry: { "*": (event) => telemetry.push(event) },
+    });
+
+    for (let i = 0; i < 5; i += 1) {
+      // biome-ignore lint/performance/noAwaitInLoops: commits have to land in order
+      await ekman.entities.tickets.send("t1", { type: "poke" });
+    }
+
+    await new Promise((done) => setTimeout(done, 40));
+    expect(
+      telemetry.filter((event) => event.type === "storage.swept").length
+    ).toBeGreaterThan(0);
+
+    await ekman.close();
+    const afterClose = telemetry.filter(
+      (event) => event.type === "storage.swept"
+    ).length;
+    await new Promise((done) => setTimeout(done, 30));
+
+    // Closed means closed. An interval left running would keep rewriting a store the
+    // caller believes it has finished with.
+    expect(
+      telemetry.filter((event) => event.type === "storage.swept")
+    ).toHaveLength(afterClose);
+
     rmSync(dir, { recursive: true, force: true });
   });
 });

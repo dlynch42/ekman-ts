@@ -29,7 +29,6 @@ import type { Values } from "../src/types";
 import { storeContract } from "./store-contract";
 
 const NEEDS_BUDGET = /needs a totalBytes to act on/;
-const NEEDS_ALLOW_DISCARD = /allowDiscard/;
 const NEEDS_BYTE_COUNT = /non-negative integer/;
 const WHEN_FULL = /retention totalBytes/;
 const NOT_A_POLICY = /is not recognized/;
@@ -37,6 +36,19 @@ const NOT_A_POLICY = /is not recognized/;
 /** Where a key's log lives: sharded by entity, filename still the encoded key. */
 const logPathOf = (dir: string, key: string): string =>
   join(dir, entityOf(key), `${encodeURIComponent(key)}.jsonl`);
+
+/** The snapshot beside it, which the byte total counts too. */
+const snapshotPathOf = (dir: string, key: string): string =>
+  join(dir, entityOf(key), `${encodeURIComponent(key)}.snapshot.json`);
+
+/** What a key actually occupies: both files, which is what a budget has to measure. */
+const onDisk = (dir: string, key: string): number => {
+  const snapshot = snapshotPathOf(dir, key);
+  return (
+    readFileSync(logPathOf(dir, key)).byteLength +
+    (existsSync(snapshot) ? readFileSync(snapshot).byteLength : 0)
+  );
+};
 
 const temporaryDirs: string[] = [];
 
@@ -406,12 +418,18 @@ describe("retention", () => {
       ).toThrow(NOT_A_POLICY);
     });
 
-    it("refuses to delete committed state without being asked explicitly", () => {
+    it("does not offer to delete instances to make room", () => {
+      // A store sees bytes and keys. Which instances no longer matter is a domain
+      // question, so the policy that answered it from here is gone rather than inert:
+      // a word that validates and does nothing is the failure this whole config refuses.
       expect(() =>
         fileStore(freshDir(), {
-          retention: { totalBytes: 1024, policy: "forget" },
+          retention: {
+            totalBytes: 1024,
+            policy: "forget" as RetentionPolicy,
+          },
         })
-      ).toThrow(NEEDS_ALLOW_DISCARD);
+      ).toThrow(NOT_A_POLICY);
     });
 
     it("refuses a byte count that is not one", () => {
@@ -524,10 +542,117 @@ describe("retention", () => {
         events.filter((event) => event.type === "transition").length
       ).toBeLessThan(10);
 
-      // And the accounted size followed the log back down rather than only ever growing.
-      expect(store.usage.bytes).toBe(
+      // And the accounted size followed the files rather than only ever growing. Both
+      // files: compaction moves bytes out of the log and into the snapshot, so a total
+      // that watched the log alone would report that move as space reclaimed while the
+      // disk gave back nothing.
+      expect(store.usage.bytes).toBe(onDisk(dir, "orders:1"));
+    });
+
+    it("reclaims across keys on a sweep, without a per-log limit to trigger it", async () => {
+      const dir = freshDir();
+      // `perLogBytes: 0` switches the per-log check off entirely, so nothing here compacts
+      // on the commit path. The budget is the only thing that can act, and it acts on a
+      // sweep. This is the case that used to validate and then do nothing.
+      const store = fileStore(dir, {
+        retention: { perLogBytes: 0, totalBytes: 2000, policy: "compact" },
+      });
+
+      for (const key of ["orders:1", "orders:2", "orders:3"]) {
+        // biome-ignore lint/performance/noAwaitInLoops: one key at a time keeps the byte totals predictable
+        await fill(store, key, 8);
+      }
+
+      const before = store.usage.bytes;
+      expect(before).toBeGreaterThan(2000);
+
+      const swept = await store.compact();
+
+      expect(swept.logs).toBeGreaterThan(0);
+      expect(swept.reclaimed).toBeGreaterThan(0);
+      expect(swept.withinBudget).toBe(true);
+      expect(store.usage.bytes).toBeLessThan(before);
+      expect(store.usage.bytes).toBeLessThanOrEqual(2000);
+
+      // History is what it cost. State is not: every key still replays to where it was.
+      for (const key of ["orders:1", "orders:2", "orders:3"]) {
+        // biome-ignore lint/performance/noAwaitInLoops: one key at a time keeps failures attributable
+        const current = replay((await store.load(key)) as LoadResult);
+        expect(current?.seq).toBe(7);
+        expect(current?.values.blob).toBe("x".repeat(200));
+      }
+    });
+
+    it("says so when it reaches the floor still over budget", async () => {
+      const dir = freshDir();
+      // A budget below what the snapshots alone weigh. Compaction has a floor: folding a
+      // log empties it but writes the state into a snapshot beside it, and that snapshot
+      // is bytes on the same disk. A store that has hit the floor cannot sweep its way
+      // under, and the number that proves it is only visible because the total counts
+      // snapshots as well as logs.
+      const store = fileStore(dir, {
+        retention: { perLogBytes: 0, totalBytes: 1, policy: "compact" },
+      });
+
+      await fill(store, "orders:1", 6);
+      await fill(store, "orders:2", 6);
+
+      const first = await store.compact();
+      expect(first.reclaimed).toBeGreaterThan(0);
+      expect(first.withinBudget).toBe(false);
+
+      // The second pass has nothing left to fold and reports that rather than spinning.
+      const second = await store.compact();
+      expect(second.logs).toBe(0);
+      expect(second.reclaimed).toBe(0);
+      expect(second.withinBudget).toBe(false);
+    });
+
+    it("counts a snapshot an earlier run left behind", async () => {
+      const dir = freshDir();
+      const first = fileStore(dir, { retention: { totalBytes: 4096 } });
+      await fill(first, "orders:1", 3);
+      await first.snapshot("orders:1", {
+        key: "orders:1",
+        entity: "orders",
+        state: "moved",
+        values: { blob: "x".repeat(200) },
+        seq: 2,
+        at: 2000,
+        enteredAt: 2000,
+      });
+
+      // A store opened over the same directory counts nothing until something asks, and
+      // then it walks the tree. Both files are there, and a walk that found only the logs
+      // would report room the disk does not have.
+      const reopened = fileStore(dir, { retention: { totalBytes: 4096 } });
+
+      expect(reopened.usage.bytes).toBe(onDisk(dir, "orders:1"));
+      expect(reopened.usage.bytes).toBeGreaterThan(
         readFileSync(logPathOf(dir, "orders:1")).byteLength
       );
+    });
+
+    it("reclaims nothing under a policy that was not asked to", async () => {
+      const dir = freshDir();
+      // `reject` refuses new keys at the budget and never rewrites what is there. Sweeping
+      // it is not an error, because the runtime sweeps every layer without asking each one
+      // what it was configured for.
+      // Wide enough to admit the first key and far too small for four commits of it, so
+      // the store is genuinely over budget without the first append being refused.
+      const store = fileStore(dir, {
+        retention: { perLogBytes: 0, totalBytes: 400, policy: "reject" },
+      });
+      await fill(store, "orders:1", 4);
+
+      const swept = await store.compact();
+
+      expect(swept.logs).toBe(0);
+      expect(swept.reclaimed).toBe(0);
+      // Measured from the real numbers rather than from an empty table, so an over-budget
+      // store says so even though this policy will not act on it.
+      expect(swept.withinBudget).toBe(false);
+      expect(await store.read("orders:1")).toHaveLength(4);
     });
 
     it("keeps every event when compaction is switched off", async () => {

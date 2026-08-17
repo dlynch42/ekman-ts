@@ -425,4 +425,40 @@ export function storeContract(
     const store = make();
     expect(store.capabilities.forget).toBe(typeof store.forget === "function");
   });
+
+  it(`${name}: says whether it can compact at all`, () => {
+    // Same rule as `forget`, and for the same reason: the runtime sweeps every layer
+    // without asking each one what it was configured for, so what a layer can do has to
+    // be readable before anything calls it.
+    const store = make();
+    expect(store.capabilities.compact).toBe(
+      typeof store.compact === "function"
+    );
+  });
+
+  it(`${name}: compacting costs history and never state`, async () => {
+    const store = make();
+    if (store.compact === undefined) {
+      // Nothing to hold this adapter to. The declaration above is what it answers for.
+      return;
+    }
+
+    await store.append(
+      "orders:1",
+      commit("orders:1", 0, null, "a", 0),
+      EMPTY_SEQ
+    );
+    await store.append("orders:1", commit("orders:1", 1, "a", "b", 1000), 0);
+    await store.append("orders:1", commit("orders:1", 2, "b", "c", 2000), 1);
+
+    await store.compact();
+
+    // Whatever a pass chose to fold, these have to survive it. A compacted key replays to
+    // exactly where it was, and its next conditional append is against the same sequence,
+    // which is what makes compaction safe to run behind a live runtime.
+    const loaded = await store.load("orders:1");
+    expect(loaded?.seq).toBe(2);
+    await store.append("orders:1", commit("orders:1", 3, "c", "d", 3000), 2);
+    expect((await store.load("orders:1"))?.seq).toBe(3);
+  });
 }
