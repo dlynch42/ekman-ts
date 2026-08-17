@@ -55,6 +55,7 @@ describe("EkmanError", () => {
       "STORE_UNAVAILABLE",
       "STORE_FULL",
       "MEMORY_EXHAUSTED",
+      "KEY_BUSY",
       "DUPLICATE_ENTITY",
       "DUPLICATE_STATE_HANDLER",
       "MISSING_INITIAL_STATE",

@@ -114,6 +114,19 @@ export interface ScanResult {
   readonly complete: boolean;
 }
 
+/**
+ * What a store is holding, and what it is allowed to hold. `null` means unlimited.
+ *
+ * Reported rather than emitted, because a store has no telemetry handle: it is built by
+ * the caller and handed in. Optional on the interface, since a store with nothing to
+ * measure should say nothing rather than invent a number.
+ */
+export interface StoreUsage {
+  readonly bytes: number;
+  readonly logs: number;
+  readonly maxBytes: number | null;
+}
+
 export interface Store {
   /** Identifies this layer in telemetry and in a query's `sources`. */
   readonly name: string;
@@ -163,6 +176,9 @@ export interface Store {
    * whether the key is idle enough for it; a store asked to forget just forgets.
    */
   readonly forget?: (key: string) => Promise<void>;
+
+  /** What this store is holding, when it accounts for itself. */
+  readonly usage?: StoreUsage;
 
   /** Release anything held open. Optional, because a memory store holds nothing. */
   readonly close?: () => Promise<void>;

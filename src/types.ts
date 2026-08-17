@@ -261,6 +261,14 @@ export interface EntityHandle<
   history: (id: string) => Promise<HistoryResult<S, V>>;
   /** This entity's instances by state and time in state. */
   query: (criteria?: Omit<QueryCriteria, "entity">) => Promise<QueryResult>;
+  /**
+   * Delete an instance outright, from memory and from every store layer.
+   *
+   * Destroys committed state, so it is never a side effect of anything else. Refused with
+   * `KEY_BUSY` while a handler is in flight. Forgetting an instance that does not exist is
+   * not an error.
+   */
+  forget: (id: string) => Promise<void>;
 }
 
 type HandleFor<D> =

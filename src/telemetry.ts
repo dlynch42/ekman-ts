@@ -194,6 +194,27 @@ export interface InstanceEvictedEvent extends TelemetryBase {
   readonly residentBytes: number;
 }
 
+/**
+ * An instance was deleted outright: resident state and every store layer.
+ *
+ * Distinct from `instance.evicted`, and the distinction matters. Eviction releases memory
+ * and keeps the truth; this destroys it. An operator reading one stream should never have
+ * to guess which of the two happened.
+ */
+export interface InstanceForgottenEvent extends TelemetryBase {
+  readonly type: "instance.forgotten";
+  /** The state it was in when it was forgotten. */
+  readonly state: string;
+  /** The sequence it had reached. */
+  readonly seq: number;
+  /** What it was accounted at, freed by this deletion. Zero if it was not resident. */
+  readonly bytes: number;
+  /** Whether the key was resident at the time, as opposed to only on disk. */
+  readonly resident: boolean;
+  /** Resident bytes after the release. */
+  readonly residentBytes: number;
+}
+
 /** An instance was rebuilt from the store because a trigger arrived for it. */
 export interface InstanceRestoredEvent extends TelemetryBase {
   readonly type: "instance.restored";
@@ -260,6 +281,7 @@ export type TelemetryEvent =
   | ConstraintViolatedEvent
   | ConstraintEscalatedEvent
   | InstanceEvictedEvent
+  | InstanceForgottenEvent
   | InstanceRestoredEvent
   | MemoryAccountedEvent
   | MemoryRefusedEvent

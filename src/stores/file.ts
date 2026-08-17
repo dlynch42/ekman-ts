@@ -20,6 +20,7 @@ import type {
   Store,
   StoreCapabilities,
   StoreSnapshot,
+  StoreUsage,
 } from "../store";
 import { EMPTY_SEQ, entityOf, latestSeq, replay, scanKeys } from "../store";
 import { conflict } from "./memory";
@@ -131,13 +132,6 @@ export interface FileStoreOptions {
   /** Claim the commit authority, rather than letting the stack pick. */
   readonly authority?: boolean;
   readonly retention?: RetentionConfig;
-}
-
-/** What a store is holding, and what it is allowed to hold. `null` means unlimited. */
-export interface StoreUsage {
-  readonly bytes: number;
-  readonly logs: number;
-  readonly maxBytes: number | null;
 }
 
 /** 5MB, roughly fifteen to twenty thousand events at a typical line length. */

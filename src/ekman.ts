@@ -22,6 +22,7 @@ import { mergeRestores, parseDuration } from "./query";
 import type { ResolvedStack } from "./stack";
 import { resolveStack } from "./stack";
 import type { Store } from "./store";
+import { EMPTY_SEQ } from "./store";
 import type { TelemetryEvent } from "./telemetry";
 import { emit, telemetryNow } from "./telemetry";
 import { TemporalIndex } from "./temporal";
@@ -207,6 +208,79 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * whole life and not only what this process happened to see. With no store it answers
    * from what is resident, and says so: `complete` is false and `reasons` explains why.
    */
+  /**
+   * Delete an instance outright: its resident state and its stream in every layer.
+   *
+   * This destroys committed state, which is the one thing the rest of the runtime works to
+   * avoid, so it happens only when asked for by key and never as a side effect of anything
+   * else. Retention is built out of this plus `query`, and the policy of when to call it
+   * stays with the application.
+   *
+   * Refused with `KEY_BUSY` while a handler is in flight. A commit landing into a key that
+   * had just been deleted would resurrect it at a sequence nothing accounts for, and the
+   * fence cannot help: an attempt already writing has sealed its token. Refusing is the
+   * honest answer, and a caller that wants to wait can retry.
+   *
+   * Forgetting a key that was never here is not an error, so a sweep that dies halfway
+   * behaves the same way when it is run again.
+   */
+  async forget(key: string): Promise<void> {
+    const parsed = parseKey(key).key;
+    const instance = this.#instances.get(parsed);
+
+    // Checked before anything is deleted, so a store that cannot delete leaves the runtime
+    // exactly as it was rather than half-forgotten.
+    for (const layer of this.#stack.layers) {
+      if (!(layer.capabilities.forget && layer.forget)) {
+        throw new EkmanError(
+          "NOT_IMPLEMENTED",
+          `store layer "${layer.name}" cannot delete a key, so ${JSON.stringify(parsed)} ` +
+            "cannot be forgotten. Removing it from the other layers would leave this one " +
+            "holding a stream that would come back on the next load."
+        );
+      }
+    }
+
+    if (instance !== undefined) {
+      // A non-empty queue implies a running drain, because the inbox starts draining
+      // synchronously when it accepts. So an idle instance has nothing queued and nothing
+      // in flight, and there is no attempt left to fence.
+      if (!instance.idle) {
+        throw new EkmanError(
+          "KEY_BUSY",
+          `${JSON.stringify(parsed)} has a handler in flight, so it was not forgotten. ` +
+            "Deleting it now would leave that attempt committing into a key that no " +
+            "longer exists. Retry once it is idle.",
+          { key: parsed }
+        );
+      }
+
+      // Rejections and violations are written without being awaited. Deleting before they
+      // land would let one arrive afterwards and recreate the stream.
+      await instance.flushed();
+    }
+
+    const bytes = instance === undefined ? 0 : this.#release(instance);
+
+    // Every layer, not just the authority: a cache still holding the stream would serve it
+    // back on the next load, which is the opposite of forgotten.
+    await Promise.all(
+      this.#stack.layers.map((layer) => layer.forget?.(parsed))
+    );
+
+    this.#emit({
+      type: "instance.forgotten",
+      key: parsed,
+      entity: parseKey(parsed).entity,
+      state: instance?.state ?? "",
+      seq: instance?.seq ?? EMPTY_SEQ,
+      bytes,
+      resident: instance !== undefined,
+      residentBytes: this.#ledger.total,
+      at: telemetryNow(),
+    });
+  }
+
   async history<S extends string = string, V extends Values = Values>(
     key: string
   ): Promise<HistoryResult<S, V>> {
@@ -368,6 +442,38 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     });
   }
 
+  /**
+   * What the durable layers are holding on disk, and what they are allowed to hold.
+   *
+   * The counterpart to `memoryUsage`, and deliberately separate from it: one is resident
+   * bytes and the other is stored bytes, and collapsing them would hide whichever is
+   * actually the constraint. Layers that do not account for themselves contribute nothing
+   * rather than guessing.
+   */
+  get storageUsage(): {
+    readonly bytes: number;
+    readonly logs: number;
+    readonly maxBytes: number | null;
+  } {
+    let bytes = 0;
+    let logs = 0;
+    let maxBytes: number | null = null;
+
+    for (const layer of this.#stack.layers) {
+      const { usage } = layer;
+      if (usage === undefined) {
+        continue;
+      }
+      bytes += usage.bytes;
+      logs += usage.logs;
+      if (usage.maxBytes !== null) {
+        maxBytes = (maxBytes ?? 0) + usage.maxBytes;
+      }
+    }
+
+    return Object.freeze({ bytes, logs, maxBytes });
+  }
+
   #register(definition: AnyDefinition): EntityHandle {
     const existing = this.#definitions.get(definition.name);
 
@@ -394,6 +500,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       history: (id: string) => this.history(definition.key(id)),
       query: (criteria: Omit<QueryCriteria, "entity"> = {}) =>
         this.query({ ...criteria, entity: definition.name }),
+      forget: (id: string) => this.forget(definition.key(id)),
     }) as EntityHandle;
   }
 
@@ -653,6 +760,20 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     }
   }
 
+  /**
+   * Stop holding an instance in memory, and report what that freed.
+   *
+   * Only the memory side. Whether the truth is preserved first, or destroyed after, is the
+   * caller's business: eviction snapshots, forgetting deletes, and the three structures
+   * that have to stay in step are the same either way.
+   */
+  #release(instance: AnyInstance): number {
+    const bytes = this.#ledger.release(instance.key);
+    this.#instances.delete(instance.key);
+    this.#temporal.remove(instance.key);
+    return bytes;
+  }
+
   #evict(instance: AnyInstance): void {
     const { authority } = this.#stack;
     // Gated on a store existing, not on it being durable. Snapshotting into an ephemeral
@@ -668,9 +789,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
         .catch(this.#onUnhandled);
     }
 
-    const bytes = this.#ledger.release(instance.key);
-    this.#instances.delete(instance.key);
-    this.#temporal.remove(instance.key);
+    const bytes = this.#release(instance);
 
     this.#emit({
       type: "instance.evicted",

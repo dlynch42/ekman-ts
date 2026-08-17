@@ -93,6 +93,7 @@ export type {
   Store,
   StoreCapabilities,
   StoreSnapshot,
+  StoreUsage,
 } from "./store";
 export {
   EMPTY_SEQ,
@@ -108,7 +109,6 @@ export type {
   FileStoreOptions,
   RetentionConfig,
   RetentionPolicy,
-  StoreUsage,
 } from "./stores/file";
 export {
   defaultLogDir,

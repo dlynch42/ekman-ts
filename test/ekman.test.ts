@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import { Ekman } from "../src/ekman";
 import { defineEntity } from "../src/entity";
@@ -1045,5 +1048,247 @@ describe("sweeping for temporal constraints", () => {
     // watched bucket and must not fire again.
     expect(await ekman.sweep()).toBe(0);
     await ekman.close();
+  });
+});
+
+describe("forgetting an instance", () => {
+  const tickets = defineEntity("tickets", {
+    initial: "open",
+    values: { note: "" },
+    states: {
+      open: (ticket, trigger) =>
+        trigger.type === "close"
+          ? transitionTo("closed", ticket.values)
+          : stay({ note: String(trigger.note ?? "") }),
+      closed: (ticket) => stay(ticket.values),
+    },
+  });
+
+  it("removes the instance, its state and its stream", async () => {
+    const ekman = new Ekman({ entities: [tickets], store: "memory" });
+    await ekman.entities.tickets.send("t1", { type: "poke", note: "hello" });
+
+    await ekman.entities.tickets.forget("t1");
+
+    expect(ekman.entities.tickets.inspect("t1")).toBeUndefined();
+    const { events } = await ekman.entities.tickets.history("t1");
+    expect(events).toEqual([]);
+    await ekman.close();
+  });
+
+  it("lets the same id come back as a genuinely new instance", async () => {
+    const ekman = new Ekman({ entities: [tickets], store: "memory" });
+    await ekman.entities.tickets.send("t1", { type: "close" });
+    expect(ekman.entities.tickets.inspect("t1")?.state).toBe("closed");
+
+    await ekman.entities.tickets.forget("t1");
+    const revived = await ekman.entities.tickets.send("t1", { type: "poke" });
+
+    // Indistinguishable from a key this runtime has never seen: same initial state, same
+    // sequence. Anything carried over would mean something survived that should not have.
+    const control = await ekman.entities.tickets.send("never-seen", {
+      type: "poke",
+    });
+    expect(revived.state).toBe(control.state);
+    expect(revived.seq).toBe(control.seq);
+    await ekman.close();
+  });
+
+  it("leaves its neighbours alone", async () => {
+    const ekman = new Ekman({ entities: [tickets], store: "memory" });
+    await ekman.entities.tickets.send("t1", { type: "poke" });
+    await ekman.entities.tickets.send("t2", { type: "poke" });
+
+    await ekman.entities.tickets.forget("t1");
+
+    expect(ekman.entities.tickets.inspect("t2")).toBeDefined();
+    const { instances } = await ekman.entities.tickets.query({});
+    expect(instances.map((match) => match.key)).toEqual(["tickets:t2"]);
+    await ekman.close();
+  });
+
+  it("refuses while a handler is in flight, rather than deleting under it", async () => {
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const slow = defineEntity("slow", {
+      initial: "idle",
+      states: {
+        idle: async (instance) => {
+          await held;
+          return stay(instance.values);
+        },
+      },
+    });
+
+    const ekman = new Ekman({ entities: [slow], store: "memory" });
+    const inFlight = ekman.entities.slow.send("s1", { type: "go" });
+
+    // A commit landing into a key that had just been deleted would resurrect it at a
+    // sequence nothing accounts for, so this is refused rather than raced.
+    await expect(ekman.entities.slow.forget("s1")).rejects.toMatchObject({
+      code: "KEY_BUSY",
+    });
+
+    release();
+    await inFlight;
+
+    // And once it is idle the same call goes through.
+    await ekman.entities.slow.forget("s1");
+    expect(ekman.entities.slow.inspect("s1")).toBeUndefined();
+    await ekman.close();
+  });
+
+  it("is not an error for a key that was never here", async () => {
+    // So a sweep that dies halfway behaves the same way when it is run again.
+    const ekman = new Ekman({ entities: [tickets], store: "memory" });
+    await expect(
+      ekman.entities.tickets.forget("nobody")
+    ).resolves.toBeUndefined();
+    await ekman.close();
+  });
+
+  it("gives the memory budget its bytes back", async () => {
+    const ekman = new Ekman({ entities: [tickets], store: "memory" });
+    await ekman.entities.tickets.send("t1", { type: "poke", note: "x" });
+    const held = ekman.memoryUsage;
+    expect(held.instances).toBe(1);
+
+    await ekman.entities.tickets.forget("t1");
+
+    expect(ekman.memoryUsage.instances).toBe(0);
+    expect(ekman.memoryUsage.bytes).toBeLessThan(held.bytes);
+    await ekman.close();
+  });
+
+  it("clears every layer, not only the one that owns the truth", async () => {
+    const ekman = new Ekman({
+      entities: [tickets],
+      store: ["memory", { kind: "memory", name: "second" }],
+    });
+    await ekman.entities.tickets.send("t1", { type: "poke" });
+
+    await ekman.entities.tickets.forget("t1");
+
+    // A cache still holding the stream would serve it back on the next load, which is the
+    // opposite of forgotten, and would show up as a sequence carried over.
+    const revived = await ekman.entities.tickets.send("t1", { type: "poke" });
+    const control = await ekman.entities.tickets.send("never-seen", {
+      type: "poke",
+    });
+    expect(revived.seq).toBe(control.seq);
+    await ekman.close();
+  });
+
+  it("reports the deletion as its own kind of event", async () => {
+    const seen: TelemetryEvent[] = [];
+    const ekman = new Ekman({
+      entities: [tickets],
+      store: "memory",
+      telemetry: { "instance.forgotten": (event) => seen.push(event) },
+    });
+    await ekman.entities.tickets.send("t1", { type: "close" });
+
+    await ekman.entities.tickets.forget("t1");
+
+    // Eviction frees memory and keeps the truth; this destroys it. Reading one stream
+    // should never leave an operator guessing which happened.
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({
+      type: "instance.forgotten",
+      key: "tickets:t1",
+      entity: "tickets",
+      state: "closed",
+      resident: true,
+    });
+    await ekman.close();
+  });
+
+  it("refuses when a layer cannot delete, before touching anything", async () => {
+    const stubborn = {
+      name: "stubborn",
+      capabilities: {
+        durability: "ephemeral" as const,
+        conditionalAppend: true,
+        multiWriter: false,
+        scan: { byState: false, olderThan: false },
+        forget: false,
+      },
+      append: () => Promise.resolve(),
+      load: () => Promise.resolve(undefined),
+      read: () => Promise.resolve([]),
+      snapshot: () => Promise.resolve(),
+      scan: () =>
+        Promise.resolve({ matches: [], unsupported: [], complete: true }),
+    };
+
+    const ekman = new Ekman({
+      entities: [tickets],
+      store: ["memory", stubborn],
+    });
+    await ekman.entities.tickets.send("t1", { type: "poke" });
+
+    await expect(ekman.entities.tickets.forget("t1")).rejects.toMatchObject({
+      code: "NOT_IMPLEMENTED",
+    });
+
+    // Refused before anything was deleted, so the runtime is exactly as it was rather
+    // than half-forgotten.
+    expect(ekman.entities.tickets.inspect("t1")).toBeDefined();
+    await ekman.close();
+  });
+});
+
+describe("storage usage", () => {
+  const tickets = defineEntity("tickets", {
+    initial: "open",
+    values: { note: "" },
+    states: { open: (t) => stay(t.values) },
+  });
+
+  it("reports nothing when no layer accounts for itself", () => {
+    // The memory store keeps no bytes on disk to report, and inventing a number for it
+    // would be worse than saying nothing.
+    const ekman = new Ekman({ entities: [tickets], store: "memory" });
+    expect(ekman.storageUsage).toEqual({ bytes: 0, logs: 0, maxBytes: null });
+  });
+
+  it("reports nothing for a runtime that keeps nothing", () => {
+    const ekman = new Ekman({ entities: [tickets], store: "none" });
+    expect(ekman.storageUsage).toEqual({ bytes: 0, logs: 0, maxBytes: null });
+  });
+
+  it("stays separate from the resident budget", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ekman-usage-"));
+    const ekman = new Ekman({
+      entities: [tickets],
+      store: ["memory", { kind: "file", dir }],
+    });
+    await ekman.entities.tickets.send("t1", { type: "poke" });
+
+    // Two different questions. Collapsing them would hide whichever one is actually the
+    // constraint.
+    expect(ekman.storageUsage.bytes).toBeGreaterThan(0);
+    expect(ekman.storageUsage.logs).toBe(1);
+    expect(ekman.memoryUsage.instances).toBe(1);
+
+    await ekman.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("reports the ceiling when one is configured", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ekman-usage-"));
+    const ekman = new Ekman({
+      entities: [tickets],
+      store: { kind: "file", dir, retention: { totalBytes: 4096 } },
+    });
+    await ekman.entities.tickets.send("t1", { type: "poke" });
+
+    expect(ekman.storageUsage.maxBytes).toBe(4096);
+
+    await ekman.close();
+    rmSync(dir, { recursive: true, force: true });
   });
 });

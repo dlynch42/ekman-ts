@@ -53,7 +53,7 @@ export const ekman = new Ekman({
   inbox:    { capacity: 128, overflow: "reject" },   // 128 triggers waiting per key, not bytes
   execution: { maxAttempts: 3, timeoutMs: 10_000, backoff: { kind: "exponential", baseMs: 50 } },
   temporal: { sweepMs: 1_000 },                      // how often time-in-state bounds are checked
-  store:    [memoryStore(), fileStore()],            // fastest first; the last durable layer owns the truth
+  store:    ["memory", "file"],                      // fastest first; the last durable layer owns the truth
   audit:    [kafkaSink("state-transitions")],
   telemetry: {
     "inbox.dropped":   (e) => metrics.inc("ekman.inbox.dropped", { entity: e.entity }),
@@ -96,7 +96,11 @@ Durability is configured, never implied. Omit `store` and you get a memory-only 
 
 Configure one and commits are written before they are applied. A `send()` that resolves has already reached the commit authority, so a crash a microsecond later loses nothing. Stores layer, fastest first, and exactly one layer owns the truth: the rest are caches, written after the fact, and a cache that fails to write is reported without failing the commit.
 
-`fileStore()` writes to `.ekman/logs/`, found by walking up from the working directory to the nearest `package.json`, so the same service finds the same state however it was launched. Pass a path to put it somewhere else. A deployment with no `package.json` beside it, such as a bundled single-file build, should name the path explicitly rather than take the default.
+Stores are named rather than constructed: `store: "file"` is durable, `store: "memory"` is an in-process event log, and `store: "none"` says out loud that this runtime keeps nothing. An adapter Ekman does not ship is passed as an instance instead, so configuring a store never means importing a database client you are not using.
+
+`"file"` writes to `.ekman/logs/`, found by walking up from the working directory to the nearest `package.json`, so the same service finds the same state however it was launched. Pass `{ kind: "file", dir }` to put it somewhere else. A deployment with no `package.json` beside it, such as a bundled single-file build, should name the path explicitly rather than take the default.
+
+Each log compacts once it passes 5MB: the events already folded into a snapshot are dropped, so current state and replay are untouched and only `history()` shortens, reporting itself incomplete when it does. `ekman.storageUsage` answers what the durable layers are holding. Give it a ceiling with `retention: { totalBytes }` and it is measured against one; add `policy: "reject"` and new instances are refused rather than filling the disk. Deleting is never automatic: `forget(id)` destroys an instance outright, and a retention sweep is that plus the `query()` you already have.
 
 Every store declares what it can actually do (durable or ephemeral, conditional append, safe across processes), and the runtime **refuses configurations those declarations cannot satisfy** rather than quietly under-delivering. Claiming durability a store does not have is the one lie a state runtime must never tell.
 

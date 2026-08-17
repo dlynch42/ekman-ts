@@ -39,6 +39,12 @@ export const ERROR_CODES = [
   "STORE_FULL",
   /** The memory budget is full and the eviction policy refuses rather than evicting. */
   "MEMORY_EXHAUSTED",
+  /**
+   * An operation needed the key to be idle and it was not. Only `forget` raises this: a
+   * handler is in flight, and deleting under it would leave that attempt committing into
+   * a key that no longer exists.
+   */
+  "KEY_BUSY",
   /** Two entities were registered under one name. */
   "DUPLICATE_ENTITY",
   /** Two handlers were declared for one state. */
