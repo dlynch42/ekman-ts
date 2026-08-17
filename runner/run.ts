@@ -148,7 +148,8 @@ function buildRuntime(
   storage?: ScenarioStorage,
   audit?: ScenarioAudit
 ): Ekman {
-  const { inbox, execution, temporal, memory } = scenario.given.runtime ?? {};
+  const { inbox, execution, temporal, memory, coordination } =
+    scenario.given.runtime ?? {};
 
   return new Ekman({
     entities: buildEntities(scenario.given),
@@ -157,6 +158,7 @@ function buildRuntime(
     ...(execution === undefined ? {} : { execution }),
     ...(temporal === undefined ? {} : { temporal }),
     ...(memory === undefined ? {} : { memory }),
+    ...(coordination === undefined ? {} : { coordination }),
     ...(storage?.configured === true ? { store: storage.build() } : {}),
     ...(audit === undefined || audit.sinks.length === 0
       ? {}

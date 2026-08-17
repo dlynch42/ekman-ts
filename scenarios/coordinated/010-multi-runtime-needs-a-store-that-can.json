@@ -1,0 +1,20 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "coordinated/010-multi-runtime-needs-a-store-that-can",
+  "name": "asking for multi-runtime operation on a store whose conditional append does not cross processes is refused at startup",
+  "level": "coordinated",
+  "given": {
+    "runtime": {
+      "coordination": "multi",
+      "store": [{ "kind": "file" }]
+    },
+    "entities": [
+      {
+        "name": "deployments",
+        "initial": "pending",
+        "states": [{ "state": "pending", "else": { "result": "stay" } }]
+      }
+    ]
+  },
+  "then": { "buildError": { "code": "INVALID_CONFIG" } }
+}

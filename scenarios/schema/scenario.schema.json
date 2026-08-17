@@ -59,6 +59,10 @@
                 }
               }
             },
+            "coordination": {
+              "description": "How many runtimes write these keys. multi is refused unless the commit authority declares its conditional append holds across processes.",
+              "enum": ["single", "multi"]
+            },
             "inbox": {
               "type": "object",
               "additionalProperties": false,

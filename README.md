@@ -241,10 +241,16 @@ Reports pass or fail per scenario per level, and exits non-zero if a claimed lev
 
 ## Roadmap
 
-- **v0.1**: TypeScript reference implementation. Entities, dispatch, per-key inbox, retries/timeouts/fencing, constraints, memory budget, memory/file stores, transition history, queries.
-- **v0.2**: Redis adapter, query API, constraints (graph + guards).
-- **v0.3**: Postgres adapter, invariants, temporal constraints, optimistic concurrency, Kafka adapters.
-- **v0.4**: Go implementation against the conformance spec.
+- **v0.1**: TypeScript reference implementation. Entities, dispatch, per-key inbox, retries/timeouts/fencing, constraints (transition graph, guards, invariants, temporal), memory budget and eviction, memory and file stores, storage retention, transition history, queries, audit sinks. Passes Core and Durable.
+- **v0.2**: Redis adapter, Kafka trigger adapter.
+- **v0.3**: Postgres adapter, multi-runtime conflict detection (the Coordinated level).
+- **v0.4**: Go implementation against the conformance suite.
+
+Multi-runtime coordination sits with the adapters rather than ahead of them, because it is
+not something a runtime can provide on its own: it needs a store whose conditional append is
+atomic between processes, and neither of the two that ship today can honestly claim that.
+Asking for it on a store that cannot is refused at startup rather than quietly
+under-delivered.
 
 **Killer demo:** kill a service mid-workflow, restart it, and watch every instance resume in its exact state with full history intact.
 

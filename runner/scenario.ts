@@ -14,8 +14,14 @@ export type Level = (typeof LEVELS)[number];
  */
 export const CLAIMED_LEVELS: readonly Level[] = ["core", "durable"];
 
-/** Levels whose scenarios are executed, claimed or not. */
-export const RUN_LEVELS: readonly Level[] = ["core", "durable"];
+/**
+ * Levels whose scenarios are executed, claimed or not.
+ *
+ * Coordinated runs without being claimed. Building towards a level without being able to
+ * see how far you have got would be pointless, and what claiming adds is that a failure
+ * fails the suite.
+ */
+export const RUN_LEVELS: readonly Level[] = ["core", "durable", "coordinated"];
 
 export interface Scenario {
   readonly id: string;
@@ -33,6 +39,8 @@ export interface Given {
     readonly execution?: PolicySpec;
     readonly temporal?: { readonly sweepMs?: number };
     readonly store?: StoreSpec | readonly StoreSpec[];
+    /** How many runtimes are expected to write these keys. Defaults to single. */
+    readonly coordination?: "single" | "multi";
     readonly memory?: MemorySpec;
     readonly audit?: readonly AuditSpec[];
   };
