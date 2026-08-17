@@ -6,6 +6,11 @@
  * Cold instances are evicted, snapshotted on the way out, and reloaded transparently when
  * a trigger arrives for them. The application code below never mentions any of that: it
  * sends triggers and reads results, exactly as it would with an unlimited budget.
+ *
+ * Alone among the demos, this one deletes its store directory when it finishes. The others
+ * keep theirs because a JSONL log is something you can read with `cat` during an incident,
+ * and that argument does not reach five thousand of them. What those files would have told
+ * you is printed instead, on the way out.
  */
 
 import { rmSync } from "node:fs";
@@ -28,9 +33,10 @@ const sessions = defineEntity("sessions", {
   },
 });
 
-// A named directory rather than a temporary one, cleared on the way in rather than out, so
-// the log this demo wrote is still there to read when it finishes. Its own subdirectory, so
-// clearing it can never reach anything another demo or the example app put there.
+// A named directory rather than a temporary one, cleared on the way in so a run that died
+// partway leaves the next one a clean start, and removed again at the end because this demo
+// alone writes a log and a snapshot per instance. Its own subdirectory, so clearing it can
+// never reach anything another demo or the example app put there.
 const dir = join(defaultLogDir(), "demos", "memory-bound");
 rmSync(dir, { recursive: true, force: true });
 
@@ -123,7 +129,27 @@ async function main(): Promise<void> {
     `\nthe resident set stayed inside its ${BUDGET} byte allowance throughout.`
   );
 
+  // The other axis, and the one a memory budget says nothing about. Every eviction wrote a
+  // snapshot and every log outlived the instance that was released, so the bytes below kept
+  // growing the whole time the resident number sat still.
+  const stored = ekman.storageUsage;
+  console.log("\non disk:");
+  console.log(`  ${stored.bytes} bytes across ${stored.logs} logs`);
+  console.log(
+    `  ${Math.round(stored.bytes / BUDGET)}x the resident budget, which is the part bounding RAM does not bound.\n` +
+      "  `npm run demo:retention` is that axis."
+  );
+
   await ekman.close();
+
+  // Removed rather than kept, which is this demo's one departure from the others. A run
+  // that failed above never reaches here, so a failure still leaves its files to look at.
+  rmSync(dir, { recursive: true, force: true });
+  console.log(
+    `\nremoved ${dir}\n` +
+      `  ${stored.logs} logs and a snapshot beside most of them: a file count no one reads,\n` +
+      "  and the only thing worth taking off them is printed above."
+  );
 }
 
 main().catch((error: unknown) => {
