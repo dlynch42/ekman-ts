@@ -24,7 +24,6 @@ import {
   defaultLogDir,
   defineEntity,
   Ekman,
-  fileStore,
   isEkmanError,
   stay,
   transitionTo,
@@ -140,7 +139,7 @@ async function theStateThatGotRenamed(): Promise<void> {
     },
   });
 
-  const before = new Ekman({ entities: [v1], store: fileStore(dir) });
+  const before = new Ekman({ entities: [v1], store: { kind: "file", dir } });
   await before.entities.tickets.send("t1", { type: "archive" });
   await before.entities.tickets.send("t2", { type: "poke" });
   console.log(
@@ -159,7 +158,7 @@ async function theStateThatGotRenamed(): Promise<void> {
     },
   });
 
-  const after = new Ekman({ entities: [v2], store: fileStore(dir) });
+  const after = new Ekman({ entities: [v2], store: { kind: "file", dir } });
   const handle = after.entities.tickets;
   console.log("  after the deploy:   states are now open, closed\n");
 

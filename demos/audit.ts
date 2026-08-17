@@ -19,13 +19,7 @@
 import { rmSync } from "node:fs";
 import { join } from "node:path";
 import type { AuditSink, EkmanEvent } from "ekman";
-import {
-  defaultLogDir,
-  defineEntity,
-  Ekman,
-  fileStore,
-  transitionTo,
-} from "ekman";
+import { defaultLogDir, defineEntity, Ekman, transitionTo } from "ekman";
 
 const COMMITS = 5;
 const ARCHIVE_MS = 250;
@@ -89,7 +83,7 @@ async function main(): Promise<void> {
   console.log(`store: ${dir}\n`);
   const ekman = new Ekman({
     entities: [ledger],
-    store: fileStore(dir),
+    store: { kind: "file", dir },
     audit: [warehouse, kafka, archive],
     telemetry: {
       "audit.failed": (event) => {

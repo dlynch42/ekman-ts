@@ -1,14 +1,19 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { isEkmanError } from "../src/errors";
-import { resolveStack } from "../src/stack";
+import { createStore, resolveStack } from "../src/stack";
 import type { Store } from "../src/store";
-import { fileStore } from "../src/stores/file";
+import { defaultLogDir, fileStore } from "../src/stores/file";
 import { memoryStore } from "../src/stores/memory";
 
 const dirs: string[] = [];
+function freshDir(): string {
+  const dir = mkdtempSync(join(tmpdir(), "ekman-stack-"));
+  dirs.push(dir);
+  return dir;
+}
 const durable = (name?: string, authority?: boolean) => {
   const dir = mkdtempSync(join(tmpdir(), "ekman-stack-"));
   dirs.push(dir);
@@ -132,5 +137,99 @@ describe("resolving a store stack", () => {
       "b",
       "c",
     ]);
+  });
+});
+
+// Naming a store instead of constructing one. The validation underneath is the same, so
+// these cover the normalization rather than re-testing authority picking.
+describe("stores described rather than constructed", () => {
+  it("builds a named built-in", () => {
+    const stack = resolveStack("memory");
+    expect(stack.layers).toHaveLength(1);
+    expect(stack.layers[0]?.name).toBe("memory");
+    expect(stack.durable).toBe(false);
+  });
+
+  it("builds a layered stack from names, and still picks the durable authority", () => {
+    const stack = resolveStack(["memory", { kind: "file", dir: freshDir() }]);
+    expect(stack.layers.map((layer) => layer.name)).toEqual(["memory", "file"]);
+    expect(stack.authority?.name).toBe("file");
+    expect(stack.durable).toBe(true);
+  });
+
+  it("passes options through to the store it builds", () => {
+    const stack = resolveStack({
+      kind: "memory",
+      name: "hot",
+      authority: true,
+    });
+    expect(stack.authority?.name).toBe("hot");
+  });
+
+  it("mixes a described layer with an adapter it was handed", () => {
+    // The escape hatch that keeps Redis and Postgres out of the `kind` union.
+    const stack = resolveStack(["memory", durable("custom")]);
+    expect(stack.layers.map((layer) => layer.name)).toEqual([
+      "memory",
+      "custom",
+    ]);
+    expect(stack.authority?.name).toBe("custom");
+  });
+
+  it('treats "none" as keeping nothing at all', () => {
+    const stack = resolveStack("none");
+    expect(stack.layers).toEqual([]);
+    expect(stack.authority).toBeUndefined();
+    expect(stack.durable).toBe(false);
+  });
+
+  it('refuses "none" beside a real layer', () => {
+    // "no store, and also this store" is not a thing worth guessing at.
+    expect(() => resolveStack(["none", "memory"])).toThrow(
+      /cannot be combined/
+    );
+  });
+
+  it("refuses a kind it does not build", () => {
+    // Naming an adapter core does not ship has to fail loudly, rather than look configured.
+    const build = () => resolveStack("redis" as "memory");
+    expect(build).toThrow(/is not one this runtime builds/);
+    try {
+      build();
+    } catch (error) {
+      expect(isEkmanError(error) && error.code).toBe("INVALID_CONFIG");
+    }
+  });
+
+  it("still refuses an empty list, which is a mistake rather than a choice", () => {
+    expect(() => resolveStack([])).toThrow(/empty list/);
+  });
+});
+
+describe("createStore", () => {
+  it("builds a store that can be wrapped", () => {
+    // The one seam for composition, now that naming is how stores get configured.
+    const inner = createStore("memory");
+    expect(inner.capabilities.durability).toBe("ephemeral");
+  });
+
+  it("refuses to build the absence of a store", () => {
+    expect(() => createStore("none" as "memory")).toThrow(/names the absence/);
+  });
+});
+
+describe("a described file store with no directory", () => {
+  it("takes the project's default log directory", () => {
+    const stack = resolveStack("file");
+    expect(stack.authority?.name).toBe("file");
+    expect(stack.durable).toBe(true);
+
+    // Removed non-recursively, so this can only ever delete the empty directory it just
+    // created and never a demo's or the example app's output.
+    try {
+      rmdirSync(defaultLogDir());
+    } catch {
+      // Already holds something somebody else wrote. Leaving it is correct.
+    }
   });
 });

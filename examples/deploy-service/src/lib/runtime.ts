@@ -10,7 +10,7 @@
  * would otherwise be making implicitly, over and over, in application code.
  */
 
-import { Ekman, fileStore, memoryStore } from "ekman";
+import { Ekman } from "ekman";
 import { deployment } from "../entities/deployment";
 import { incident } from "../entities/incident";
 import { auditLog } from "./audit-log";
@@ -25,7 +25,7 @@ export const ekman = new Ekman({
   // authority and owns the truth; the memory layer in front of it is a cache. A commit
   // that resolves has already reached the file store, so a crash a microsecond later
   // loses nothing.
-  store: [memoryStore(), fileStore(config.dataDir)],
+  store: ["memory", { kind: "file", dir: config.dataDir }],
 
   // A budget, not a hope. Cold deployments are snapshotted out and reloaded transparently
   // when a trigger arrives for them; nothing below this line is aware that happens.

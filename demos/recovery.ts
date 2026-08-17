@@ -10,14 +10,7 @@
 
 import { rmSync } from "node:fs";
 import { join } from "node:path";
-import {
-  defaultLogDir,
-  defineEntity,
-  Ekman,
-  fileStore,
-  stay,
-  transitionTo,
-} from "ekman";
+import { defaultLogDir, defineEntity, Ekman, stay, transitionTo } from "ekman";
 
 type State = "pending" | "deploying" | "live" | "failed";
 interface Values extends Record<string, unknown> {
@@ -57,7 +50,7 @@ async function main(): Promise<void> {
   // ---- the service, first run --------------------------------------------------
   const first = new Ekman({
     entities: [deployments],
-    store: fileStore(dir),
+    store: { kind: "file", dir },
   });
 
   for (const id of keys) {
@@ -81,7 +74,7 @@ async function main(): Promise<void> {
   // ---- the service, restarted --------------------------------------------------
   const second = new Ekman({
     entities: [deployments],
-    store: fileStore(dir),
+    store: { kind: "file", dir },
   });
 
   // Nothing is resident yet: this runtime has never seen these keys.

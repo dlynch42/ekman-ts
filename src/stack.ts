@@ -30,6 +30,30 @@ export type StoreLayer = StoreKind | StoreSpec | Store;
 const STORE_KINDS: readonly StoreKind[] = ["none", "memory", "file"];
 
 /**
+ * Build one of the built-in stores from its spec.
+ *
+ * The seam for composition. Configuring a store is done by naming it, so the constructors
+ * themselves are not public, but wrapping one is a real thing to want: a layer that adds
+ * encryption, or latency in a test, has to have something to delegate to. This is that,
+ * and it is deliberately the whole of it.
+ *
+ * `"none"` has no store to build, so it is not accepted here.
+ */
+export function createStore(
+  spec: Exclude<StoreSpec, { kind: "none" }> | Exclude<StoreKind, "none">
+): Store {
+  const [store] = toLayers([spec]);
+  if (store === undefined) {
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      'createStore was given "none", which names the absence of a store rather than one ' +
+        "that could be built. Omit the layer instead."
+    );
+  }
+  return store;
+}
+
+/**
  * Turn whatever `store` was configured as into layers.
  *
  * `"none"` produces no layer at all, which is not the same as an empty list. An empty list
@@ -37,11 +61,7 @@ const STORE_KINDS: readonly StoreKind[] = ["none", "memory", "file"];
  * keeps nothing, and saying it is the point. For the same reason it cannot appear beside
  * other layers: "no store, and also this store" has no meaning worth guessing at.
  */
-function toLayers(store: StoreLayer | readonly StoreLayer[]): Store[] {
-  const configured = Array.isArray(store)
-    ? (store as readonly StoreLayer[])
-    : [store as StoreLayer];
-
+function toLayers(configured: readonly StoreLayer[]): Store[] {
   const layers: Store[] = [];
   for (const entry of configured) {
     const spec: StoreSpec | Store =
@@ -80,7 +100,9 @@ function toLayers(store: StoreLayer | readonly StoreLayer[]): Store[] {
     }
 
     const { kind: _kind, dir, ...options } = spec;
-    layers.push(dir === undefined ? fileStore(options) : fileStore(dir, options));
+    layers.push(
+      dir === undefined ? fileStore(options) : fileStore(dir, options)
+    );
   }
 
   return layers;

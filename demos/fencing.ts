@@ -22,10 +22,10 @@
 
 import type { EkmanEvent, ScanCriteria, Store, StoreSnapshot } from "ekman";
 import {
+  createStore,
   defineEntity,
   Ekman,
   isEkmanError,
-  memoryStore,
   transitionTo,
 } from "ekman";
 
@@ -188,7 +188,7 @@ async function raced(): Promise<void> {
 
   const ekman = new Ekman({
     entities: [quick],
-    store: lagging(memoryStore(), STORE_LAG_MS),
+    store: lagging(createStore("memory"), STORE_LAG_MS),
     execution: { timeoutMs: TIMEOUT_MS, maxAttempts: 1 },
     telemetry: {
       "commit.raced": (event) => {

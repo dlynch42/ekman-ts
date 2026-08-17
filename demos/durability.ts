@@ -12,7 +12,7 @@
  * construction, with a message naming the specific thing that does not add up, instead of
  * being quietly adjusted into something that starts up and under-delivers.
  *
- * Four refusals below, each a real mistake somebody makes. Then the configuration they
+ * Five refusals below, each a real mistake somebody makes. Then the configuration they
  * were protecting: a layered stack, a commit, and a second runtime built from nothing but
  * the directory on disk.
  */
@@ -21,12 +21,11 @@ import { rmSync } from "node:fs";
 import { join } from "node:path";
 import type { EkmanConfig } from "ekman";
 import {
+  createStore,
   defaultLogDir,
   defineEntity,
   Ekman,
-  fileStore,
   isEkmanError,
-  memoryStore,
   transitionTo,
 } from "ekman";
 
@@ -69,7 +68,9 @@ async function main(): Promise<void> {
 function capabilities(): void {
   banner("What a store declares");
 
-  const stores = [memoryStore(), fileStore(dir)];
+  // Built rather than configured, purely so this table can read what they declare. A
+  // service names its stores instead: `store: ["memory", "file"]`.
+  const stores = [createStore("memory"), createStore({ kind: "file", dir })];
   console.log("  name       durability  conditionalAppend  multiWriter  scan");
   for (const store of stores) {
     const caps = store.capabilities;
@@ -86,15 +87,23 @@ function capabilities(): void {
   );
 }
 
-/** Four configurations that are recognized, unsatisfiable, and therefore refused. */
+/** Five configurations that are recognized, unsatisfiable, and therefore refused. */
 function refusals(): void {
-  banner("Four configurations that are refused rather than adjusted");
+  banner("Five configurations that are refused rather than adjusted");
 
   refused("store: []", { entities: [orders], store: [] });
 
+  refused('store "none" alongside a real layer', {
+    entities: [orders],
+    store: ["none", "file"],
+  });
+
   refused("an ephemeral layer claiming authority over a durable one", {
     entities: [orders],
-    store: [memoryStore({ authority: true }), fileStore(dir)],
+    store: [
+      { kind: "memory", authority: true },
+      { kind: "file", dir },
+    ],
   });
 
   refused("maxBytes: 0 with nowhere to load from", {
@@ -116,7 +125,7 @@ async function theConfigurationThoseProtect(): Promise<void> {
   // the file store owns the truth and the memory layer is a cache in front of it.
   const first = new Ekman({
     entities: [orders],
-    store: [memoryStore(), fileStore(dir)],
+    store: ["memory", { kind: "file", dir }],
   });
 
   const committed = await first.entities.orders.send("a1", {
@@ -133,7 +142,7 @@ async function theConfigurationThoseProtect(): Promise<void> {
 
   const second = new Ekman({
     entities: [orders],
-    store: [memoryStore(), fileStore(dir)],
+    store: ["memory", { kind: "file", dir }],
   });
 
   // Nothing is resident in the new runtime until something asks for it.

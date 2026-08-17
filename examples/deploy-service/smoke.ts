@@ -297,12 +297,12 @@ async function theOpsEndpoints(): Promise<void> {
 async function durability(dataDir: string): Promise<void> {
   section("durability");
 
-  const { Ekman, fileStore } = await import("ekman");
+  const { Ekman } = await import("ekman");
   const { deployment } = await import("./src/entities/deployment");
 
   const fresh = new Ekman({
     entities: [deployment],
-    store: fileStore(dataDir),
+    store: { kind: "file", dir: dataDir },
   });
 
   const result = await fresh.entities.deployments.query({});

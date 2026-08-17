@@ -10,7 +10,6 @@ import type {
   Handler,
   HandlerResult,
   InstanceSnapshot,
-  MemoryStore,
   ProposedCommit,
   Store,
   Trigger,
@@ -18,12 +17,13 @@ import type {
 import {
   defineEntity,
   fail,
-  fileStore,
-  memoryStore,
   statesFromEntries,
   stay,
   transitionTo,
 } from "../src/index";
+import { fileStore } from "../src/stores/file";
+import type { MemoryStore } from "../src/stores/memory";
+import { memoryStore } from "../src/stores/memory";
 import type {
   AuditSpec,
   CheckSpec,

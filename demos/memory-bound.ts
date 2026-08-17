@@ -10,7 +10,7 @@
 
 import { rmSync } from "node:fs";
 import { join } from "node:path";
-import { defaultLogDir, defineEntity, Ekman, fileStore, stay } from "ekman";
+import { defaultLogDir, defineEntity, Ekman, stay } from "ekman";
 
 const INSTANCES = 5000;
 const BUDGET = 64 * 1024;
@@ -43,7 +43,7 @@ async function main(): Promise<void> {
 
   const ekman = new Ekman({
     entities: [sessions],
-    store: fileStore(dir),
+    store: { kind: "file", dir },
     memory: {
       maxBytes: BUDGET,
       eviction: { policy: "lru", snapshotOnEvict: true },

@@ -83,7 +83,7 @@ export type {
   StoreLayer,
   StoreSpec,
 } from "./stack";
-export { resolveStack } from "./stack";
+export { createStore, resolveStack } from "./stack";
 export type {
   LoadResult,
   ReplayedState,
