@@ -19,6 +19,7 @@ import type {
   ScanResult,
   Store,
   StoreCapabilities,
+  StoreCompaction,
   StoreSnapshot,
   StoreUsage,
 } from "../store";
@@ -85,17 +86,21 @@ export function defaultLogDir(from: string = process.cwd()): string {
  *   The same argument `warn` makes for constraints, and eviction's `none` for memory.
  * - `reject`: refuse to create new instances. Instances that already exist keep committing,
  *   because shedding new work is recoverable and breaking work in flight is not.
- * - `compact`: compact the largest logs until back under budget. Costs history, not state.
- * - `forget`: delete the oldest terminal instances. Discards committed state, so it has to
- *   be asked for explicitly.
+ * - `compact`: fold the largest logs into snapshots until back under budget. Costs history,
+ *   not state, and runs on the runtime's schedule rather than on the commit path.
+ *
+ * There is deliberately no policy that deletes instances to make room. A store sees bytes
+ * and keys; which instances no longer matter is a domain question, and answering it from
+ * the wrong layer would mean deleting live state to answer a disk-space question. Deleting
+ * is a query for what is finished plus `forget` on each result, and it stays in the
+ * application where the knowledge is.
  */
-export type RetentionPolicy = "none" | "reject" | "compact" | "forget";
+export type RetentionPolicy = "none" | "reject" | "compact";
 
 export const RETENTION_POLICIES: readonly RetentionPolicy[] = [
   "none",
   "reject",
   "compact",
-  "forget",
 ];
 
 export interface RetentionConfig {
@@ -116,14 +121,6 @@ export interface RetentionConfig {
   readonly totalBytes?: number;
   /** Defaults to `none`. */
   readonly policy?: RetentionPolicy;
-  /**
-   * Permit retention to delete committed state.
-   *
-   * Off by default and required to be explicit, for the same reason
-   * `eviction.allowDiscard` is: throwing away what a caller was told had committed is the
-   * one thing retention must never do by accident.
-   */
-  readonly allowDiscard?: boolean;
 }
 
 export interface FileStoreOptions {
@@ -189,15 +186,6 @@ function resolveRetention(
     );
   }
 
-  if (policy === "forget" && config?.allowDiscard !== true) {
-    throw new EkmanError(
-      "INVALID_CONFIG",
-      'retention policy "forget" deletes committed state once the budget is reached. ' +
-        'Set retention.allowDiscard to accept that, or use policy "reject" to refuse new ' +
-        "instances instead."
-    );
-  }
-
   return { perLogBytes, totalBytes, policy, bounded };
 }
 
@@ -229,6 +217,7 @@ export class FileStore implements Store {
     multiWriter: false,
     scan: { byState: true, olderThan: true },
     forget: true,
+    compact: true,
   });
   readonly authority?: boolean;
 
@@ -255,6 +244,18 @@ export class FileStore implements Store {
    * arithmetic rather than a stat.
    */
   #bytes: Map<string, number> | undefined;
+  /**
+   * Bytes per snapshot, kept apart from the logs rather than summed into them.
+   *
+   * Two questions need different answers. `perLogBytes` asks whether one log outgrew its
+   * limit, which is about the log alone: folding it and then counting the snapshot against
+   * the same limit would make a compacted key look oversized forever. The budget asks what
+   * the store holds, which is both, because compaction moves bytes from a log into a
+   * snapshot and a total that watched only logs would report that move as space reclaimed
+   * while the disk gave back nothing.
+   */
+  readonly #snapshotBytes = new Map<string, number>();
+  /** Logs plus snapshots. What the budget is measured against. */
   #total = 0;
 
   constructor(options?: FileStoreOptions);
@@ -362,6 +363,7 @@ export class FileStore implements Store {
     const temp = `${path}.tmp`;
     writeFileSync(temp, JSON.stringify(snapshot), "utf8");
     renameSync(temp, path);
+    this.#accountSnapshot(key);
     return Promise.resolve();
   }
 
@@ -384,10 +386,72 @@ export class FileStore implements Store {
     this.#seq.delete(key);
 
     // Zero when nothing is counting yet, which makes this a no-op rather than a special
-    // case: an unseeded store has a total of zero to take it off.
+    // case: an unseeded store has a total of zero to take it off. Both files come off,
+    // because both were counted.
     this.#total -= this.#bytes?.get(key) ?? 0;
     this.#bytes?.delete(key);
+    if (this.#bytes !== undefined) {
+      this.#total -= this.#snapshotBytes.get(key) ?? 0;
+    }
+    this.#snapshotBytes.delete(key);
     return Promise.resolve();
+  }
+
+  /**
+   * Reclaim space by folding the largest logs, until back inside the budget or out of
+   * things worth folding.
+   *
+   * Off the commit path deliberately. Choosing what to compact means walking every key,
+   * and doing that while somebody waits on an append trades a bounded latency for an
+   * unbounded one. The runtime calls this on its own schedule.
+   *
+   * Largest first, because the budget is a total and the biggest log gives back the most
+   * per rewrite. The walk is one pass over a fixed list, so it terminates whether or not it
+   * reaches the bound: a log that has already been folded gives back nothing and is simply
+   * passed over. Reaching the end still over budget is reported rather than retried, since
+   * compaction has a floor and sweeping harder cannot lower it.
+   *
+   * A no-op under any other policy, which is what makes this safe for the runtime to call
+   * across every layer without asking each one what it was configured for.
+   */
+  compact(): Promise<StoreCompaction> {
+    // Seeded even when there is nothing to do, so `withinBudget` is answered from the real
+    // numbers rather than from an empty table that would read as comfortably inside a
+    // budget the store has never measured itself against.
+    const bytes = this.#seeded();
+
+    if (this.#retention.policy !== "compact") {
+      return Promise.resolve(this.#compaction(0, 0));
+    }
+
+    // Both key and size taken from one snapshot of the table, because compacting rewrites
+    // entries as it goes and re-reading a size mid-walk would measure the wrong log.
+    const largestFirst = [...bytes.entries()].sort(([, a], [, b]) => b - a);
+
+    let logs = 0;
+    let reclaimed = 0;
+
+    for (const [key, size] of largestFirst) {
+      if (this.#total <= this.#retention.totalBytes) {
+        break;
+      }
+
+      const freed = this.#compactLog(key, size);
+      if (freed > 0) {
+        logs += 1;
+        reclaimed += freed;
+      }
+    }
+
+    return Promise.resolve(this.#compaction(logs, reclaimed));
+  }
+
+  #compaction(logs: number, reclaimed: number): StoreCompaction {
+    return Object.freeze({
+      logs,
+      reclaimed,
+      withinBudget: this.#total <= this.#retention.totalBytes,
+    });
   }
 
   /**
@@ -417,11 +481,43 @@ export class FileStore implements Store {
       const { size } = statSync(this.#logPath(key));
       bytes.set(key, size);
       total += size;
+
+      // The snapshot beside it counts too. It is not history, but it is bytes on the same
+      // disk, and a budget that could not see them would go on reporting room that is not
+      // there once compaction started moving the log into it.
+      const snapshot = this.#sizeOf(this.#snapshotPath(key));
+      if (snapshot > 0) {
+        this.#snapshotBytes.set(key, snapshot);
+        total += snapshot;
+      }
     }
 
     this.#bytes = bytes;
     this.#total = total;
     return bytes;
+  }
+
+  /** A file's size, or 0 when it is not there. */
+  #sizeOf(path: string): number {
+    return existsSync(path) ? statSync(path).size : 0;
+  }
+
+  /**
+   * Bring a key's snapshot back into the total after it was written or replaced.
+   *
+   * Stat rather than the serialized length, because `snapshot` writes through a temporary
+   * name and a rename, and what matters is what ended up at the final path.
+   */
+  #accountSnapshot(key: string): void {
+    if (this.#bytes === undefined) {
+      // Nobody is counting yet. The eventual seed reads both files off disk, so skipping
+      // this cannot make the total wrong.
+      return;
+    }
+
+    const size = this.#sizeOf(this.#snapshotPath(key));
+    this.#total += size - (this.#snapshotBytes.get(key) ?? 0);
+    this.#snapshotBytes.set(key, size);
   }
 
   /**
@@ -448,6 +544,22 @@ export class FileStore implements Store {
       return;
     }
 
+    this.#compactLog(key, size);
+  }
+
+  /**
+   * Fold one log, whatever its size, and report the bytes it gave back.
+   *
+   * Split from the per-log check because the budget sweep has a different question. The
+   * check asks whether this log outgrew its own limit; the sweep asks for bytes back and
+   * does not care what `perLogBytes` was set to, including `0`, which switches the per-log
+   * check off entirely and must not switch the sweep off with it.
+   */
+  #compactLog(key: string, size: number): number {
+    // Measured as the change in the whole total, not in the log alone. Folding always
+    // shrinks the log and always grows the snapshot, so reporting the log's drop as bytes
+    // reclaimed would credit a move between two files as space given back.
+    const before = this.#total;
     // Folded onto any earlier snapshot, because a log compacted before holds only the
     // events after it and replaying those alone would lose everything before.
     const events = this.#readLog(key);
@@ -459,7 +571,7 @@ export class FileStore implements Store {
     if (current === undefined) {
       // Nothing but refusals and violations so far. There is no state to snapshot, so
       // there is nothing that could be dropped without losing the only record of it.
-      return;
+      return 0;
     }
 
     writeFileSync(
@@ -475,6 +587,7 @@ export class FileStore implements Store {
       } satisfies StoreSnapshot),
       "utf8"
     );
+    this.#accountSnapshot(key);
 
     // Everything the snapshot does not account for. A rejection or a violation carries the
     // sequence it followed rather than a new one, so events at the snapshot's own sequence
@@ -488,6 +601,7 @@ export class FileStore implements Store {
 
     writeFileSync(this.#logPath(key), rewritten, "utf8");
     this.#resize(key, size, Buffer.byteLength(rewritten, "utf8"));
+    return before - this.#total;
   }
 
   /** Note that a log went from one size to another, keeping the total in step. */

@@ -338,6 +338,29 @@ export interface TemporalConfig {
   readonly sweepMs?: number;
 }
 
+/**
+ * How stored bytes are reclaimed.
+ *
+ * A store configured to compact at a budget needs something to run it, and that something
+ * cannot be the commit path: choosing what to fold means walking every key. So it is a
+ * sweep, on the same shape as the temporal one. `sweepStorage()` runs a pass on demand;
+ * `sweepMs` additionally runs one on an interval.
+ *
+ * What a pass does is the store's business, configured on the store. This only decides
+ * when.
+ */
+export interface StorageConfig {
+  /**
+   * Milliseconds between automatic storage sweeps. Omitted means no automatic sweeping,
+   * and `sweepStorage()` is the only thing that reclaims.
+   *
+   * The interval does not hold the process open. Refused when no configured layer can
+   * compact, because an interval that can never reclaim anything is a setting that looks
+   * configured and does nothing.
+   */
+  readonly sweepMs?: number;
+}
+
 export interface EkmanConfig<
   D extends readonly AnyEntityDefinition[] = readonly AnyEntityDefinition[],
 > {
@@ -347,6 +370,8 @@ export interface EkmanConfig<
   readonly inbox?: InboxConfig;
   /** How often, if ever, temporal constraints are swept for automatically. */
   readonly temporal?: TemporalConfig;
+  /** How often, if ever, stored bytes are reclaimed automatically. */
+  readonly storage?: StorageConfig;
   /**
    * Where commits go. Omitted means memory only, which is a valid documented mode rather
    * than a degraded one: nothing survives the process, and nothing pretends to.

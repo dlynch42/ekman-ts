@@ -268,6 +268,34 @@ export interface StoreCacheFailedEvent extends TelemetryBase {
   readonly seq: number;
 }
 
+/**
+ * A storage sweep ran. The one event here that carries no key.
+ *
+ * Everything else in this stream happens to an instance. This happens to a store, and
+ * inventing a key to satisfy the shape would put a fiction in the field an operator
+ * correlates on. The same reasoning kept stored-byte totals off this stream and on the
+ * store contract instead; a sweep differs from a total in being a discrete occurrence
+ * rather than a standing measure, which is what makes it an event at all. It has to be one,
+ * because a sweep on an interval has no caller holding its result.
+ */
+export interface StorageSweptEvent {
+  readonly type: "storage.swept";
+  readonly at: number;
+  /** The layer that was swept. */
+  readonly store: string;
+  readonly logs: number;
+  readonly reclaimed: number;
+  /** What the layer holds afterwards, and what it is allowed to hold. */
+  readonly bytes: number;
+  readonly maxBytes: number | null;
+  /**
+   * False when the pass ran out of things worth folding before it reached the bound.
+   * Compaction has a floor, so this is a store saying it is over budget and cannot fix that
+   * by sweeping again.
+   */
+  readonly withinBudget: boolean;
+}
+
 export type TelemetryEvent =
   | InboxEnqueuedEvent
   | InboxRejectedEvent
@@ -286,7 +314,8 @@ export type TelemetryEvent =
   | MemoryAccountedEvent
   | MemoryRefusedEvent
   | AuditFailedEvent
-  | StoreCacheFailedEvent;
+  | StoreCacheFailedEvent
+  | StorageSweptEvent;
 
 export type TelemetryEventType = TelemetryEvent["type"];
 

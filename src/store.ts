@@ -51,6 +51,44 @@ export interface StoreCapabilities {
    * appearing to work and quietly keeping everything.
    */
   readonly forget: boolean;
+  /**
+   * Whether this store can reclaim space by compacting what it holds.
+   *
+   * Separate from `forget` because the two cost different things. Compaction folds events
+   * into a snapshot and costs history alone; deleting costs the instance. A store can
+   * honestly offer either, both, or neither.
+   */
+  readonly compact: boolean;
+}
+
+/**
+ * What one compaction pass did.
+ *
+ * `withinBudget` is false when the pass ran out of things to fold before it reached the
+ * bound. Compaction has a floor: once every log is a bare snapshot there is nothing left
+ * to reclaim, and a store that has hit that floor is over its bound and has to say so
+ * rather than sweeping forever.
+ */
+export interface StoreCompaction {
+  /** How many logs were folded. */
+  readonly logs: number;
+  /** Bytes given back. */
+  readonly reclaimed: number;
+  readonly withinBudget: boolean;
+}
+
+/**
+ * One storage sweep, summed across every layer that could reclaim.
+ *
+ * `overBudget` names layers rather than counting them, because a stack can hold several and
+ * "something is over" is not an actionable sentence. A layer appearing here has reached the
+ * floor of what compaction can give back and is still above its bound, which is a signal to
+ * raise the bound or delete instances, not to sweep again.
+ */
+export interface StorageSweep {
+  readonly logs: number;
+  readonly reclaimed: number;
+  readonly overBudget: readonly string[];
 }
 
 /** A point-in-time picture of an instance, enough to skip replaying from the beginning. */
@@ -176,6 +214,19 @@ export interface Store {
    * whether the key is idle enough for it; a store asked to forget just forgets.
    */
   readonly forget?: (key: string) => Promise<void>;
+
+  /**
+   * Reclaim space by compacting, according to whatever bound this store was configured
+   * with. Present only when `capabilities.compact` says so.
+   *
+   * Off the commit path by design: choosing what to compact means looking across keys, and
+   * a walk of the whole store is the wrong thing to do while a caller waits on an append.
+   * The runtime drives this on its own schedule.
+   *
+   * Compaction costs history and never state. Current values, the sequence, and replay are
+   * untouched, so an attempt already in flight against a compacted key still commits.
+   */
+  readonly compact?: () => Promise<StoreCompaction>;
 
   /** What this store is holding, when it accounts for itself. */
   readonly usage?: StoreUsage;

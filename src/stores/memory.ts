@@ -30,6 +30,7 @@ export class MemoryStore implements Store {
     multiWriter: false,
     scan: { byState: true, olderThan: true },
     forget: true,
+    compact: false,
   });
   readonly authority?: boolean;
 

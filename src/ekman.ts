@@ -21,7 +21,7 @@ import type {
 import { mergeRestores, parseDuration } from "./query";
 import type { ResolvedStack } from "./stack";
 import { resolveStack } from "./stack";
-import type { Store } from "./store";
+import type { StorageSweep, Store } from "./store";
 import { EMPTY_SEQ } from "./store";
 import type { TelemetryEvent } from "./telemetry";
 import { emit, telemetryNow } from "./telemetry";
@@ -80,6 +80,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   /** What is resident and what it costs, in least-recently-used order. */
   readonly #ledger = new MemoryLedger();
   #sweepTimer: ReturnType<typeof setInterval> | undefined;
+  #storageSweepTimer: ReturnType<typeof setInterval> | undefined;
   /**
    * Declared here and assigned in the constructor rather than initialized inline. An
    * inline `= false` narrows the field to the literal `false`, after which the re-entry
@@ -87,12 +88,15 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * note for the same reason.
    */
   #sweeping: boolean;
+  /** Same reasoning as `#sweeping`, for the storage pass. */
+  #sweepingStorage: boolean;
   #triggerSeq = 0;
 
   constructor(config: EkmanConfig<D> = {}) {
     this.#now = config.now ?? Date.now;
     this.#onUnhandled = config.onUnhandled ?? defaultOnUnhandled;
     this.#sweeping = false;
+    this.#sweepingStorage = false;
 
     // Everything is resolved here, at construction, so a configuration the stores cannot
     // satisfy fails at startup rather than being discovered under load. A runtime that
@@ -126,6 +130,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     this.entities = Object.freeze(handles) as EntityHandles<D>;
 
     this.#startSweeping(config.temporal?.sweepMs);
+    this.#startStorageSweeping(config.storage?.sweepMs);
   }
 
   /**
@@ -307,12 +312,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       V
     >[];
 
-    // A stream that was never compacted begins at the sequence its instance began at.
-    // Anything later means a snapshot absorbed the events before it and they are gone, and
-    // that is asked of the events rather than of the store so every adapter answers it the
-    // same way without a capability for it.
-    const earliest = stored[0];
-    const compacted = earliest !== undefined && earliest.seq > FIRST_SEQ;
+    const compacted = await this.#wasCompacted(parsed, stored, authority);
 
     return Object.freeze({
       key: parsed,
@@ -422,15 +422,51 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   }
 
   /**
-   * Release what the runtime is holding: currently the automatic sweep interval.
+   * Reclaim stored bytes once, across every layer that can.
    *
-   * Safe to call more than once. A runtime that was never given a `sweepMs` still has one
-   * of these, so shutdown code does not have to know how it was configured.
+   * The counterpart to `sweep()` for disk rather than for time, and deliberately the same
+   * shape: a method that runs one pass, plus an optional interval that calls it. What a
+   * pass does is the store's business and is configured there; a layer with no budget, or
+   * one told only to measure, reports nothing reclaimed rather than refusing.
+   *
+   * This is not on the commit path and must not be: choosing what to fold means walking
+   * every key, and a caller waiting on an append should never pay for that.
+   *
+   * Compaction costs history and never state, so a pass is safe against instances that are
+   * mid-flight: the sequence, values and current state all survive it, and an attempt
+   * already holding a token still commits.
+   *
+   * Overlapping passes are not useful, so a call made while one is running returns an empty
+   * result immediately rather than queueing behind it, exactly as `sweep()` does.
+   */
+  async sweepStorage(): Promise<StorageSweep> {
+    if (this.#sweepingStorage) {
+      return EMPTY_SWEEP;
+    }
+
+    this.#sweepingStorage = true;
+    try {
+      return await this.#sweepStorageOnce();
+    } finally {
+      this.#sweepingStorage = false;
+    }
+  }
+
+  /**
+   * Release what the runtime is holding: currently the two sweep intervals.
+   *
+   * Safe to call more than once. A runtime that was never given either interval still has
+   * this, so shutdown code does not have to know how it was configured.
    */
   async close(): Promise<void> {
     if (this.#sweepTimer !== undefined) {
       clearInterval(this.#sweepTimer);
       this.#sweepTimer = undefined;
+    }
+
+    if (this.#storageSweepTimer !== undefined) {
+      clearInterval(this.#storageSweepTimer);
+      this.#storageSweepTimer = undefined;
     }
 
     await Promise.all(this.#stack.layers.map((layer) => layer.close?.()));
@@ -884,6 +920,103 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     this.#sweepTimer.unref?.();
   }
 
+  #startStorageSweeping(sweepMs: number | undefined): void {
+    if (sweepMs === undefined) {
+      return;
+    }
+
+    if (!(Number.isFinite(sweepMs) && sweepMs > 0)) {
+      throw new EkmanError(
+        "INVALID_CONFIG",
+        `storage sweepMs must be a positive number of milliseconds, received ${JSON.stringify(sweepMs)}. ` +
+          "Omit it to reclaim only when sweepStorage() is called."
+      );
+    }
+
+    // An interval over layers that cannot compact would wake up forever and reclaim
+    // nothing, which is a setting that looks configured and does nothing. Refused at
+    // startup instead, on the same rule as every other unsatisfiable configuration here.
+    if (!this.#stack.layers.some((layer) => layer.capabilities.compact)) {
+      throw new EkmanError(
+        "INVALID_CONFIG",
+        "storage sweepMs is set, but no configured store layer can compact, so a sweep " +
+          "could never reclaim anything. Configure a layer that compacts, or remove the " +
+          "setting and read storageUsage to measure instead."
+      );
+    }
+
+    this.#storageSweepTimer = setInterval(() => {
+      this.sweepStorage().catch(this.#onUnhandled);
+    }, sweepMs);
+
+    // Housekeeping, exactly as the temporal sweep is: a runtime that is otherwise finished
+    // should be free to exit rather than being held open by its own reclaiming.
+    this.#storageSweepTimer.unref?.();
+  }
+
+  /**
+   * Whether a snapshot has absorbed events this stream can no longer show.
+   *
+   * Asked of the events rather than of the store, so every adapter answers it the same way
+   * with no capability for it: a whole stream starts where the instance did, and one that
+   * starts later is missing its beginning.
+   *
+   * The empty stream is the case events alone cannot answer, because compaction can fold
+   * every event a key has and leave nothing behind to be later than anything. A key nobody
+   * addressed and a key wholly inside its snapshot look identical from here, and only the
+   * snapshot tells them apart.
+   */
+  async #wasCompacted(
+    key: string,
+    stored: readonly EkmanEvent[],
+    authority: Store
+  ): Promise<boolean> {
+    const [earliest] = stored;
+    if (earliest !== undefined) {
+      return earliest.seq > FIRST_SEQ;
+    }
+    return (await authority.load(key))?.snapshot !== undefined;
+  }
+
+  async #sweepStorageOnce(): Promise<StorageSweep> {
+    let logs = 0;
+    let reclaimed = 0;
+    const overBudget: string[] = [];
+
+    for (const layer of this.#stack.layers) {
+      if (!(layer.capabilities.compact && layer.compact)) {
+        continue;
+      }
+
+      // biome-ignore lint/performance/noAwaitInLoops: layers are swept in stack order so the telemetry reads in that order, and so two layers never rewrite their logs at the same moment
+      const swept = await layer.compact();
+      logs += swept.logs;
+      reclaimed += swept.reclaimed;
+      if (!swept.withinBudget) {
+        overBudget.push(layer.name);
+      }
+
+      this.#emit({
+        type: "storage.swept",
+        at: telemetryNow(),
+        store: layer.name,
+        logs: swept.logs,
+        reclaimed: swept.reclaimed,
+        // Read after the pass, so this is what the layer holds now rather than what it
+        // held when the pass started.
+        bytes: layer.usage?.bytes ?? 0,
+        maxBytes: layer.usage?.maxBytes ?? null,
+        withinBudget: swept.withinBudget,
+      });
+    }
+
+    return Object.freeze({
+      logs,
+      reclaimed,
+      overBudget: Object.freeze(overBudget),
+    });
+  }
+
   async #sweepOnce(): Promise<number> {
     const at = this.#now();
     let fired = 0;
@@ -1130,6 +1263,13 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     emit(this.#runtime.telemetry, event, this.#onUnhandled);
   }
 }
+
+/** What an overlapping storage sweep returns: a pass that did not run reclaimed nothing. */
+const EMPTY_SWEEP: StorageSweep = Object.freeze({
+  logs: 0,
+  reclaimed: 0,
+  overBudget: Object.freeze([]),
+});
 
 const NONE: readonly Partiality[] = Object.freeze([]);
 const NO_DURABLE_STORE: readonly Partiality[] = Object.freeze([
