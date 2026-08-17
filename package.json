@@ -50,6 +50,8 @@
     "demo:execution-policy": "tsx demos/execution-policy.ts",
     "demo:durability": "tsx demos/durability.ts",
     "demo:audit": "tsx demos/audit.ts",
+    "demo:coordination": "tsx demos/coordination.ts",
+    "demo:concurrency": "tsx demos/concurrency.ts",
     "demo:unknown": "tsx demos/unknown.ts",
     "example:api": "tsx examples/deploy-service/src/main.ts",
     "example:smoke": "tsx examples/deploy-service/smoke.ts",

@@ -72,6 +72,16 @@ await ekman.history("deployments:abc123")
 
 Every instance gets a human-readable key, its own state and values, a bounded inbox that serializes its triggers, and an append-only transition history. Unknown states and triggers fail loudly.
 
+Serialization is per key and nowhere else, which is what lets a handler read, `await` something slow, and write back without checking whether anyone else is mid-flight:
+
+```
+npm run demo:concurrency    # 5,000 increments across 200 keys, 0 lost updates
+```
+
+It runs one racy read-modify-write handler three ways over the same load: with no coordination, with a promise chain per key written by hand, and through the runtime. The first is the fastest and loses thousands of updates. The other two are correct, and the gap between them is what the runtime costs, reported per commit.
+
+It samples itself while it runs, so you can watch 200 handlers stay in flight until the work runs out, and it reports peak handlers for any one key (1, always) against peak handlers overall (as many as there are busy keys). Both halves matter: a runtime that serialized globally would get the same right answer and be useless.
+
 Constraints (transition graphs, guards, invariants, time-in-state bounds) are opt-in, each with a `reject` / `warn` / `off` dial. `warn` is the point of the dial: turn a constraint on in `warn`, read the violations your real traffic produces, and switch to `reject` once you know what your graph actually is. Violations land in the same per-key stream as transitions under either policy, so "everything that would have been refused last week" is one query rather than a log-scraping exercise. A refused result is classified, so `onError` can catch it and commit something legal instead.
 
 A time-in-state bound fires as a *trigger*, never as a write. The runtime hands your handler the escalation and your handler decides, exactly as with any other input, which keeps every state change attributable to one piece of your code. Evaluate on your own schedule with `temporal: { sweepMs }`, or call `await ekman.sweep()` yourself.
@@ -80,7 +90,7 @@ A time-in-state bound fires as a *trigger*, never as a write. The runtime hands 
 npm run demo:no-going-backwards   # a redelivered message tries to rewind an order
 ```
 
-That one is worth running. Queues redeliver, and a handler written to "just apply the message" will happily walk a shipped order back to `paid` without anything failing. The same naive handler runs three times: unconstrained, in `warn`, and in `reject`. It is one of ten runnable demos, listed [further down](#demos).
+That one is worth running. Queues redeliver, and a handler written to "just apply the message" will happily walk a shipped order back to `paid` without anything failing. The same naive handler runs three times: unconstrained, in `warn`, and in `reject`. It is one of thirteen runnable demos, listed [further down](#demos).
 
 The inbox is bounded in **triggers, not bytes**: `capacity` is how many triggers may wait behind the one being handled, and is unrelated to `memory`, which is the byte budget. A `capacity` of 0 means one at a time with no backlog. When it fills, the overflow policy decides, and the sender always finds out. `reject` is backpressure (`INBOX_OVERFLOW`, the trigger did not land); `drop-newest` and `drop-oldest` are shedding (`TRIGGER_DROPPED`, the trigger is gone on purpose). Overflow is always visible in telemetry, and never in the transition history unless you ask for it with `recordOverflow`.
 
@@ -117,6 +127,7 @@ npm run demo:recovery       # commit, crash, restart, everything resumes
 npm run demo:memory-bound   # 5000 instances inside a 64 KB budget
 npm run demo:retention      # a log that compacts, a budget, and a delete you ask for
 npm run demo:durability     # four configurations the runtime refuses to start with
+npm run demo:coordination   # what two runtimes over one store do, and what stops you
 ```
 
 ## Asking the questions you actually have
@@ -159,13 +170,15 @@ by saying what its output means.
 | Command | What it makes checkable |
 |---|---|
 | `demo:ordering` | Five triggers at one slow key, doing a read-modify-write with an `await` in the middle, and not one lost update. No lock anywhere in the handler. Ends with a full queue refusing a trigger. |
+| `demo:concurrency` | The same argument under load. 5,000 increments across 200 keys, all in flight, run three ways: no coordination (fast, thousands of lost updates), a promise chain per key by hand (correct), and through the runtime. Samples itself every 5ms so you watch 200 handlers stay in flight, then prints throughput and what the runtime costs per commit over hand-rolling the same serialization. |
 | `demo:fencing` | A handler that ignores its timeout, runs to completion, tries to commit, and is refused. Plus `commit.raced`, the honest counterpart, where a commit that already reached the store stands. |
 | `demo:stuck` | "Everything stuck in `deploying` for more than five minutes", as a query and as a constraint, on one injected clock. Two handlers accept the escalation and one declines it. |
 | `demo:no-going-backwards` | A redelivered message tries to rewind an order. The same naive handler runs unconstrained, under `warn`, and under `reject`. |
 | `demo:recovery` | Commit, crash without ceremony, restart, and everything resumes in its exact state with history intact. |
 | `demo:memory-bound` | 5000 instances inside a 64 KB budget. Cold ones evict with a snapshot and reload transparently. |
-| `demo:retention` | The other axis: bytes on disk. A log compacting under a cap, a budget that measures before it enforces, a retention sweep built from `query` plus `forget`, and a delete refused because the key was busy. |
+| `demo:retention` | The other axis: bytes on disk, watched as they accumulate. 400 commits to one key with the cap off and on, printed as a graph, ending 80x apart with the same sequence and values. Then a budget filling past its ceiling and being pulled back under by a sweep, and 40 finished instances pruned with `query` plus `forget`. |
 | `demo:durability` | Four configurations the runtime refuses to start with, each with the message it actually prints, then the layered stack they were protecting. |
+| `demo:coordination` | Two runtimes taking turns over one directory, 400 writes, and 44% of what was acknowledged is not in the record afterwards. Nothing errors. Then the startup refusal that stops you configuring it, and the same load against a store that can see both writers: every collision refused, nothing lost. |
 | `demo:execution-policy` | Retries, timeouts and backoff layered runtime → entity → state, field by field. A trigger queued behind a retrying attempt waits for it. |
 | `demo:audit` | One audit sink that throws, one that hangs forever, one that is merely slow. Every commit lands anyway. |
 | `demo:unknown` | A typo'd trigger type, and a deploy that removed a state instances were still sitting in. Both refused loudly and recorded. |
