@@ -51,6 +51,17 @@ export const config = Object.freeze({
   /** How often time-in-state bounds are checked. */
   sweepMs: num("SWEEP_MS", 1000),
 
+  /**
+   * Bytes the transition logs may occupy before new deployments are refused.
+   *
+   * Measured either way: `/ops/metrics` reports the number whether or not this is set, so
+   * a real ceiling can be chosen from what the service actually does rather than guessed.
+   */
+  storageBytes: num("STORAGE_BYTES", 64 * KB * KB),
+
+  /** How long a closed-out deployment is kept before a prune may remove it. */
+  retainFor: process.env.RETAIN_FOR ?? "30d",
+
   /** Attempts and per-attempt timeout for the state that talks to the deploy API. */
   deployMaxAttempts: num("DEPLOY_MAX_ATTEMPTS", 4),
   deployTimeoutMs: num("DEPLOY_TIMEOUT_MS", 5000),

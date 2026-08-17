@@ -1292,3 +1292,53 @@ describe("storage usage", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 });
+
+describe("history after compaction", () => {
+  const tickets = defineEntity("tickets", {
+    initial: "open",
+    values: { note: "" },
+    states: { open: () => stay({ note: "x".repeat(200) }) },
+  });
+
+  it("reports itself incomplete once events have been folded away", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ekman-compact-"));
+    const ekman = new Ekman({
+      entities: [tickets],
+      store: { kind: "file", dir, retention: { perLogBytes: 1024 } },
+    });
+
+    for (let i = 0; i < 40; i += 1) {
+      // biome-ignore lint/performance/noAwaitInLoops: each commit has to land before the next
+      await ekman.entities.tickets.send("t1", { type: "update" });
+    }
+
+    const { events, complete, reasons } =
+      await ekman.entities.tickets.history("t1");
+
+    // The state is untouched; only the middle of the stream is gone. Saying so is the
+    // whole point, because a shorter answer passing as a whole one is the failure mode.
+    expect(events.length).toBeLessThan(40);
+    expect(complete).toBe(false);
+    expect(reasons).toEqual(["compacted"]);
+    expect(ekman.entities.tickets.inspect("t1")?.seq).toBe(40);
+
+    await ekman.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("stays complete when nothing has been compacted", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ekman-compact-"));
+    const ekman = new Ekman({
+      entities: [tickets],
+      store: { kind: "file", dir, retention: { perLogBytes: 0 } },
+    });
+    await ekman.entities.tickets.send("t1", { type: "update" });
+
+    const { complete, reasons } = await ekman.entities.tickets.history("t1");
+    expect(complete).toBe(true);
+    expect(reasons).toEqual([]);
+
+    await ekman.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+});

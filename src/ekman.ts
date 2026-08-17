@@ -307,6 +307,13 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       V
     >[];
 
+    // A stream that was never compacted begins at the sequence its instance began at.
+    // Anything later means a snapshot absorbed the events before it and they are gone, and
+    // that is asked of the events rather than of the store so every adapter answers it the
+    // same way without a capability for it.
+    const earliest = stored[0];
+    const compacted = earliest !== undefined && earliest.seq > FIRST_SEQ;
+
     return Object.freeze({
       key: parsed,
       // Restores are never persisted, so they are woven back in here. Without that, a
@@ -315,8 +322,8 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
         stored,
         (instance?.events ?? []) as readonly EkmanEvent<S, V>[]
       ),
-      complete: this.#stack.durable,
-      reasons: this.#stack.durable ? NONE : NO_DURABLE_STORE,
+      complete: this.#stack.durable && !compacted,
+      reasons: partiality(this.#stack.durable, compacted),
       sources: Object.freeze([authority.name, "resident"]),
     });
   }
@@ -1129,6 +1136,21 @@ const NO_DURABLE_STORE: readonly Partiality[] = Object.freeze([
   "no-durable-store" as const,
 ]);
 const RESIDENT_ONLY: readonly string[] = Object.freeze(["resident"]);
+const COMPACTED: readonly Partiality[] = Object.freeze(["compacted"]);
+
+/** The first sequence any instance holds, so a stream starting later has lost its head. */
+const FIRST_SEQ = 0;
+
+/** Why a history is not the whole story, if it is not. */
+function partiality(
+  durable: boolean,
+  compacted: boolean
+): readonly Partiality[] {
+  if (!durable) {
+    return NO_DURABLE_STORE;
+  }
+  return compacted ? COMPACTED : NONE;
+}
 
 /**
  * Oldest first, which is the order the question is asked in: "what has been stuck longest".

@@ -115,6 +115,7 @@ Eviction only ever touches idle instances, and only once a key goes idle, so a c
 ```
 npm run demo:recovery       # commit, crash, restart, everything resumes
 npm run demo:memory-bound   # 5000 instances inside a 64 KB budget
+npm run demo:retention      # a log that compacts, a budget, and a delete you ask for
 npm run demo:durability     # four configurations the runtime refuses to start with
 ```
 
@@ -163,6 +164,7 @@ by saying what its output means.
 | `demo:no-going-backwards` | A redelivered message tries to rewind an order. The same naive handler runs unconstrained, under `warn`, and under `reject`. |
 | `demo:recovery` | Commit, crash without ceremony, restart, and everything resumes in its exact state with history intact. |
 | `demo:memory-bound` | 5000 instances inside a 64 KB budget. Cold ones evict with a snapshot and reload transparently. |
+| `demo:retention` | The other axis: bytes on disk. A log compacting under a cap, a budget that measures before it enforces, a retention sweep built from `query` plus `forget`, and a delete refused because the key was busy. |
 | `demo:durability` | Four configurations the runtime refuses to start with, each with the message it actually prints, then the layered stack they were protecting. |
 | `demo:execution-policy` | Retries, timeouts and backoff layered runtime → entity → state, field by field. A trigger queued behind a retrying attempt waits for it. |
 | `demo:audit` | One audit sink that throws, one that hangs forever, one that is merely slow. Every commit lands anyway. |

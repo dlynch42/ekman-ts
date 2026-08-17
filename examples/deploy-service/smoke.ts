@@ -46,6 +46,8 @@ async function main(): Promise<void> {
     await theTimeBound(ekman);
     await theOpsEndpoints();
     await durability(dir);
+    // Last, because it is the only section that destroys what the others assert on.
+    await retention();
   } finally {
     // In a `finally` so a failed check still tears the server down rather than leaving a
     // port bound and the script hanging.
@@ -294,6 +296,58 @@ async function theOpsEndpoints(): Promise<void> {
 }
 
 /** A second runtime over the same directory sees everything the first one committed. */
+/** Pruning a finished deployment: a query, then the one verb that deletes. */
+async function retention(): Promise<void> {
+  section("retention");
+
+  const before = body(await call("GET", "/ops/metrics")).storage as {
+    bytes: number;
+    logs: number;
+    maxBytes: number | null;
+  };
+  check("storage reports what it holds", before.bytes > 0, before.bytes);
+  check(
+    "and the ceiling it was given",
+    before.maxBytes !== null,
+    before.maxBytes
+  );
+
+  // `checkout-api` was rolled back in the happy path, so it is the finished one.
+  const dry = await call("POST", "/ops/prune?olderThan=0ms&dryRun=true");
+  const candidates = body(dry).candidates as string[];
+  check(
+    "a dry run finds the rolled-back deployment",
+    candidates.includes("deployments:checkout-api"),
+    candidates
+  );
+  check(
+    "and deletes nothing",
+    (body(dry).forgotten as string[]).length === 0,
+    body(dry).forgotten
+  );
+
+  const pruned = await call("POST", "/ops/prune?olderThan=0ms");
+  check(
+    "the prune forgets it",
+    (body(pruned).forgotten as string[]).includes("deployments:checkout-api"),
+    body(pruned).forgotten
+  );
+
+  const gone = await call("GET", "/deployments/checkout-api");
+  check("and it is a 404 afterwards", gone.status === 404, gone.status);
+
+  const after = body(await call("GET", "/ops/metrics")).storage as {
+    bytes: number;
+    logs: number;
+  };
+  // A budget that only ever rose would report itself full while holding almost nothing.
+  check("storage fell with it", after.bytes < before.bytes, {
+    before: before.bytes,
+    after: after.bytes,
+  });
+  check("and so did the log count", after.logs === before.logs - 1, after.logs);
+}
+
 async function durability(dataDir: string): Promise<void> {
   section("durability");
 

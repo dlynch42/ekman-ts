@@ -28,7 +28,7 @@ src/
     server.ts          node:http, a small router, error codes -> status codes
     routes/
       deployments.ts   create, send an event, read one, read its history
-      ops.ts           /ops/stuck, /ops/incidents, /ops/sweep, /ops/metrics
+      ops.ts           /ops/stuck, /ops/incidents, /ops/sweep, /ops/prune, /ops/metrics
   workers/
     consumer.ts        a fake queue that redelivers, bursts, and sends a typo
   app.ts               the route table
@@ -86,6 +86,12 @@ at-least-once, which is exactly why every handler in `entities/incident.ts` is i
 **The ops endpoints pass `complete` and `reasons` through.** An operator acting on "nothing
 is stuck" needs to know whether that was the whole answer.
 
+**Retention is application code, not a runtime setting.** `POST /ops/prune` is a `query` for
+rolled-back deployments older than `RETAIN_FOR`, followed by `ekman.forget` on each one.
+Nothing inside the runtime decides when a deployment stops mattering, because that is a
+product question. The route supports `dryRun=true` for the same reason, and reports the keys
+it skipped because a handler was running rather than treating a busy key as a failure.
+
 ## Try it
 
 ```bash
@@ -117,7 +123,11 @@ curl localhost:3000/deployments/billing-api/history
 curl localhost:3000/ops/incidents
 
 # runtime telemetry, which never appears in any deployment's history
+# `memory` is resident bytes; `storage` is bytes on disk, which eviction never frees
 curl localhost:3000/ops/metrics
+
+# what a prune would delete, without deleting it
+curl -XPOST 'localhost:3000/ops/prune?olderThan=0ms&dryRun=true'
 ```
 
 Then **stop the process and start it again**, and read `billing-api` back. It is still
@@ -136,6 +146,8 @@ Everything is environment-driven, with defaults in `src/lib/config.ts`.
 | `INBOX_CAPACITY` | `32` | Triggers that may wait behind the one being handled, per deployment |
 | `STUCK_AFTER_MS` | `300000` | How long a deployment may sit in `deploying` before it is escalated |
 | `SWEEP_MS` | `1000` | How often time bounds are checked |
+| `STORAGE_BYTES` | `67108864` | Bytes the transition logs may occupy before new deployments are refused |
+| `RETAIN_FOR` | `30d` | How long a rolled-back deployment is kept before `POST /ops/prune` may remove it |
 | `DEPLOY_MAX_ATTEMPTS` | `4` | Attempts for the state that calls the deploy API |
 | `DEPLOY_TIMEOUT_MS` | `5000` | Per-attempt timeout for that state |
 

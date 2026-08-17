@@ -49,7 +49,14 @@ export type Partiality =
   /** A store could not evaluate one of the filters, so it was applied after the fact. */
   | "unsupported-criteria"
   /** The answer was truncated by `limit`. */
-  | "limit-reached";
+  | "limit-reached"
+  /**
+   * The stream was compacted, so events before the snapshot are gone.
+   *
+   * Current state, values and sequence are unaffected: everything dropped had already
+   * been folded into the snapshot. What is missing is the middle of the history.
+   */
+  | "compacted";
 
 export interface QueryResult {
   readonly instances: readonly QueryMatch[];

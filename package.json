@@ -44,6 +44,7 @@
     "demo:recovery": "tsx demos/recovery.ts",
     "demo:no-going-backwards": "tsx demos/no-going-backwards.ts",
     "demo:memory-bound": "tsx demos/memory-bound.ts",
+    "demo:retention": "tsx demos/retention.ts",
     "demo:fencing": "tsx demos/fencing.ts",
     "demo:stuck": "tsx demos/stuck.ts",
     "demo:execution-policy": "tsx demos/execution-policy.ts",
