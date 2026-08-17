@@ -502,6 +502,17 @@
         "restart": {
           "description": "Throw the runtime away and build a new one against the same storage. Resident state is lost; durable state is not.",
           "const": true
+        },
+        "forget": {
+          "description": "Delete an instance outright: its resident state and its stream in every layer. Destroys committed state, so it is addressed by key and never inferred.",
+          "type": "object",
+          "required": ["key"],
+          "additionalProperties": false,
+          "properties": {
+            "key": {
+              "type": "string"
+            }
+          }
         }
       },
       "oneOf": [
@@ -510,7 +521,8 @@
         { "required": ["wait"] },
         { "required": ["advance"] },
         { "required": ["sweep"] },
-        { "required": ["restart"] }
+        { "required": ["restart"] },
+        { "required": ["forget"] }
       ]
     },
     "then": {
@@ -666,6 +678,24 @@
           "type": "array",
           "items": { "type": "string" }
         },
+        "forgets": {
+          "description": "Outcomes of the forget steps, in the order the steps appear.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["outcome"],
+            "additionalProperties": false,
+            "properties": {
+              "outcome": {
+                "enum": ["ok", "refused"]
+              },
+              "code": {
+                "description": "The stable error code, asserted on refused.",
+                "$ref": "#/$defs/errorCode"
+              }
+            }
+          }
+        },
         "memory": {
           "type": "object",
           "additionalProperties": false,
@@ -773,6 +803,11 @@
         "HANDLER_TIMEOUT",
         "COMMIT_FENCED",
         "CONSTRAINT_VIOLATED",
+        "STORE_CONFLICT",
+        "STORE_UNAVAILABLE",
+        "STORE_FULL",
+        "MEMORY_EXHAUSTED",
+        "KEY_BUSY",
         "DUPLICATE_ENTITY",
         "DUPLICATE_STATE_HANDLER",
         "MISSING_INITIAL_STATE",

@@ -206,7 +206,15 @@ export type Step =
    * A process restart, in other words. Everything resident is lost; everything committed
    * to a durable store is not. This is the step the recovery claim is made of.
    */
-  | { readonly restart: true };
+  | { readonly restart: true }
+  /**
+   * Delete an instance outright: its resident state and its stream in every layer.
+   *
+   * Destroys committed state, so it is addressed by key and never inferred. The runner
+   * records the outcome of every one of these in order, the same way it does for a send,
+   * because being refused is as much of a result as succeeding.
+   */
+  | { readonly forget: { readonly key: string } };
 
 export interface TriggerSpec {
   readonly type: string;
@@ -236,6 +244,8 @@ export interface Then {
    * reload was transparent, because the assertion read it back without noticing.
    */
   readonly resident?: readonly string[];
+  /** Outcomes of the `forget` steps, in the order the steps appear. */
+  readonly forgets?: readonly ForgetExpectation[];
   readonly memory?: {
     readonly instances?: number;
     /** Resident bytes must not exceed this. The budget claim, stated as an assertion. */
@@ -266,6 +276,12 @@ export interface HistoryExpectation {
   readonly events?: readonly string[];
   readonly complete?: boolean;
   readonly reasons?: readonly string[];
+}
+
+export interface ForgetExpectation {
+  readonly outcome: "ok" | "refused";
+  /** The stable error code, asserted on `refused`. */
+  readonly code?: string;
 }
 
 export interface SendExpectation {
@@ -310,6 +326,12 @@ export function isRestartStep(
   step: Step
 ): step is Extract<Step, { restart: true }> {
   return "restart" in step;
+}
+
+export function isForgetStep(
+  step: Step
+): step is Extract<Step, { forget: unknown }> {
+  return "forget" in step;
 }
 
 /** The scenarios directory, resolved relative to this file so the cwd does not matter. */

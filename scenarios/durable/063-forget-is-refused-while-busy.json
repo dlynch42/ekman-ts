@@ -1,0 +1,51 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "durable/063-forget-is-refused-while-busy",
+  "name": "forgetting an instance with a handler in flight is refused rather than racing the commit",
+  "level": "durable",
+  "given": {
+    "runtime": { "store": [{ "kind": "file" }] },
+    "entities": [
+      {
+        "name": "deployments",
+        "initial": "pending",
+        "states": [
+          {
+            "state": "pending",
+            "cases": [
+              {
+                "when": { "trigger": "start" },
+                "do": {
+                  "result": "transitionTo",
+                  "to": "deploying",
+                  "delayMs": 60
+                }
+              }
+            ]
+          },
+          { "state": "deploying", "else": { "result": "stay" } }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "deployments:busy",
+        "trigger": { "type": "start" }
+      },
+      "await": false
+    },
+    { "forget": { "key": "deployments:busy" } },
+    { "drain": true },
+    { "forget": { "key": "deployments:busy" } }
+  ],
+  "then": {
+    "sends": [{ "outcome": "committed", "state": "deploying", "seq": 1 }],
+    "forgets": [
+      { "outcome": "refused", "code": "KEY_BUSY" },
+      { "outcome": "ok" }
+    ],
+    "state": { "deployments:busy": null }
+  }
+}

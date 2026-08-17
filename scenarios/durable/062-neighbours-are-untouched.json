@@ -1,0 +1,80 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "durable/062-neighbours-are-untouched",
+  "name": "forgetting one instance leaves every other instance of the same entity exactly as it was",
+  "level": "durable",
+  "given": {
+    "runtime": { "store": [{ "kind": "file" }] },
+    "entities": [
+      {
+        "name": "deployments",
+        "initial": "pending",
+        "states": [
+          {
+            "state": "pending",
+            "cases": [
+              {
+                "when": { "trigger": "start" },
+                "do": {
+                  "result": "transitionTo",
+                  "to": "deploying",
+                  "values": { "region": { "$trigger": "region" } }
+                }
+              }
+            ]
+          },
+          { "state": "deploying", "else": { "result": "stay" } }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "deployments:one",
+        "trigger": { "type": "start", "region": "us-west-2" }
+      }
+    },
+    {
+      "send": {
+        "key": "deployments:two",
+        "trigger": { "type": "start", "region": "eu-west-1" }
+      }
+    },
+    {
+      "send": {
+        "key": "deployments:three",
+        "trigger": { "type": "start", "region": "ap-south-1" }
+      }
+    },
+    { "forget": { "key": "deployments:two" } }
+  ],
+  "then": {
+    "forgets": [{ "outcome": "ok" }],
+    "state": {
+      "deployments:one": {
+        "state": "deploying",
+        "seq": 1,
+        "values": { "region": "us-west-2" }
+      },
+      "deployments:two": null,
+      "deployments:three": {
+        "state": "deploying",
+        "seq": 1,
+        "values": { "region": "ap-south-1" }
+      }
+    },
+    "history": {
+      "deployments:one": { "events": ["transition@0", "transition@1"] },
+      "deployments:three": { "events": ["transition@0", "transition@1"] }
+    },
+    "queries": [
+      {
+        "entity": "deployments",
+        "state": "deploying",
+        "keys": ["deployments:one", "deployments:three"],
+        "complete": true
+      }
+    ]
+  }
+}

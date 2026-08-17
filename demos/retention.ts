@@ -59,6 +59,7 @@ async function main(): Promise<void> {
   console.log(`store: ${dir}\n`);
   await aLogThatCompacts();
   await theBudget();
+  await aBudgetThatReclaims();
   await retention();
   await forgettingIsRefusedWhileBusy();
 
@@ -208,9 +209,103 @@ async function theBudget(): Promise<void> {
   await bounded.close();
 }
 
+/** The other thing a full store can do: give bytes back instead of turning work away. */
+async function aBudgetThatReclaims(): Promise<void> {
+  banner("3. A budget that reclaims instead of refusing");
+
+  const ekman = new Ekman({
+    entities: [tickets],
+    store: {
+      kind: "file",
+      dir: join(dir, "reclaiming"),
+      // Per-log compaction off, so nothing happens on the commit path and the budget is
+      // the only thing that can act.
+      retention: { perLogBytes: 0, totalBytes: 3000, policy: "compact" },
+    },
+    now,
+  });
+
+  for (const id of ["a", "b", "c"]) {
+    for (let i = 0; i < 5; i += 1) {
+      // biome-ignore lint/performance/noAwaitInLoops: each commit has to land before the next
+      await ekman.entities.tickets.send(id, { type: "update" });
+    }
+  }
+
+  const before = ekman.storageUsage;
+  console.log(`  budget            ${before.maxBytes} bytes`);
+  console.log(
+    `  holding           ${before.bytes} bytes across ${before.logs} logs`
+  );
+
+  // Nothing above did this. A sweep has to walk every key to choose what to fold, and
+  // that is not something to do while a caller waits on an append.
+  const swept = await ekman.sweepStorage();
+  const after = ekman.storageUsage;
+
+  console.log(
+    `\n  swept             ${swept.logs} logs, ${swept.reclaimed} bytes back`
+  );
+  console.log(`  holding now       ${after.bytes} bytes`);
+  console.log(
+    `  over budget still ${swept.overBudget.length === 0 ? "nothing" : swept.overBudget.join(", ")}`
+  );
+
+  console.log("\n  per ticket:");
+  let folded = 0;
+  for (const id of ["a", "b", "c"]) {
+    const current = ekman.entities.tickets.inspect(id);
+    // biome-ignore lint/performance/noAwaitInLoops: one at a time keeps the printed lines in order
+    const { events, complete } = await ekman.entities.tickets.history(id);
+    if (!complete) {
+      folded += 1;
+    }
+    console.log(
+      `    ${id}  seq=${current?.seq}  events=${events.length}  history complete: ${complete}`
+    );
+    check(
+      current?.seq === 5,
+      `${id} lost its sequence to the sweep: ${current?.seq}`
+    );
+  }
+
+  check(after.bytes < before.bytes, "the sweep gave nothing back");
+  check(
+    after.bytes <= 3000,
+    `the sweep left ${after.bytes} bytes over a 3000 budget`
+  );
+  check(swept.overBudget.length === 0, "the sweep could not reach the budget");
+  check(
+    folded === swept.logs,
+    `${swept.logs} logs folded but ${folded} say so`
+  );
+  check(
+    folded < 3,
+    "the sweep folded everything rather than only what it needed"
+  );
+
+  console.log(
+    "\n  The same trade compaction always makes, moved from one log to the whole store:\n" +
+      "  history is spent, state is not. Every ticket is still at seq 5, including the\n" +
+      "  ones whose stream is now empty, because everything folded away was already in the\n" +
+      "  snapshot. The ones that were folded say `complete: false`; the one that was not\n" +
+      "  still has its whole stream.\n" +
+      "\n" +
+      "  That last part is the sweep taking the largest logs first and stopping the moment\n" +
+      "  it is back under. Spending history it did not need to spend would be the same\n" +
+      "  mistake as deleting an instance to answer a disk-space question, in miniature.\n" +
+      "\n" +
+      "  It also has a floor. Folding a log writes a snapshot beside it, and a store whose\n" +
+      "  logs are already bare snapshots has nothing left to give. A sweep that reaches\n" +
+      "  that point names the layers it could not bring under, rather than sweeping again\n" +
+      "  and reporting a success it did not have."
+  );
+  await ekman.close();
+}
+
 /** The sweep: a query you already have, plus the one verb that deletes. */
 async function retention(): Promise<void> {
-  banner("3. Retention: a query you already have, plus one verb");
+  banner("4. Retention: a query you already have, plus one verb");
 
   const ekman = new Ekman({
     entities: [tickets],
@@ -285,7 +380,7 @@ async function retention(): Promise<void> {
 
 /** The refusal that keeps a delete from racing a commit. */
 async function forgettingIsRefusedWhileBusy(): Promise<void> {
-  banner("4. Forgetting is refused while a handler is in flight");
+  banner("5. Forgetting is refused while a handler is in flight");
 
   let release: () => void = () => undefined;
   const held = new Promise<void>((resolve) => {

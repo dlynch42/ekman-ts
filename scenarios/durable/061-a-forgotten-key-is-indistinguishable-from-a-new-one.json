@@ -1,0 +1,77 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "durable/061-a-forgotten-key-is-indistinguishable-from-a-new-one",
+  "name": "a key addressed again after being forgotten behaves exactly like one never seen before",
+  "level": "durable",
+  "given": {
+    "runtime": { "store": [{ "kind": "file" }] },
+    "entities": [
+      {
+        "name": "deployments",
+        "initial": "pending",
+        "values": { "attempt": 0 },
+        "states": [
+          {
+            "state": "pending",
+            "cases": [
+              {
+                "when": { "trigger": "start" },
+                "do": {
+                  "result": "transitionTo",
+                  "to": "deploying",
+                  "values": { "region": { "$trigger": "region" } }
+                }
+              }
+            ]
+          },
+          { "state": "deploying", "else": { "result": "stay" } }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "deployments:reused",
+        "trigger": { "type": "start", "region": "us-west-2" }
+      }
+    },
+    { "forget": { "key": "deployments:reused" } },
+    {
+      "send": {
+        "key": "deployments:reused",
+        "trigger": { "type": "start", "region": "eu-west-1" }
+      }
+    },
+    {
+      "send": {
+        "key": "deployments:control",
+        "trigger": { "type": "start", "region": "eu-west-1" }
+      }
+    }
+  ],
+  "then": {
+    "forgets": [{ "outcome": "ok" }],
+    "sends": [
+      { "outcome": "committed", "state": "deploying", "seq": 1 },
+      { "outcome": "committed", "state": "deploying", "seq": 1 },
+      { "outcome": "committed", "state": "deploying", "seq": 1 }
+    ],
+    "state": {
+      "deployments:reused": {
+        "state": "deploying",
+        "seq": 1,
+        "values": { "region": "eu-west-1" }
+      },
+      "deployments:control": {
+        "state": "deploying",
+        "seq": 1,
+        "values": { "region": "eu-west-1" }
+      }
+    },
+    "history": {
+      "deployments:reused": { "events": ["transition@0", "transition@1"] },
+      "deployments:control": { "events": ["transition@0", "transition@1"] }
+    }
+  }
+}

@@ -8,6 +8,7 @@ import {
   ScenarioStorage,
 } from "./build";
 import type {
+  ForgetExpectation,
   HistoryExpectation,
   QueryExpectation,
   Scenario,
@@ -17,6 +18,7 @@ import type {
 } from "./scenario";
 import {
   isAdvanceStep,
+  isForgetStep,
   isRestartStep,
   isSendStep,
   isSweepStep,
@@ -46,6 +48,17 @@ interface Outcome {
   seq?: number;
   values?: Record<string, unknown>;
   code?: string;
+}
+
+interface ForgetOutcome {
+  outcome: "ok" | "refused";
+  code?: string;
+}
+
+/** What one run of the `when` steps produced, by step kind. */
+interface Outcomes {
+  sends: Outcome[];
+  forgets: ForgetOutcome[];
 }
 
 export async function runScenario(scenario: Scenario): Promise<ScenarioResult> {
@@ -110,7 +123,8 @@ async function execute(scenario: Scenario, failures: string[]): Promise<void> {
       buildRuntime(scenario, telemetry, clock, storage, audit)
     );
 
-    assertSends(scenario.then?.sends, outcomes, failures);
+    assertSends(scenario.then?.sends, outcomes.sends, failures);
+    assertForgets(scenario.then?.forgets, outcomes.forgets, failures);
     await assertEvents(scenario, active.ekman, failures);
     assertTelemetry(scenario.then?.telemetry, telemetry, failures);
     assertState(scenario.then?.state, active.ekman, failures);
@@ -159,8 +173,9 @@ async function deliver(
   steps: readonly Step[],
   clock: ScenarioClock | undefined,
   rebuild: () => Ekman
-): Promise<Outcome[]> {
+): Promise<Outcomes> {
   const outcomes: Outcome[] = [];
+  const forgets: ForgetOutcome[] = [];
   const inFlight: Promise<void>[] = [];
   let index = 0;
 
@@ -199,6 +214,14 @@ async function deliver(
       continue;
     }
 
+    if (isForgetStep(step)) {
+      // Deliberately not drained first. A forget is refused while the key is busy, and
+      // draining here would make that outcome unreachable. A scenario that wants the key
+      // quiet first says so with a `drain` step, exactly as it would before a send.
+      forgets.push(await forgetting(ekman, step.forget.key));
+      continue;
+    }
+
     if (!isSendStep(step)) {
       await Promise.all(inFlight);
       continue;
@@ -230,7 +253,17 @@ async function deliver(
   }
 
   await Promise.all(inFlight);
-  return outcomes;
+  return { sends: outcomes, forgets };
+}
+
+/** Delete a key, recording whether it was allowed rather than letting a refusal throw. */
+async function forgetting(ekman: Ekman, key: string): Promise<ForgetOutcome> {
+  try {
+    await ekman.forget(key);
+    return { outcome: "ok" };
+  } catch (error) {
+    return { outcome: "refused", code: (error as EkmanError).code };
+  }
 }
 
 function assertSends(
@@ -273,6 +306,44 @@ function assertSends(
 
     if (want.values !== undefined) {
       failures.push(...diff(`sends[${i}].values`, got.values, want.values));
+    }
+  });
+}
+
+function assertForgets(
+  expected: readonly ForgetExpectation[] | undefined,
+  actual: readonly ForgetOutcome[],
+  failures: string[]
+): void {
+  if (expected === undefined) {
+    return;
+  }
+
+  if (expected.length !== actual.length) {
+    failures.push(
+      `then.forgets expects ${expected.length} forget steps, scenario ran ${actual.length}`
+    );
+    return;
+  }
+
+  expected.forEach((want, i) => {
+    const got = actual[i];
+    if (got === undefined) {
+      failures.push(`forgets[${i}]: no outcome recorded`);
+      return;
+    }
+
+    if (want.outcome !== got.outcome) {
+      failures.push(
+        `forgets[${i}]: expected ${want.outcome}, got ${got.outcome}${got.code === undefined ? "" : ` (${got.code})`}`
+      );
+      return;
+    }
+
+    if (want.code !== undefined && want.code !== got.code) {
+      failures.push(
+        `forgets[${i}].code: expected ${want.code}, got ${String(got.code)}`
+      );
     }
   });
 }

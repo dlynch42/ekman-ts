@@ -423,6 +423,7 @@ An ordered array of steps.
 | `advance` | Move the declared clock forward this many milliseconds. |
 | `sweep` | Evaluate temporal constraints once and settle whatever they escalate. |
 | `restart` | Throw the runtime away and build a new one against the same storage. |
+| `forget` | Delete an instance outright: its resident state and its stream in every layer. |
 
 `restart` is a process restart. Every outstanding send settles, the runtime closes, and a
 fresh one opens over the same durable bytes. Everything resident is lost; everything
@@ -463,6 +464,27 @@ scenarios overlap work on one key. A scenario that uses it should end with
 `{ "drain": true }`.
 
 The runner records the outcome of every `send` step in order, whether awaited or not.
+
+```json
+[
+  { "send": { "key": "orders:1", "trigger": { "type": "approve" } } },
+  { "forget": { "key": "orders:1" } }
+]
+```
+
+`forget` destroys committed state, so it names a key and is never inferred: nothing in the
+runtime decides on its own that an instance has stopped mattering. It is refused while the
+key has a handler running or triggers waiting, and refused outright unless every configured
+store layer can delete, because a layer still holding the stream would bring the instance
+back on the next load. Deleting a key that does not exist is not an error, so a sweep that
+died halfway behaves the same way when it is run again.
+
+It is deliberately **not** drained first. A scenario that wants the key quiet before
+deleting says so with a `drain` step, exactly as it would before a send; without that, the
+refusal a busy key produces would be unreachable.
+
+The runner records the outcome of every `forget` step in order, the same way it does for a
+send, because being refused is as much of a result as succeeding.
 
 ## `then`
 
@@ -613,6 +635,19 @@ Current committed state per key, after all steps settle.
 
 Use `null` as the value for a key to assert that no instance exists for it.
 
+### `then.forgets`
+
+Outcomes of the `forget` steps, in the order the steps appear.
+
+```json
+[{ "outcome": "refused", "code": "KEY_BUSY" }, { "outcome": "ok" }]
+```
+
+| Field | Meaning |
+|---|---|
+| `outcome` | `ok` or `refused`. |
+| `code` | The stable error code, asserted on `refused`. |
+
 ### `then.resident`, `then.memory` and `then.audit`
 
 ```json
@@ -725,6 +760,8 @@ Stable across implementations. A runner asserts on these strings, never on messa
 | `CONSTRAINT_VIOLATED` | A result did not satisfy a constraint whose policy is `reject`. |
 | `STORE_CONFLICT` | A conditional append found the key at a different sequence. Nothing was written. |
 | `STORE_UNAVAILABLE` | The commit authority could not be reached, so the commit did not happen. |
+| `STORE_FULL` | A store at its retention budget refused to create an instance it had never seen. |
+| `KEY_BUSY` | An instance was asked to be deleted while a handler was running or triggers were waiting. |
 | `MEMORY_EXHAUSTED` | The budget is full and the eviction policy refuses rather than evicting. |
 | `DUPLICATE_ENTITY` | Two entities registered with the same name. |
 | `DUPLICATE_STATE_HANDLER` | Two handlers for one state. |
@@ -782,6 +819,27 @@ Anything that cannot be made deterministic must not be asserted.
    | `03x` | audit sinks |
    | `04x` | queries by state and time in state |
    | `05x` | history as the whole per-key stream |
+   | `06x` | deleting an instance outright |
 
 3. Assert the narrowest thing that proves the requirement. Over-asserting makes the suite
    brittle for the next port.
+
+## What is deliberately not assertable
+
+Two things a scenario cannot say, both for the same reason the layout rule exists: they
+would pin one implementation's choices rather than behaviour every port owes.
+
+**Stored bytes and file counts.** There is no `then.storage`, and there should not be. A
+byte total encodes how one implementation serializes an event, and a count of logs encodes
+that it keeps one file per key; a store built on a table or a single shared log is not wrong
+for answering differently. Everything worth proving about deletion is provable through
+`state`, `history`, `queries`, `forgets` and `resident`, which say what the runtime does
+rather than what its disk looks like.
+
+**Compaction.** A store may fold a key's events into a snapshot and drop what the snapshot
+covers, and a history that has lost its beginning reports itself incomplete. That much is
+behaviour. But causing it from a scenario means naming a byte threshold, and stored bytes
+have no cross-port meaning the way the resident accounting basis does, so there is no
+number a scenario could name that would mean the same thing twice. If this is ever worth
+covering, the shape is a step that asks a store to compact now, letting the scenario assert
+the partiality without ever naming a size.
