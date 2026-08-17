@@ -96,7 +96,15 @@ export {
   replay,
   scanKeys,
 } from "./store";
-export { FileStore, fileStore } from "./stores/file";
+export type { FileStoreOptions } from "./stores/file";
+export {
+  defaultLogDir,
+  defaultStoreDir,
+  FileStore,
+  fileStore,
+  projectRoot,
+  STORE_DIR_NAME,
+} from "./stores/file";
 export { MemoryStore, memoryStore } from "./stores/memory";
 export type {
   AuditFailedEvent,

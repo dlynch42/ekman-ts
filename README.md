@@ -53,7 +53,7 @@ export const ekman = new Ekman({
   inbox:    { capacity: 128, overflow: "reject" },   // 128 triggers waiting per key, not bytes
   execution: { maxAttempts: 3, timeoutMs: 10_000, backoff: { kind: "exponential", baseMs: 50 } },
   temporal: { sweepMs: 1_000 },                      // how often time-in-state bounds are checked
-  store:    [memoryStore(), fileStore("./state")],   // fastest first; the last durable layer owns the truth
+  store:    [memoryStore(), fileStore()],            // fastest first; the last durable layer owns the truth
   audit:    [kafkaSink("state-transitions")],
   telemetry: {
     "inbox.dropped":   (e) => metrics.inc("ekman.inbox.dropped", { entity: e.entity }),
@@ -95,6 +95,8 @@ Telemetry is a separate stream from history, by design. Queue depth, handler dur
 Durability is configured, never implied. Omit `store` and you get a memory-only runtime: nothing survives the process, and nothing pretends to. That is a documented mode, not a degraded one.
 
 Configure one and commits are written before they are applied. A `send()` that resolves has already reached the commit authority, so a crash a microsecond later loses nothing. Stores layer, fastest first, and exactly one layer owns the truth: the rest are caches, written after the fact, and a cache that fails to write is reported without failing the commit.
+
+`fileStore()` writes to `.ekman/logs/`, found by walking up from the working directory to the nearest `package.json`, so the same service finds the same state however it was launched. Pass a path to put it somewhere else. A deployment with no `package.json` beside it, such as a bundled single-file build, should name the path explicitly rather than take the default.
 
 Every store declares what it can actually do (durable or ephemeral, conditional append, safe across processes), and the runtime **refuses configurations those declarations cannot satisfy** rather than quietly under-delivering. Claiming durability a store does not have is the one lie a state runtime must never tell.
 

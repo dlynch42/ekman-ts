@@ -28,5 +28,5 @@ build/
 # Testing
 coverage/
 
-# Example app state, written at runtime
-examples/**/data/
+# Durable store state, written at runtime
+.ekman/
