@@ -16,11 +16,16 @@
  * turns into a hung process. One is merely slow. The commits do not care about any of it.
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import type { AuditSink, EkmanEvent } from "ekman";
-import { defineEntity, Ekman, fileStore, transitionTo } from "ekman";
+import {
+  defaultLogDir,
+  defineEntity,
+  Ekman,
+  fileStore,
+  transitionTo,
+} from "ekman";
 
 const COMMITS = 5;
 const ARCHIVE_MS = 250;
@@ -74,9 +79,14 @@ const archive: AuditSink = {
   },
 };
 
-const dir = mkdtempSync(join(tmpdir(), "ekman-audit-"));
+// A named directory rather than a temporary one, cleared on the way in rather than out, so
+// the log this demo wrote is still there to read when it finishes. Its own subdirectory, so
+// clearing it can never reach anything another demo or the example app put there.
+const dir = join(defaultLogDir(), "demos", "audit");
+rmSync(dir, { recursive: true, force: true });
 
 async function main(): Promise<void> {
+  console.log(`store: ${dir}\n`);
   const ekman = new Ekman({
     entities: [ledger],
     store: fileStore(dir),
@@ -232,9 +242,7 @@ function delay(ms: number): Promise<void> {
   });
 }
 
-main()
-  .catch((error: unknown) => {
-    console.error(error);
-    process.exitCode = 1;
-  })
-  .finally(() => rmSync(dir, { recursive: true, force: true }));
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});

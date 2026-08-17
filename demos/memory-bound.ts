@@ -8,10 +8,9 @@
  * sends triggers and reads results, exactly as it would with an unlimited budget.
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
-import { defineEntity, Ekman, fileStore, stay } from "ekman";
+import { defaultLogDir, defineEntity, Ekman, fileStore, stay } from "ekman";
 
 const INSTANCES = 5000;
 const BUDGET = 64 * 1024;
@@ -29,9 +28,14 @@ const sessions = defineEntity("sessions", {
   },
 });
 
-const dir = mkdtempSync(join(tmpdir(), "ekman-memory-"));
+// A named directory rather than a temporary one, cleared on the way in rather than out, so
+// the log this demo wrote is still there to read when it finishes. Its own subdirectory, so
+// clearing it can never reach anything another demo or the example app put there.
+const dir = join(defaultLogDir(), "demos", "memory-bound");
+rmSync(dir, { recursive: true, force: true });
 
 async function main(): Promise<void> {
+  console.log(`store: ${dir}\n`);
   let evicted = 0;
   let restored = 0;
   let peakAtCommit = 0;
@@ -122,9 +126,7 @@ async function main(): Promise<void> {
   await ekman.close();
 }
 
-main()
-  .catch((error: unknown) => {
-    console.error(error);
-    process.exitCode = 1;
-  })
-  .finally(() => rmSync(dir, { recursive: true, force: true }));
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});

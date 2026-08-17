@@ -17,11 +17,11 @@
  * the directory on disk.
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import type { EkmanConfig } from "ekman";
 import {
+  defaultLogDir,
   defineEntity,
   Ekman,
   fileStore,
@@ -44,9 +44,14 @@ const orders = defineEntity("orders", {
   },
 });
 
-const dir = mkdtempSync(join(tmpdir(), "ekman-durability-"));
+// A named directory rather than a temporary one, cleared on the way in rather than out, so
+// the log this demo wrote is still there to read when it finishes. Its own subdirectory, so
+// clearing it can never reach anything another demo or the example app put there.
+const dir = join(defaultLogDir(), "demos", "durability");
+rmSync(dir, { recursive: true, force: true });
 
 async function main(): Promise<void> {
+  console.log(`store: ${dir}\n`);
   capabilities();
   refusals();
   await theConfigurationThoseProtect();
@@ -221,9 +226,7 @@ function banner(title: string): void {
   console.log(`\n${"=".repeat(78)}\n${title}\n${"=".repeat(78)}\n`);
 }
 
-main()
-  .catch((error: unknown) => {
-    console.error(error);
-    process.exitCode = 1;
-  })
-  .finally(() => rmSync(dir, { recursive: true, force: true }));
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});

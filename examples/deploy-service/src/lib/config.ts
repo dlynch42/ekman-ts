@@ -6,6 +6,7 @@
  */
 
 import { join } from "node:path";
+import { defaultLogDir } from "ekman";
 
 const KB = 1024;
 const MINUTE_MS = 60_000;
@@ -27,9 +28,16 @@ function num(name: string, fallback: number): number {
 export const config = Object.freeze({
   port: num("PORT", 3000),
 
-  /** Where the transition log lives. Gitignored; delete it to start clean. */
-  dataDir:
-    process.env.DATA_DIR ?? join(process.cwd(), "examples/deploy-service/data"),
+  /**
+   * Where the transition log lives. Gitignored; delete it to start clean.
+   *
+   * Resolved from the nearest `package.json` above the working directory rather than from
+   * the working directory itself, so the service finds the same state whichever directory
+   * it was started from. Its own subdirectory because this example shares a project root
+   * with the demos; a standalone service would call `fileStore()` and take `.ekman/logs`
+   * whole.
+   */
+  dataDir: process.env.DATA_DIR ?? join(defaultLogDir(), "deploy-service"),
 
   /** Resident memory allowance. Small here so eviction is observable in a demo. */
   memoryBytes: num("MEMORY_BYTES", 256 * KB),

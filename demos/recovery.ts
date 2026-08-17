@@ -8,10 +8,16 @@
  * and every instance comes back in its exact state, with its values and its sequence.
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
-import { defineEntity, Ekman, fileStore, stay, transitionTo } from "ekman";
+import {
+  defaultLogDir,
+  defineEntity,
+  Ekman,
+  fileStore,
+  stay,
+  transitionTo,
+} from "ekman";
 
 type State = "pending" | "deploying" | "live" | "failed";
 interface Values extends Record<string, unknown> {
@@ -38,7 +44,11 @@ const deployments = defineEntity("deployments", {
   },
 });
 
-const dir = mkdtempSync(join(tmpdir(), "ekman-recovery-"));
+// A named directory rather than a temporary one, cleared on the way in rather than out, so
+// the log this demo wrote is still there to read when it finishes. Its own subdirectory, so
+// clearing it can never reach anything another demo or the example app put there.
+const dir = join(defaultLogDir(), "demos", "recovery");
+rmSync(dir, { recursive: true, force: true });
 const keys = ["alpha", "bravo", "charlie"];
 
 async function main(): Promise<void> {
@@ -129,9 +139,7 @@ function describe(event: { type: string; seq: number }): string {
   return `${event.type}  seq=${event.seq}`;
 }
 
-main()
-  .catch((error: unknown) => {
-    console.error(error);
-    process.exitCode = 1;
-  })
-  .finally(() => rmSync(dir, { recursive: true, force: true }));
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});

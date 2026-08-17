@@ -17,11 +17,11 @@
  * still sitting in.
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import type { EkmanEvent } from "ekman";
 import {
+  defaultLogDir,
   defineEntity,
   Ekman,
   fileStore,
@@ -30,9 +30,14 @@ import {
   transitionTo,
 } from "ekman";
 
-const dir = mkdtempSync(join(tmpdir(), "ekman-unknown-"));
+// A named directory rather than a temporary one, cleared on the way in rather than out, so
+// the log this demo wrote is still there to read when it finishes. Its own subdirectory, so
+// clearing it can never reach anything another demo or the example app put there.
+const dir = join(defaultLogDir(), "demos", "unknown");
+rmSync(dir, { recursive: true, force: true });
 
 async function main(): Promise<void> {
+  console.log(`store: ${dir}\n`);
   await undeclaredTrigger();
   await theStateThatGotRenamed();
 
@@ -233,9 +238,7 @@ function banner(title: string): void {
   console.log(`\n${"=".repeat(78)}\n${title}\n${"=".repeat(78)}\n`);
 }
 
-main()
-  .catch((error: unknown) => {
-    console.error(error);
-    process.exitCode = 1;
-  })
-  .finally(() => rmSync(dir, { recursive: true, force: true }));
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});

@@ -131,13 +131,17 @@ Everything is environment-driven, with defaults in `src/lib/config.ts`.
 | Variable | Default | What it does |
 |---|---|---|
 | `PORT` | `3000` | HTTP port |
-| `DATA_DIR` | `examples/deploy-service/data` | Where the transition log lives. Gitignored; delete it to start clean |
+| `DATA_DIR` | `.ekman/logs/deploy-service` | Where the transition log lives. Gitignored; delete it to start clean |
 | `MEMORY_BYTES` | `262144` | Resident memory budget. Deliberately small, so eviction is observable |
 | `INBOX_CAPACITY` | `32` | Triggers that may wait behind the one being handled, per deployment |
 | `STUCK_AFTER_MS` | `300000` | How long a deployment may sit in `deploying` before it is escalated |
 | `SWEEP_MS` | `1000` | How often time bounds are checked |
 | `DEPLOY_MAX_ATTEMPTS` | `4` | Attempts for the state that calls the deploy API |
 | `DEPLOY_TIMEOUT_MS` | `5000` | Per-attempt timeout for that state |
+
+`.ekman` is resolved from the nearest `package.json` above the working directory, so the
+service finds the same state whether you start it from the repository root or from
+`examples/deploy-service`.
 
 Set `STUCK_AFTER_MS=2000` and leave a deployment in `deploying` to watch the escalation
 arrive as a trigger and an incident open behind it.
