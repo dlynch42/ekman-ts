@@ -21,9 +21,8 @@
  * The clock is injected, so five minutes takes no time at all.
  */
 
-import type { EkmanEvent } from "ekman";
 import { defineEntity, Ekman, stay, transitionTo } from "ekman";
-import { banner, check } from "./lib";
+import { banner, check, row, stream } from "./lib";
 
 const SECOND = 1000;
 const MINUTE = 60 * SECOND;
@@ -86,7 +85,16 @@ const deployments = defineEntity("deployments", {
   },
 });
 
-const HEALTHY = ["blue", "green", "teal", "amber", "coral"];
+/**
+ * A fleet, not an anecdote.
+ *
+ * The healthy ones exist so the query has something to *not* match, and so the sweep has
+ * something to walk past. Both are the part that matters operationally: an answer is only
+ * useful if it excludes things, and a constraint is only affordable if watching one state
+ * does not cost every instance in the runtime.
+ */
+const HEALTHY = Array.from({ length: 300 }, (_, i) => `ok-${i}`);
+const WEDGED = 40;
 
 async function main(): Promise<void> {
   let escalations = 0;
@@ -97,35 +105,40 @@ async function main(): Promise<void> {
     telemetry: {
       "constraint.escalated": (event) => {
         escalations += 1;
-        console.log(
-          `    telemetry  constraint.escalated  ${event.key}  stuck ${event.elapsedMs / MINUTE}m  asking for ${event.escalateTo}  delivered=${event.delivered}`
-        );
+        // The first few, so the shape of the event is on screen, then a count. Forty
+        // identical lines would say nothing the summary does not.
+        if (escalations <= 3) {
+          console.log(
+            `    constraint.escalated  ${event.key}  stuck ${event.elapsedMs / MINUTE}m  ` +
+              `asking for ${event.escalateTo}  delivered=${event.delivered}`
+          );
+        }
       },
     },
   });
 
   const handle = ekman.entities.deployments;
 
-  // Three that will wedge, staggered a minute apart so they have different ages.
-  await handle.send("wedged-1", {
-    type: "start",
-    region: "us-west-2",
-    onEscalation: "give-up",
-  });
-  clock += MINUTE;
-  await handle.send("wedged-2", {
-    type: "start",
-    region: "us-east-1",
-    onEscalation: "give-up",
-  });
-  clock += MINUTE;
-  await handle.send("wedged-3", {
-    type: "start",
-    region: "eu-west-1",
-    onEscalation: "keep-waiting",
-  });
+  // The ones that will wedge, staggered a minute apart so they have different ages. Every
+  // fourth one will refuse the escalation when it comes, which is the interesting case.
+  const wedged = Array.from({ length: WEDGED }, (_, i) => `wedged-${i}`);
+  for (const [i, name] of wedged.entries()) {
+    // Advanced before rather than after, so the youngest is zero minutes old when the loop
+    // ends and the five minutes below put it exactly on the bound.
+    if (i > 0) {
+      clock += MINUTE;
+    }
+    // biome-ignore lint/performance/noAwaitInLoops: staggered on purpose, so each one has its own age
+    await handle.send(name, {
+      type: "start",
+      region: "us-west-2",
+      onEscalation: i % 4 === 3 ? "keep-waiting" : "give-up",
+    });
+  }
+  const waiting = wedged.filter((_, i) => i % 4 === 3);
 
-  // Five that behave. They pass through `deploying` and out the other side.
+  // The fleet that behaves. They pass through `deploying` and out the other side, and the
+  // query below has to leave every one of them alone.
   for (const name of HEALTHY) {
     // biome-ignore lint/performance/noAwaitInLoops: sequential so each one's timestamps are attributable
     await handle.send(name, {
@@ -141,31 +154,54 @@ async function main(): Promise<void> {
 
   banner("1. Ask the question");
 
+  row("instances", HEALTHY.length + wedged.length);
+  row("in deploying", wedged.length, "the rest went live");
+  console.log("");
+
   const stuck = await handle.query({ state: "deploying", olderThan: "5m" });
   console.log('  query({ state: "deploying", olderThan: "5m" })\n');
-  for (const match of stuck.instances) {
+  for (const match of stuck.instances.slice(0, 5)) {
     console.log(
       `    ${match.key.padEnd(24)} ${match.state.padEnd(10)} stuck ${match.ageMs / MINUTE}m`
     );
   }
-  console.log(
-    `\n  complete: ${stuck.complete}  reasons: [${stuck.reasons.join(", ")}]  sources: [${stuck.sources.join(", ")}]`
+  console.log(`    ... ${stuck.instances.length - 5} more, youngest last`);
+
+  console.log("");
+  row(
+    "matched",
+    stuck.instances.length,
+    `of ${HEALTHY.length + wedged.length} instances`
   );
+  row("oldest", `${(stuck.instances[0]?.ageMs ?? 0) / MINUTE}m`);
+  row(
+    "youngest",
+    `${(stuck.instances.at(-1)?.ageMs ?? 0) / MINUTE}m`,
+    "exactly on the bound"
+  );
+  row(
+    "complete",
+    String(stuck.complete),
+    `reasons: [${stuck.reasons.join(", ")}]`
+  );
+
   console.log(
-    "  Every instance here is resident, so that answer happens to be the whole one. The\n" +
+    "\n  Every instance here is resident, so that answer happens to be the whole one. The\n" +
       "  runtime still will not claim it is, because with no durable store it cannot tell\n" +
       "  this case from having lost something before it started."
   );
 
   check(
-    keysOf(stuck) ===
-      "deployments:wedged-1,deployments:wedged-2,deployments:wedged-3",
-    `expected the three wedged deployments oldest-first, got ${keysOf(stuck)}`
+    stuck.instances.length === wedged.length,
+    `expected all ${wedged.length} wedged deployments, got ${stuck.instances.length}`
   );
   check(
-    stuck.instances[0]?.ageMs === 7 * MINUTE &&
-      stuck.instances[2]?.ageMs === BOUND,
-    "the ages are not what the clock says they should be"
+    keysOf(stuck) === wedged.map((name) => `deployments:${name}`).join(","),
+    "the answer is not oldest-in-state first"
+  );
+  check(
+    stuck.instances.at(-1)?.ageMs === BOUND,
+    "the youngest wedged one is not sitting exactly on the bound"
   );
 
   // The bound is inclusive, and one millisecond either side of it is the whole difference
@@ -178,83 +214,84 @@ async function main(): Promise<void> {
     state: "deploying",
     olderThan: BOUND + 1,
   });
-  console.log(
-    `\n  olderThan ${BOUND}ms exactly -> ${onTheBound.instances.length} matches` +
-      `\n  olderThan ${BOUND + 1}ms       -> ${justPast.instances.length} matches, because wedged-3 is exactly on the bound`
+  console.log("");
+  row(
+    `olderThan ${BOUND}ms`,
+    onTheBound.instances.length,
+    "the bound is inclusive"
+  );
+  row(
+    `olderThan ${BOUND + 1}ms`,
+    justPast.instances.length,
+    "one fewer: the youngest is exactly on it"
   );
   check(
-    onTheBound.instances.length === 3 && justPast.instances.length === 2,
+    onTheBound.instances.length === wedged.length &&
+      justPast.instances.length === wedged.length - 1,
     "the bound is not inclusive the way the query documents it"
   );
 
   banner("2. Let the constraint ask it, continuously");
 
-  console.log("  sweep 1:\n");
   const firstSweep = await ekman.sweep();
-  console.log(`\n  ${firstSweep} instances escalated\n`);
+  console.log("");
+  row("instances swept", HEALTHY.length + wedged.length, "one pass, every key");
+  row("escalated", firstSweep, "only those past the bound");
+  row("gave up", wedged.length - waiting.length, "handler agreed and moved");
+  row("kept waiting", waiting.length, "handler declined, still deploying");
 
-  for (const name of ["wedged-1", "wedged-2", "wedged-3"]) {
-    const snapshot = handle.inspect(name);
-    console.log(
-      `    ${name}  ${snapshot?.state.padEnd(10)} ${snapshot?.values.note}`
-    );
-  }
-
-  check(escalations === 3, `expected 3 escalations, saw ${escalations}`);
   check(
-    handle.inspect("wedged-1")?.state === "failed" &&
-      handle.inspect("wedged-2")?.state === "failed",
+    escalations === wedged.length,
+    `expected ${wedged.length} escalations, saw ${escalations}`
+  );
+  check(
+    wedged
+      .filter((name) => !waiting.includes(name))
+      .every((name) => handle.inspect(name)?.state === "failed"),
     "the deployments that chose to give up did not move"
   );
   check(
-    handle.inspect("wedged-3")?.state === "deploying",
-    "the deployment that chose to keep waiting was moved anyway"
+    waiting.every((name) => handle.inspect(name)?.state === "deploying"),
+    "a deployment that chose to keep waiting was moved anyway"
   );
 
   console.log(
-    "\n  Two handlers agreed with the escalation and one did not, and the one that did\n" +
-      "  not is still exactly where it was. The runtime never wrote a state: it asked."
+    `\n  ${wedged.length - waiting.length} handlers agreed with the escalation and ${waiting.length} did not, and every one that\n` +
+      "  did not is still exactly where it was. The runtime never wrote a state: it asked."
   );
 
   // A constraint that re-fired every pass would turn one stuck instance into an alert
   // storm. It fires once per entry into the state, and `stay` is not a re-entry.
-  console.log("\n  sweep 2 (nothing should fire):");
   const secondSweep = await ekman.sweep();
-  console.log(`    ${secondSweep} instances escalated`);
+  console.log("");
+  row("a second sweep", secondSweep, "fires once per entry, not per pass");
   check(
-    secondSweep === 0 && escalations === 3,
+    secondSweep === 0 && escalations === wedged.length,
     `the constraint fired again on a second sweep (${escalations} total)`
   );
 
   banner("3. Ask again");
 
   const after = await handle.query({ state: "deploying", olderThan: "5m" });
-  console.log(
-    `  still stuck: ${after.instances.map((m) => m.key).join(", ") || "(none)"}`
-  );
-  check(
-    keysOf(after) === "deployments:wedged-3",
-    `expected only the one that chose to wait, got ${keysOf(after)}`
-  );
-
   const healthy = await handle.query({ state: "live" });
+  row("still stuck", after.instances.length, "the ones that chose to wait");
+  row("live", healthy.instances.length, "never swept, never escalated");
+
+  check(
+    keysOf(after) === waiting.map((name) => `deployments:${name}`).join(","),
+    `expected only the ones that chose to wait, got ${keysOf(after)}`
+  );
   check(
     healthy.instances.length === HEALTHY.length,
     `the healthy deployments were disturbed: ${healthy.instances.length} of ${HEALTHY.length} still live`
   );
-  console.log(
-    `  untouched:   ${HEALTHY.length} deployments still live, never swept, never escalated`
-  );
 
   // The escalation is in the same per-key stream as the transitions, so "what happened to
   // this one" needs no second system.
-  const { events } = await handle.history("wedged-1");
-  console.log("\n  wedged-1's stream:");
-  for (const event of events) {
-    console.log(
-      `    ${event.type.padEnd(11)} ${describe(event)}  (seq ${event.seq})`
-    );
-  }
+  const gaveUp = wedged.find((name) => !waiting.includes(name)) as string;
+  const { events } = await handle.history(gaveUp);
+  console.log("\n  one that gave up, its whole stream:\n");
+  stream(`deployments:${gaveUp}`, events);
 
   console.log(
     `\n${"=".repeat(78)}\n` +
@@ -270,17 +307,6 @@ async function main(): Promise<void> {
 /** Match keys in result order, as one string, so an assertion failure is readable. */
 function keysOf(result: { instances: readonly { key: string }[] }): string {
   return result.instances.map((match) => match.key).join(",");
-}
-
-/** One readable line per stream event, whatever kind it is. */
-function describe(event: EkmanEvent): string {
-  if (event.type === "transition") {
-    return `${event.from ?? "(new)"} -> ${event.to}`;
-  }
-  if (event.type === "violation") {
-    return `${event.constraint.kind}:${event.constraint.name}  ${event.reason}`;
-  }
-  return event.type;
 }
 
 main().catch((error: unknown) => {

@@ -19,7 +19,6 @@
 
 import { rmSync } from "node:fs";
 import { join } from "node:path";
-import type { EkmanEvent } from "ekman";
 import {
   defaultLogDir,
   defineEntity,
@@ -28,7 +27,7 @@ import {
   stay,
   transitionTo,
 } from "ekman";
-import { banner, check } from "./lib";
+import { banner, check, stream } from "./lib";
 
 // A named directory rather than a temporary one, cleared on the way in rather than out, so
 // the log this demo wrote is still there to read when it finishes. Its own subdirectory, so
@@ -102,10 +101,8 @@ async function undeclaredTrigger(): Promise<void> {
   );
 
   const { events } = await handle.history("a1");
-  console.log("\n  and its stream:");
-  for (const event of events) {
-    console.log(`    ${describe(event)}`);
-  }
+  console.log("\n  and its stream:\n");
+  stream("orders:a1", events);
 
   const rejected = events.filter((event) => event.type === "rejected");
   check(
@@ -188,10 +185,8 @@ async function theStateThatGotRenamed(): Promise<void> {
   );
 
   const { events } = await handle.history("t1");
-  console.log("\n  t1's stream, across both deploys:");
-  for (const event of events) {
-    console.log(`    ${describe(event)}`);
-  }
+  console.log("\n  t1's stream, across both deploys:\n");
+  stream("tickets:t1", events);
 
   check(
     events.some((event) => event.type === "rejected"),
@@ -206,17 +201,6 @@ async function theStateThatGotRenamed(): Promise<void> {
   );
 
   await after.close();
-}
-
-/** One readable line per stream event. */
-function describe(event: EkmanEvent): string {
-  if (event.type === "transition") {
-    return `transition  ${event.from ?? "(new)"} -> ${event.to}  (seq ${event.seq})`;
-  }
-  if (event.type === "rejected") {
-    return `REJECTED    ${event.code}  trigger "${event.cause.type}"  (seq ${event.seq})`;
-  }
-  return `${event.type}  (seq ${event.seq})`;
 }
 
 async function settled(promise: Promise<unknown>): Promise<string> {

@@ -14,6 +14,7 @@
 
 import type { Handler } from "ekman";
 import { defineEntity, Ekman, stay, transitionTo } from "ekman";
+import { stream } from "./lib";
 
 type State = "pending" | "paid" | "shipped" | "delivered" | "cancelled";
 
@@ -143,19 +144,12 @@ async function run(
   console.log(`\n  final state: ${final?.state}  (seq ${final?.seq})`);
 
   const { events } = await ekman.entities.orders.history("a1");
-  const violations = events.filter((event) => event.type === "violation");
 
-  if (violations.length > 0) {
-    console.log(`\n  ${violations.length} illegal moves recorded:`);
-    for (const violation of violations) {
-      if (violation.type === "violation") {
-        const { from, to } = violation.attempted ?? { from: "?", to: "?" };
-        console.log(
-          `    ${violation.policy.padEnd(7)} ${from} -> ${to}  (seq ${violation.seq})`
-        );
-      }
-    }
-  }
+  // The whole stream, not just the violations: what makes this legible is that the
+  // refused moves sit in the same ordered record as the ones that landed, at the sequence
+  // they were refused at.
+  console.log("");
+  stream("orders:a1", events);
 
   console.log(`\n  ${moral}`);
   await ekman.close();

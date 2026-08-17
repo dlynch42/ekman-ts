@@ -20,9 +20,10 @@ import { rmSync } from "node:fs";
 import { join } from "node:path";
 import type { AuditSink, EkmanEvent } from "ekman";
 import { defaultLogDir, defineEntity, Ekman, transitionTo } from "ekman";
-import { banner, check, delay } from "./lib";
+import { banner, check, delay, row, stream } from "./lib";
 
-const COMMITS = 5;
+/** Enough commits that the latency claim is a distribution rather than an anecdote. */
+const COMMITS = 200;
 const ARCHIVE_MS = 250;
 
 const ledger = defineEntity("ledger", {
@@ -101,21 +102,21 @@ async function main(): Promise<void> {
   for (let i = 0; i < COMMITS; i += 1) {
     const at = Date.now();
     // biome-ignore lint/performance/noAwaitInLoops: the point is what each individual commit costs, which a batch would hide
-    const result = await ekman.entities.ledger.send("a1", { type: "entry" });
-    const took = Date.now() - at;
-    latencies.push(took);
-    console.log(
-      `  commit ${i + 1}  seq=${result.seq}  entries=${result.values.entries}  ${took}ms`
-    );
+    await ekman.entities.ledger.send("a1", { type: "entry" });
+    latencies.push(Date.now() - at);
   }
 
   const committedBy = Date.now();
   const slowest = Math.max(...latencies);
+  const sorted = [...latencies].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)] ?? 0;
 
-  console.log(
-    `\n  ${COMMITS} commits in ${committedBy - started}ms, slowest ${slowest}ms\n` +
-      `  the slow sink takes ${ARCHIVE_MS}ms per event and had delivered ${archived.length} of them by now`
-  );
+  row("commits", COMMITS, "each one awaited individually");
+  row("total", `${committedBy - started}ms`);
+  row("median commit", `${median}ms`);
+  row("slowest commit", `${slowest}ms`);
+  row("the slow sink", `${ARCHIVE_MS}ms`, "per event, and it is one of three");
+  row("its deliveries so far", archived.length, "out of every commit above");
 
   // Every commit finished before the slow sink completed even one delivery. A commit path
   // that waited on its sinks could not produce this ordering.
@@ -134,13 +135,17 @@ async function main(): Promise<void> {
   const events = COMMITS + 1;
 
   await waitFor(() => (failures.get("warehouse") ?? 0) >= events, 2000);
-  console.log(
-    `  warehouse   ${failures.get("warehouse") ?? 0} failures reported, after 3 attempts each`
+  row(
+    "warehouse (throws)",
+    failures.get("warehouse") ?? 0,
+    "failures reported, after 3 attempts each"
   );
-  console.log(
-    `  kafka       ${handedToKafka.length} events accepted, 0 completed, 0 failures reported`
+  row(
+    "kafka (hangs)",
+    handedToKafka.length,
+    "accepted, 0 completed, 0 reported failed"
   );
-  console.log(`  s3-archive  ${archived.length} delivered so far`);
+  row("s3-archive (slow)", archived.length, "delivered so far");
 
   check(
     failures.get("warehouse") === events,
@@ -166,18 +171,17 @@ async function main(): Promise<void> {
 
   banner("And the thing that was actually being audited");
 
-  const {
-    events: stream,
-    complete,
-    sources,
-  } = await ekman.entities.ledger.history("a1");
-  console.log(
-    `  ${stream.length} events on disk, complete=${complete}, from [${sources.join(", ")}]`
-  );
+  const { events: committed, complete } =
+    await ekman.entities.ledger.history("a1");
+  row("events on disk", committed.length);
+  row("complete", String(complete));
+  console.log("");
+  // The first few, because two hundred identical increments say it once.
+  stream("ledger:a1", committed, { limit: 4 });
 
   check(
-    stream.length === events,
-    `the stream lost events: ${stream.length} of ${events}`
+    committed.length === events,
+    `the stream lost events: ${committed.length} of ${events}`
   );
   check(complete, "the history is not complete");
 

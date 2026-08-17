@@ -25,7 +25,7 @@ import {
   replay,
   stay,
 } from "ekman";
-import { banner, check, row } from "./lib";
+import { banner, caught, check, row, stream } from "./lib";
 
 /** Enough keys and rounds that the collisions are a rate rather than an anecdote. */
 const KEYS = 25;
@@ -144,6 +144,15 @@ async function whatTheRefusalIsProtecting(): Promise<void> {
   const survived = await surviving(reader);
 
   report(run, survived);
+
+  // One key's record, which is where the damage is legible rather than statistical: the
+  // sequence stops being a sequence.
+  const damaged = await reader.read(`counters:${keys[0]}`);
+  console.log("");
+  stream(`counters:${keys[0]}`, damaged, { limit: 6 });
+  console.log(
+    "    ^ two events claiming the same sequence, and replay keeps the first"
+  );
 
   check(
     run.refused === 0,
@@ -323,15 +332,6 @@ function report(
     survived.duplicated,
     "two events claiming one seq"
   );
-}
-
-/** Whatever a call threw, or its value if it did not. */
-function caught(run: () => unknown): unknown {
-  try {
-    return run();
-  } catch (error) {
-    return error;
-  }
 }
 
 main().catch((error: unknown) => {

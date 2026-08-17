@@ -28,7 +28,7 @@ import {
   isEkmanError,
   transitionTo,
 } from "ekman";
-import { banner, check, delay } from "./lib";
+import { banner, check, delay, stream } from "./lib";
 
 interface Values extends Record<string, unknown> {
   amount: number;
@@ -142,6 +142,15 @@ async function fenced(): Promise<void> {
   );
   console.log(
     `  the zombie did see ctx.signal.aborted === ${sawAbort}, it just looked too late`
+  );
+
+  // The record is the proof. A commit the fence refused is not in it, so the stream shows
+  // the instance exactly where it started rather than somewhere a zombie put it.
+  const { events } = await ekman.entities.payments.history("p1");
+  console.log("");
+  stream("payments:p1", events);
+  console.log(
+    "    ^ nothing from the abandoned attempt, because its commit never happened"
   );
 
   check(outcome === "HANDLER_TIMEOUT", `expected a timeout, got ${outcome}`);
