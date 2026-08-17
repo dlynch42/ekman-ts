@@ -20,7 +20,7 @@ import type {
 } from "./query";
 import { mergeRestores, parseDuration } from "./query";
 import type { ResolvedStack } from "./stack";
-import { resolveStack } from "./stack";
+import { assertCoordination, resolveStack } from "./stack";
 import type { StorageSweep, Store } from "./store";
 import { EMPTY_SEQ } from "./store";
 import type { TelemetryEvent } from "./telemetry";
@@ -102,6 +102,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     // satisfy fails at startup rather than being discovered under load. A runtime that
     // cannot keep its promises should refuse to start rather than quietly keep fewer.
     this.#stack = resolveStack(config.store);
+    assertCoordination(this.#stack, config.coordination);
     this.#memory = resolveMemoryConfig(config.memory, {
       hasStore: this.#stack.authority !== undefined,
     });

@@ -1,7 +1,7 @@
 import type { RuntimeDeps } from "./config";
 import type { Violation } from "./constraints";
 import type { ErrorCode } from "./errors";
-import { EkmanError } from "./errors";
+import { EkmanError, isEkmanError } from "./errors";
 import type { EkmanEvent, EventCause, TransitionEvent } from "./events";
 import {
   rejectedEvent,
@@ -56,7 +56,29 @@ export class InstanceRecord<
    * turn instead, which is inside the serializer and so cannot reorder anything.
    */
   #pending: PendingInit<S, V> | undefined;
+  /**
+   * Whether another writer has moved this key underneath us.
+   *
+   * Set when a conditional append is refused, cleared by the reload that answers it. This
+   * is the only thing in the record that can be false while the resident view is wrong,
+   * which is why it is read before dispatch rather than trusted.
+   *
+   * Declared here and assigned in the constructor rather than initialized inline, for the
+   * same reason `Inbox.#running` is: an inline `= false` narrows the field to the literal
+   * `false`, after which the guard that reads it looks statically dead.
+   */
+  #stale: boolean;
   #hydration: Promise<void> | undefined;
+
+  /**
+   * What this entity starts as, kept so a record can go back to it.
+   *
+   * Needed only by the reload that finds a key gone: the record has to become what a
+   * brand-new one would be, and by then its own state and values are whatever it last
+   * committed rather than what it began with.
+   */
+  readonly #initial: S;
+  readonly #initialValues: Readonly<V>;
 
   /**
    * Tail of this key's store-write chain.
@@ -95,11 +117,14 @@ export class InstanceRecord<
       onIdle: args.onIdle ?? noop,
     });
 
+    this.#initial = args.initial;
+    this.#initialValues = args.initialValues;
     this.#state = args.initial;
     this.#values = args.initialValues;
     this.#seq = 0;
     this.#enteredAt = args.at;
     this.#bytes = this.#measure();
+    this.#stale = false;
 
     if (args.deps.stack.authority === undefined) {
       // No store, so there is nothing to reconcile with and initialization is settled now.
@@ -180,9 +205,21 @@ export class InstanceRecord<
     const pending = this.#pending;
     const { authority } = this.#deps.stack;
 
-    // Both conditions are answered here rather than inside the work, so `#hydrate` has no
-    // branch that only exists to satisfy the compiler and can never run.
-    if (pending === undefined || authority === undefined) {
+    if (authority === undefined) {
+      return Promise.resolve();
+    }
+
+    // A key another writer moved has to be re-read before anything dispatches against it,
+    // or the next handler decides on values that are already history. Checked before the
+    // pending branch because a record can only be one of the two, and staleness is the
+    // one that recurs.
+    if (this.#stale) {
+      return this.#reload(authority);
+    }
+
+    // Answered here rather than inside the work, so `#hydrate` has no branch that only
+    // exists to satisfy the compiler and can never run.
+    if (pending === undefined) {
       return Promise.resolve();
     }
 
@@ -197,9 +234,12 @@ export class InstanceRecord<
    * That is not a micro-optimization: an extra turn of the event loop before the handler
    * starts changes how telemetry interleaves with `send()` calls, and a memory-only
    * runtime has to behave exactly as it did before stores existed.
+   *
+   * Two reasons to reconcile, not one: never loaded, and loaded but overtaken. They are the
+   * same answer to the caller, which is why this is one question rather than two.
    */
   get needsHydration(): boolean {
-    return this.#pending !== undefined;
+    return this.#pending !== undefined || this.#stale;
   }
 
   /**
@@ -291,7 +331,19 @@ export class InstanceRecord<
       values: next.values,
     });
 
-    await this.#persist(event, this.#seq);
+    try {
+      await this.#persist(event, this.#seq);
+    } catch (error) {
+      // A conflict means somebody else advanced this key, so everything resident about it
+      // is now a guess. Marked stale rather than reloaded here: the reload has to happen
+      // before the next dispatch, which is where every other reconciliation happens, and
+      // doing it inside a failing commit would reload on behalf of an attempt that is
+      // already over. Nothing was written, so there is nothing to undo.
+      if (isEkmanError(error) && error.code === "STORE_CONFLICT") {
+        this.#stale = true;
+      }
+      throw error;
+    }
 
     // One synchronous block: state, values, sequence and event land together.
     const moved = next.state !== this.#state;
@@ -371,6 +423,74 @@ export class InstanceRecord<
     // wait on a disk write to be told so. Ordering against the next commit is preserved by
     // the write chain rather than by the caller.
     this.#persist(event, this.#seq).catch(this.#deps.onUnhandled);
+  }
+
+  /**
+   * Re-read a key another writer moved, and adopt what the store now holds.
+   *
+   * The half of multi-runtime conflict handling that does not need a store capable of
+   * multi-writer appends: a conflict is already surfaced to the caller, and this is what
+   * stops the *next* trigger inheriting the stale sequence and conflicting forever.
+   *
+   * Deliberately not a merge. There is nothing to merge: the refused commit was never
+   * written, and the values it was built from are superseded by whatever the other writer
+   * committed. The handler for the next trigger gets the winner's state, which is the same
+   * thing that would have happened had the two arrived in the other order.
+   *
+   * A key another writer deleted comes back as gone rather than as its old self, so it
+   * re-initializes on the next trigger like any other key nothing holds.
+   */
+  async #reload(authority: Store): Promise<void> {
+    const loaded = await authority.load(this.key);
+    const current =
+      loaded === undefined
+        ? undefined
+        : (replay(loaded) as ReplayedState<S, V> | undefined);
+
+    this.#stale = false;
+
+    if (loaded === undefined || current === undefined) {
+      // Gone from under us, so this record has to become what a brand-new one would be
+      // rather than keeping a state the store has no record of. Initialization is what the
+      // next trigger is owed, and it has to land before that trigger dispatches, which is
+      // why the hydration runs here rather than being left for a later turn that the
+      // caller has already passed.
+      this.#state = this.#initial;
+      this.#values = this.#initialValues;
+      this.#seq = 0;
+      this.#bytes = this.#measure();
+
+      const pending: PendingInit<S, V> = {
+        initial: this.#initial,
+        initialValues: this.#initialValues,
+        at: this.#enteredAt,
+        cause: RELOAD_CAUSE,
+      };
+      this.#pending = pending;
+      this.#hydration = this.#hydrate(pending, authority);
+      await this.#hydration;
+      return;
+    }
+
+    this.#state = current.state;
+    this.#values = current.values;
+    this.#seq = current.seq;
+    this.#enteredAt = current.enteredAt;
+    this.#bytes = this.#measure();
+
+    // Recorded as a restore, because that is what it is: this runtime's view of the key
+    // now begins somewhere other than where it thought. Without it, a stream would show a
+    // handler deciding against values no earlier event in it accounts for.
+    this.#events.push(
+      restoredEvent({
+        key: this.key,
+        seq: current.seq,
+        at: current.enteredAt,
+        cause: RELOAD_CAUSE,
+        from: loaded.snapshot === undefined ? "replay" : "snapshot",
+        replayed: loaded.events.length,
+      })
+    );
   }
 
   async #hydrate(pending: PendingInit<S, V>, authority: Store): Promise<void> {
@@ -462,6 +582,17 @@ interface PendingInit<S extends string, V extends Values> {
   readonly at: number;
   readonly cause: EventCause;
 }
+
+/**
+ * What a reload is attributed to.
+ *
+ * A restore has a cause like any other event, and the honest one here is the runtime
+ * noticing it was behind, not whichever trigger happened to be next in the inbox.
+ */
+const RELOAD_CAUSE: EventCause = Object.freeze({
+  type: "reload",
+  id: "store-conflict",
+});
 
 function ignore(): void {
   // Deliberately empty: this exists to keep the write chain from rejecting.

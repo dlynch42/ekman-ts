@@ -137,6 +137,70 @@ export const EMPTY_STACK: ResolvedStack = Object.freeze({
   durable: false,
 });
 
+/**
+ * How many runtimes are expected to write to this store.
+ *
+ * `single` is the default and is what one embedded runtime owning its own storage means.
+ * `multi` says other processes write the same keys, which is a promise only the store can
+ * keep: the conditional append has to be atomic *between processes*, not just within one. A
+ * store that cannot say yes to that makes this configuration a refusal rather than a slower
+ * path, because the failure it would otherwise produce is two runtimes both believing they
+ * hold a key, which no amount of care in the runtime can detect afterwards.
+ */
+export type Coordination = "single" | "multi";
+
+const COORDINATIONS: readonly Coordination[] = ["single", "multi"];
+
+/**
+ * Refuse a coordination the configured stores cannot honour.
+ *
+ * The declaration is the safety mechanism. An adapter says whether its conditional append
+ * holds across processes, and this is the one place that answer is acted on: without it the
+ * capability would be documentation, and asking for multi-runtime operation on a store that
+ * cannot provide it would appear to work right up until two runtimes disagreed.
+ */
+export function assertCoordination(
+  stack: ResolvedStack,
+  coordination: Coordination | undefined
+): void {
+  if (coordination === undefined) {
+    return;
+  }
+
+  if (!COORDINATIONS.includes(coordination)) {
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      `coordination ${JSON.stringify(coordination)} is not recognized. ` +
+        `Expected one of: ${COORDINATIONS.join(", ")}.`
+    );
+  }
+
+  if (coordination === "single") {
+    return;
+  }
+
+  const { authority } = stack;
+  if (authority === undefined) {
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      'coordination "multi" means other processes write these keys, but no store ' +
+        "is configured, so there is nothing for them to write to or to arbitrate between " +
+        "them."
+    );
+  }
+
+  if (!authority.capabilities.multiWriter) {
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      `coordination "multi" needs the commit authority to detect a concurrent ` +
+        `writer, and store layer "${authority.name}" declares it cannot: its conditional ` +
+        "append holds within one process and not across two. Two runtimes on it would " +
+        "both believe their appends were conditional. Use a store that declares " +
+        'multiWriter, or leave coordination at "single".'
+    );
+  }
+}
+
 export function resolveStack(
   store: StoreLayer | readonly StoreLayer[] | undefined
 ): ResolvedStack {

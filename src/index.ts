@@ -78,6 +78,7 @@ export type {
 } from "./results";
 export { fail, stay, transitionTo } from "./results";
 export type {
+  Coordination,
   ResolvedStack,
   StoreKind,
   StoreLayer,

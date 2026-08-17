@@ -5,7 +5,7 @@ import type { MemoryConfig } from "./memory";
 import type { ExecutionPolicy } from "./policy";
 import type { HistoryResult, QueryCriteria, QueryResult } from "./query";
 import type { HandlerResult } from "./results";
-import type { StoreLayer } from "./stack";
+import type { Coordination, StoreLayer } from "./stack";
 // Type-only, and so erased: `telemetry.ts` names `OverflowPolicy` from here, and this
 // names `TelemetrySink` from there. Neither import survives compilation, so the cycle
 // exists only for the typechecker, which resolves it fine.
@@ -372,6 +372,13 @@ export interface EkmanConfig<
   readonly temporal?: TemporalConfig;
   /** How often, if ever, stored bytes are reclaimed automatically. */
   readonly storage?: StorageConfig;
+  /**
+   * How many runtimes write these keys. Defaults to `single`.
+   *
+   * Setting `multi` on a store whose conditional append does not hold across
+   * processes is refused at startup rather than accepted and quietly under-delivered.
+   */
+  readonly coordination?: Coordination;
   /**
    * Where commits go. Omitted means memory only, which is a valid documented mode rather
    * than a degraded one: nothing survives the process, and nothing pretends to.

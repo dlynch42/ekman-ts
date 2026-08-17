@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { EkmanError } from "../src/errors";
 import { isTransitionEvent } from "../src/events";
 import { InstanceRecord, sealValues } from "../src/instance";
+import { memoryStore } from "../src/stores/memory";
 import { testDeps } from "./deps";
 
 const deps = testDeps();
@@ -53,6 +54,28 @@ describe("InstanceRecord", () => {
     await instance.ready();
     await instance.ready();
 
+    expect(instance.events).toHaveLength(1);
+  });
+
+  it("stays free to call once it has reconciled with a store", async () => {
+    const stored = testDeps({ store: memoryStore() });
+    const instance = new InstanceRecord<string, Record<string, unknown>>({
+      key: "orders:1",
+      entity: "orders",
+      initial: "pending",
+      initialValues: Object.freeze({}),
+      at: 1000,
+      cause: { type: "init", id: "t1" },
+      deps: stored,
+    });
+
+    expect(instance.needsHydration).toBe(true);
+    await instance.ready();
+
+    // "Safe to await from anywhere" has to keep being true after the reconciling is done,
+    // or every caller would need to know which of the two states the record is in.
+    expect(instance.needsHydration).toBe(false);
+    await instance.ready();
     expect(instance.events).toHaveLength(1);
   });
 

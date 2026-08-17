@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { isEkmanError } from "../src/errors";
-import { createStore, resolveStack } from "../src/stack";
+import type { Coordination } from "../src/stack";
+import { assertCoordination, createStore, resolveStack } from "../src/stack";
 import type { Store } from "../src/store";
 import { defaultLogDir, fileStore } from "../src/stores/file";
 import { memoryStore } from "../src/stores/memory";
@@ -12,6 +13,9 @@ const NOT_COMBINABLE = /cannot be combined/;
 const NOT_BUILT = /is not one this runtime builds/;
 const EMPTY_LIST = /empty list/;
 const ABSENCE_OF_A_STORE = /names the absence/;
+const NOT_A_COORDINATION = /is not recognized/;
+const NEEDS_MULTI_WRITER = /declares it cannot/;
+const NOTHING_TO_COORDINATE = /no store is configured/;
 
 const dirs: string[] = [];
 function freshDir(): string {
@@ -206,6 +210,64 @@ describe("stores described rather than constructed", () => {
 
   it("still refuses an empty list, which is a mistake rather than a choice", () => {
     expect(() => resolveStack([])).toThrow(EMPTY_LIST);
+  });
+});
+
+describe("coordination", () => {
+  it("accepts the default, which is one runtime owning its storage", () => {
+    const stack = resolveStack("memory");
+    expect(() => assertCoordination(stack, undefined)).not.toThrow();
+    expect(() => assertCoordination(stack, "single")).not.toThrow();
+  });
+
+  it("refuses a coordination it does not recognize", () => {
+    const stack = resolveStack("memory");
+    expect(() => assertCoordination(stack, "quorum" as Coordination)).toThrow(
+      NOT_A_COORDINATION
+    );
+  });
+
+  it("refuses multi-runtime on a store that cannot detect a second writer", () => {
+    // The declaration is the safety mechanism, and this is the only place it is acted on.
+    // Without this the capability would be documentation, and two runtimes over one
+    // directory would both believe their conditional appends held.
+    const stack = resolveStack(durable());
+    expect(() => assertCoordination(stack, "multi")).toThrow(
+      NEEDS_MULTI_WRITER
+    );
+  });
+
+  it("refuses multi-runtime with nothing to coordinate through", () => {
+    expect(() => assertCoordination(resolveStack("none"), "multi")).toThrow(
+      NOTHING_TO_COORDINATE
+    );
+  });
+
+  it("accepts multi-runtime on a store that declares it can", () => {
+    // No shipped adapter says yes to this yet, which is exactly why the check has to be
+    // written against the declaration rather than against a store this repo happens to
+    // contain: the first adapter that can must not have to change the runtime.
+    const capable: Store = {
+      name: "capable",
+      capabilities: {
+        durability: "durable",
+        conditionalAppend: true,
+        multiWriter: true,
+        scan: { byState: true, olderThan: true },
+        forget: true,
+        compact: false,
+      },
+      append: () => Promise.resolve(),
+      load: () => Promise.resolve(undefined),
+      read: () => Promise.resolve([]),
+      snapshot: () => Promise.resolve(),
+      scan: () =>
+        Promise.resolve({ matches: [], unsupported: [], complete: true }),
+    };
+
+    expect(() =>
+      assertCoordination(resolveStack(capable), "multi")
+    ).not.toThrow();
   });
 });
 

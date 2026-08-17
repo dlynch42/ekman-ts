@@ -284,6 +284,114 @@ describe("reloading", () => {
   });
 });
 
+describe("a second writer", () => {
+  /**
+   * Two runtimes over one memory store, which is the only way to stage a conflict without
+   * an adapter that can genuinely take two processes. The store is shared deliberately: it
+   * stands in for the durable layer both runtimes believe they own.
+   */
+  const twoRuntimes = () => {
+    const shared = memoryStore();
+    return {
+      shared,
+      a: new Ekman({ entities: [orders], store: shared }),
+      b: new Ekman({ entities: [orders], store: shared }),
+    };
+  };
+
+  it("surfaces the conflict rather than overwriting the other writer", async () => {
+    const { a, b } = twoRuntimes();
+    await a.entities.orders.send("1", { type: "poke" });
+    // b loads the key at seq 1 and holds it resident.
+    await b.entities.orders.send("1", { type: "poke" });
+    // a still believes it is at seq 1. It is not: b advanced the key to 2.
+    const conflicted = await a.entities.orders
+      .send("1", { type: "poke" })
+      .catch((error: EkmanError) => error);
+
+    expect((conflicted as EkmanError).code).toBe("STORE_CONFLICT");
+    await a.close();
+    await b.close();
+  });
+
+  it("reloads before the next trigger instead of conflicting forever", async () => {
+    const { a, b } = twoRuntimes();
+    await a.entities.orders.send("1", { type: "poke" });
+    await b.entities.orders.send("1", { type: "poke" });
+    await a.entities.orders.send("1", { type: "poke" }).catch(() => undefined);
+
+    // The whole point. Without a reload the cached sequence stays behind forever and
+    // every later trigger for this key conflicts too, so one collision would take the key
+    // out of service for the lifetime of the process.
+    const recovered = await a.entities.orders.send("1", { type: "poke" });
+
+    expect(recovered.seq).toBe(3);
+    expect(a.entities.orders.inspect("1")).toMatchObject({ seq: 3 });
+    await a.close();
+    await b.close();
+  });
+
+  it("records the reload in the stream, so a jump in the sequence is explicable", async () => {
+    const { a, b } = twoRuntimes();
+    await a.entities.orders.send("1", { type: "poke" });
+    await b.entities.orders.send("1", { type: "poke" });
+    await a.entities.orders.send("1", { type: "poke" }).catch(() => undefined);
+    await a.entities.orders.send("1", { type: "poke" });
+
+    // Without this the stream would show a handler deciding against values no earlier
+    // event in it accounts for.
+    const { events } = await a.entities.orders.history("1");
+    const restored = events.filter((event) => event.type === "restored");
+    expect(restored.at(-1)).toMatchObject({ cause: { type: "reload" } });
+    await a.close();
+    await b.close();
+  });
+
+  it("reloads through a snapshot the other writer left, not only through the log", async () => {
+    const { shared, a, b } = twoRuntimes();
+    await a.entities.orders.send("1", { type: "poke" });
+    await b.entities.orders.send("1", { type: "poke" });
+
+    // The other writer snapshotted, which is what eviction does on a busy runtime. The
+    // reload has to read through it, and say which of the two it came back from.
+    await shared.snapshot("orders:1", {
+      key: "orders:1",
+      entity: "orders",
+      state: "open",
+      values: { n: 1 },
+      seq: 2,
+      at: 2000,
+      enteredAt: 2000,
+    });
+
+    await a.entities.orders.send("1", { type: "poke" }).catch(() => undefined);
+    await a.entities.orders.send("1", { type: "poke" });
+
+    const { events } = await a.entities.orders.history("1");
+    const restored = events.filter((event) => event.type === "restored");
+    expect(restored.at(-1)).toMatchObject({ from: "snapshot" });
+    await a.close();
+    await b.close();
+  });
+
+  it("treats a key the other writer deleted as gone rather than as its old self", async () => {
+    const { shared, a, b } = twoRuntimes();
+    await a.entities.orders.send("1", { type: "poke" });
+    await b.entities.orders.send("1", { type: "poke" });
+
+    // b deletes the key while a still holds it resident at a stale sequence.
+    await shared.forget("orders:1");
+    await a.entities.orders.send("1", { type: "poke" }).catch(() => undefined);
+
+    // Reloading found nothing, so the next trigger initializes rather than resuming a
+    // sequence the store no longer has any record of.
+    const revived = await a.entities.orders.send("1", { type: "poke" });
+    expect(revived.seq).toBe(1);
+    await a.close();
+    await b.close();
+  });
+});
+
 describe("eviction", () => {
   it("never touches an instance with work in flight", async () => {
     const slow = defineEntity("slow", {
