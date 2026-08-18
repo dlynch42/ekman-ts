@@ -35,6 +35,8 @@ export type {
   ViolationPolicy,
 } from "./constraints";
 export { DEFAULT_TEMPORAL_TRIGGER } from "./constraints";
+export type { DiagramOptions } from "./diagram";
+export { toDot, toMermaid } from "./diagram";
 export { Ekman } from "./ekman";
 export { defineEntity, statesFromEntries } from "./entity";
 export type { EkmanErrorOptions, ErrorCode } from "./errors";
