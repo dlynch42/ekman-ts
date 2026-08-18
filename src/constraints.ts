@@ -78,10 +78,22 @@ export interface GuardConstraint<
   V extends Values = Values,
   T extends TriggerLike = Trigger,
 > {
-  /** Defaults to `guard:<on>`. Appears in the violation event and the error. */
+  /** Defaults to `guard:<on>`, or `guard:<from>-><on>` when the guard is scoped. */
   readonly name?: string;
   /** The state being entered. */
   readonly on: S;
+  /**
+   * The states the transition may come from. Omitted means any of them.
+   *
+   * This is what lets "entering `shipped` from `paid` requires payment cleared, but
+   * entering it from `manual_override` does not" be declared rather than hidden inside a
+   * check that reads the instance and returns true early. An exemption written that way is
+   * invisible to anything reading the constraint set, including the diagram.
+   *
+   * A scope naming an edge the declared transitions do not have is refused at definition:
+   * it is a condition on something that cannot happen.
+   */
+  readonly from?: S | readonly S[];
   /** Defaults to `reject`. */
   readonly policy?: ViolationPolicy;
   readonly check: ConstraintCheck<S, V, T>;
@@ -169,6 +181,8 @@ export interface CompiledGuard<
   T extends TriggerLike,
 > extends CompiledCheck<S, V, T> {
   readonly on: string;
+  /** Null means any source state, which is the default a guard gets. */
+  readonly from: ReadonlySet<string> | null;
 }
 
 export interface CompiledInvariant<
@@ -334,11 +348,18 @@ function compileGuards<
     assertState(entity, "guard", guard.on, states);
     assertCheck(entity, "guard", guard.check);
 
+    const sources = guard.from === undefined ? undefined : [guard.from].flat();
+    for (const source of sources ?? []) {
+      assertState(entity, "guard", source, states);
+      assertGuardedEdge(entity, source, guard.on, states);
+    }
+
     if (policy !== "off") {
       compiled.push(
         Object.freeze({
-          name: guard.name ?? `guard:${guard.on}`,
+          name: guard.name ?? defaultGuardName(guard.on, sources),
           on: guard.on,
+          from: sources === undefined ? null : new Set<string>(sources),
           policy,
           check: guard.check,
         })
@@ -531,7 +552,7 @@ function walkGuards<S extends string, V extends Values, T extends TriggerLike>(
   let violations = found;
 
   for (const guard of guards) {
-    if (guard.on !== next.state) {
+    if (guard.on !== next.state || !appliesFrom(guard, instance.state)) {
       continue;
     }
 
@@ -616,6 +637,14 @@ function checkGraph(
       `"${from}" to "${to}" is not a declared transition. ` +
       `From "${from}" the declared targets are: ${known.join(", ") || "(none)"}`,
   };
+}
+
+/** Null scope means any source state, which is the default a guard gets. */
+function appliesFrom<S extends string, V extends Values, T extends TriggerLike>(
+  guard: CompiledGuard<S, V, T>,
+  from: string
+): boolean {
+  return guard.from === null || guard.from.has(from);
 }
 
 /** Null scope means every state, which is the default an invariant gets. */
@@ -746,6 +775,46 @@ function assertEscalatable(
       `the instance is still in "${from}", so the handler could not act on it. ` +
       `From "${from}" the declared targets are: ${known.join(", ") || "(none)"}`
   );
+}
+
+/**
+ * A guard scoped to an edge the declared transitions do not have is refused.
+ *
+ * The check could never run: the transition it conditions is already refused by the graph.
+ * Left alone it reads like protection that is in force, which is the worst kind of dead
+ * configuration. Only meaningful when an overlay exists, since without one every edge does.
+ */
+function assertGuardedEdge(
+  entity: string,
+  from: string,
+  on: string,
+  states: States
+): void {
+  if (!states.hasEdges) {
+    return;
+  }
+
+  const known = states.checkEdge(from, on);
+  if (known === undefined) {
+    return;
+  }
+
+  throw invalid(
+    entity,
+    `guard on "${on}" is scoped to transitions from "${from}", which is not a declared ` +
+      `transition, so the guard could never run. From "${from}" the declared targets ` +
+      `are: ${known.join(", ") || "(none)"}`
+  );
+}
+
+/** `guard:<on>` unscoped, `guard:<from>-><on>` scoped, so a name says what it covers. */
+function defaultGuardName(
+  on: string,
+  sources: readonly string[] | undefined
+): string {
+  return sources === undefined
+    ? `guard:${on}`
+    : `guard:${sources.join("|")}->${on}`;
 }
 
 function assertCheck(entity: string, where: string, check: unknown): void {

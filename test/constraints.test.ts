@@ -167,6 +167,65 @@ describe("compiling constraints", () => {
     ).toHaveLength(1);
   });
 
+  it("names a scoped guard after the edge it covers", () => {
+    const compiled = compile({
+      guards: [
+        { on: "shipped", from: ["pending", "approved"], check: () => true },
+      ],
+    });
+
+    expect(compiled?.guards[0]?.name).toBe("guard:pending|approved->shipped");
+  });
+
+  it("refuses a guard scoped to a source state that has no handler", () => {
+    expect(
+      code(() =>
+        compile({
+          guards: [{ on: "shipped", from: "gone", check: () => true }],
+        })
+      )
+    ).toBe("INVALID_CONFIG");
+  });
+
+  it("refuses a guard scoped to an edge the declared transitions do not have", () => {
+    // The guard could never run: the graph already refuses the transition it conditions.
+    // Left alone it reads like protection that is in force.
+    expect(
+      code(() =>
+        compile({
+          transitions: { allow: { pending: ["approved"] } },
+          guards: [{ on: "shipped", from: "pending", check: () => true }],
+        })
+      )
+    ).toBe("INVALID_CONFIG");
+  });
+
+  it("accepts a scoped guard on an edge the transitions do declare", () => {
+    expect(
+      compile({
+        transitions: { allow: { pending: ["approved"] } },
+        guards: [{ on: "approved", from: "pending", check: () => true }],
+      })?.guards
+    ).toHaveLength(1);
+  });
+
+  it("says so plainly when the guarded source declares no way out at all", () => {
+    expect(() =>
+      compile({
+        transitions: { allow: { approved: ["shipped"] } },
+        guards: [{ on: "shipped", from: "pending", check: () => true }],
+      })
+    ).toThrow(NO_WAY_OUT);
+  });
+
+  it("leaves a scoped guard alone when no transitions are declared", () => {
+    expect(
+      compile({
+        guards: [{ on: "shipped", from: "pending", check: () => true }],
+      })?.guards
+    ).toHaveLength(1);
+  });
+
   it("derives a name for every constraint that does not declare one", () => {
     const compiled = compile({
       guards: [{ on: "approved", check: () => true }],
@@ -290,6 +349,38 @@ describe("checking constraints", () => {
 
     expect(violations.map((v) => v.name)).toEqual(["transitions", "first"]);
     expect(rejection(violations)?.name).toBe("first");
+  });
+
+  it("runs a scoped guard only for transitions out of the states it names", () => {
+    const compiled = compile({
+      guards: [
+        { name: "scoped", on: "shipped", from: "approved", check: () => "no" },
+      ],
+    });
+
+    // The shared snapshot is in "pending", so the guard does not apply to this move even
+    // though it targets the state being entered.
+    expect(
+      checkConstraints(compiled, {
+        ...transitioning,
+        next: { state: "shipped", values: {} },
+      })
+    ).toEqual([]);
+  });
+
+  it("runs a scoped guard when the transition comes from a state it names", () => {
+    const compiled = compile({
+      guards: [
+        { name: "scoped", on: "shipped", from: ["pending"], check: () => "no" },
+      ],
+    });
+
+    const violations = checkConstraints(compiled, {
+      ...transitioning,
+      next: { state: "shipped", values: {} },
+    });
+
+    expect(violations.map((v) => v.name)).toEqual(["scoped"]);
   });
 
   it("keeps walking the guards after one that only warns", () => {

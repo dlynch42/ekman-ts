@@ -262,6 +262,11 @@
             "properties": {
               "name": { "type": "string" },
               "on": { "type": "string", "minLength": 1 },
+              "from": {
+                "description": "Source states this guard is scoped to. Omitted means any of them.",
+                "type": "array",
+                "items": { "type": "string", "minLength": 1 }
+              },
               "policy": { "$ref": "#/$defs/violationPolicy" },
               "check": { "$ref": "#/$defs/check" }
             }
