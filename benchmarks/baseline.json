@@ -6,66 +6,66 @@
     "cpu": "Apple M2 Max",
     "cores": 12
   },
-  "capturedAt": "2026-08-18T00:57:06.839Z",
+  "capturedAt": "2026-08-18T20:51:06.133Z",
   "suites": {
     "commit-rate": {
       "stay, one key": {
         "unit": "ops/sec",
         "better": "higher",
-        "value": 265487.4598657629,
-        "spread": 0.16548092782740406
+        "value": 281758.92573887086,
+        "spread": 0.08423424203272403
       },
       "transitionTo, one key": {
         "unit": "ops/sec",
         "better": "higher",
-        "value": 247896.24094602364,
-        "spread": 0.05371624880393396
+        "value": 255491.74067378818,
+        "spread": 0.14793781644630502
       },
       "send to commit, p50": {
         "unit": "ms",
         "better": "lower",
-        "value": 0.003292,
-        "spread": 0.050729040097205365
+        "value": 0.003416,
+        "spread": 0.03659250585480097
       },
       "send to commit, p99": {
         "unit": "ms",
         "better": "lower",
-        "value": 0.009625,
-        "spread": 0.289974025974026
+        "value": 0.007125,
+        "spread": 0.42091228070175435
       }
     },
     "constraints": {
       "no constraints": {
         "unit": "ops/sec",
         "better": "higher",
-        "value": 243337.4954184112,
-        "spread": 0.0511764737718512
+        "value": 248048.041746287,
+        "spread": 0.10606614808453264
       },
       "transition graph": {
         "unit": "ops/sec",
         "better": "higher",
-        "value": 229466.24201643924,
-        "spread": 0.09851492920176749
+        "value": 249408.5618891572,
+        "spread": 0.0865490099133238
       },
       "graph + 2 guards": {
         "unit": "ops/sec",
         "better": "higher",
-        "value": 229088.40648750417,
-        "spread": 0.04498629310858796
+        "value": 243216.04182965687,
+        "spread": 0.09338088164296829
       },
       "graph + guards + invariant": {
         "unit": "ops/sec",
         "better": "higher",
-        "value": 228251.11530342465,
-        "spread": 0.054698884674206937
+        "value": 246437.69081131316,
+        "spread": 0.1412642607811323
       }
     },
     "fan-out": {
       "do-nothing handler, 500 keys": {
         "unit": "ops/sec",
         "better": "higher",
-        "value": 189642.96790789632,
-        "spread": 0.18374310819511674
+        "value": 201927.56825818168,
+        "spread": 0.08253529675556824
       },
       "resident instances": {
         "unit": "count",
@@ -76,14 +76,14 @@
       "1ms handler, one key": {
         "unit": "ops/sec",
         "better": "higher",
-        "value": 843.3039371495357,
-        "spread": 0.06013280485157293
+        "value": 838.0387182100593,
+        "spread": 0.06950517582417887
       },
       "1ms handler, 50 keys": {
         "unit": "ops/sec",
         "better": "higher",
-        "value": 27592.39139807198,
-        "spread": 0.36701210867425554
+        "value": 27827.37621096045,
+        "spread": 0.23993056138062482
       }
     },
     "overflow": {
@@ -96,8 +96,8 @@
       "capacity 8: burst settled": {
         "unit": "ms",
         "better": "lower",
-        "value": 18.418,
-        "spread": 0.05644836572917781
+        "value": 18.231833,
+        "spread": 0.09047137498462168
       },
       "capacity 128: shed": {
         "unit": "%",
@@ -108,8 +108,8 @@
       "capacity 128: burst settled": {
         "unit": "ms",
         "better": "lower",
-        "value": 19.028666,
-        "spread": 0.06033223768812802
+        "value": 18.970667,
+        "spread": 0.10830752550766916
       },
       "capacity 1024: shed": {
         "unit": "%",
@@ -120,40 +120,40 @@
       "capacity 1024: burst settled": {
         "unit": "ms",
         "better": "lower",
-        "value": 12.984583,
-        "spread": 0.05723133349757933
+        "value": 13.004708,
+        "spread": 0.024449530124013557
       }
     },
     "edge-check": {
       "legal edge, 4 states": {
         "unit": "ops/sec",
         "better": "higher",
-        "value": 4762910.745355499,
-        "spread": 0.07002557442958414
+        "value": 60383966.54728253,
+        "spread": 0.023586265367789634
       },
       "legal edge, 32 states": {
         "unit": "ops/sec",
         "better": "higher",
-        "value": 4645004.109377072,
-        "spread": 0.1170526891945474
+        "value": 56788537.233759366,
+        "spread": 0.0428972128807404
       },
       "legal edge, 128 states": {
         "unit": "ops/sec",
         "better": "higher",
-        "value": 4557198.830058599,
-        "spread": 0.05054401056327287
+        "value": 49906477.756009124,
+        "spread": 0.018424118198678164
       },
       "rejected edge, 32 states": {
         "unit": "ops/sec",
         "better": "higher",
-        "value": 3047937.0037628044,
-        "spread": 0.038936232023581284
+        "value": 10566624.235330388,
+        "spread": 0.01086378179509112
       },
       "control: no constraints": {
         "unit": "ops/sec",
         "better": "higher",
-        "value": 152280395.10975873,
-        "spread": 0.036968873844821025
+        "value": 229077572.19465593,
+        "spread": 0.07475576879967077
       }
     }
   }

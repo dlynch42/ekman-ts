@@ -218,44 +218,47 @@ codes mean over HTTP is a lookup table, because every failure carries a stable o
 Then stop the process and start it again. Everything is still there.
 
 ## Performance
+
+Apple M2 Max (12 cores), Node v22.22.0, commit `85812c9`, 2026-08-18. Figures are rounded to what holds across repeated runs rather than to the digits any single run printed.
+
 ### What one operation costs
 
 | Operation | Time |
 |---|---|
-| Commit a value update (`stay`) | **3.4µs** |
-| Commit a state change (`transitionTo`) | **3.7µs** |
+| Commit a value update (`stay`) | **3.6µs** |
+| Commit a state change (`transitionTo`) | **3.9µs** |
 | Send to commit, p50 | **3µs** |
 | Send to commit, p99 | **7µs** |
-| Transition-graph check, 4 states | **14.8ns** |
-| Transition-graph check, 32 states | **18.6ns** |
-| Transition-graph check, 128 states | **19.2ns** |
+| Transition-graph check, 4 states | **17ns** |
+| Transition-graph check, 32 states | **19ns** |
+| Transition-graph check, 128 states | **20ns** |
 | Refused transition, check plus the explanation it produces | **95ns** |
 
 ### What one commit costs as you turn strictness up
 
 The same workload, the same handler, four levels of enforcement.
 
-| Enforcement | Per commit | Commits per second |
-|---|---|---|
-| No constraints | 3.74µs | 267,000 |
-| Transition graph | 3.81µs | 263,000 |
-| Graph + 2 guards | 3.85µs | 260,000 |
-| Graph + guards + invariant | 3.91µs | 256,000 |
+| Enforcement | Per commit |
+|---|---|
+| No constraints | ~4.0µs |
+| Transition graph | ~4.0µs |
+| Graph + 2 guards | ~4.1µs |
+| Graph + guards + invariant | ~4.1µs |
 
-The whole range is 0.17µs wide, which is smaller than this benchmark's own run-to-run
-variation. It can tell you enforcement costs under 5% of a commit; resolving it more finely
-takes `edge-check`, which measures the check with no commit under it and puts the graph
-lookup at 18.6ns.
+They are the same number, and that is the finding. The gap across all four levels is narrower
+than this benchmark's own run-to-run variation, so it can tell you enforcement costs under 5%
+of a commit but cannot put a figure on it. Resolving it takes `edge-check`, which measures the
+check with no commit under it and puts the graph lookup at 19ns.
 
 ### What one process sustains
 
 | Workload | Throughput |
 |---|---|
-| One key, fully serialized | **290,000 commits/sec** |
-| 500 keys, handler returns immediately | **211,000 commits/sec** |
-| 50 keys, 1ms handler | **32,500 commits/sec** |
-| One key, 1ms handler | 847 commits/sec |
-| 2,000-trigger burst against a 128-deep inbox | settles in **17ms** |
+| One key, fully serialized | **280,000 commits/sec** |
+| 500 keys, handler returns immediately | **200,000 commits/sec** |
+| 50 keys, 1ms handler | **28,000 commits/sec** |
+| One key, 1ms handler | 838 commits/sec |
+| 2,000-trigger burst against a 128-deep inbox | settles in **19ms** |
 
 **A commit is microseconds, so the runtime disappears next to your handler.** Anything that touches a database, a queue or the network is three orders of magnitude slower than the machinery around it.
 
@@ -263,7 +266,7 @@ lookup at 18.6ns.
 
 **A bigger state machine is not a slower one.** The graph check is flat from 4 states to 128, so model your domain as precisely as it deserves.
 
-**Ordering per key is not a throughput ceiling.** One key with a 1ms handler does 847 commits a second. Fifty keys do 32,500, because handlers overlap across keys while each key stays strictly in order.
+**Ordering per key is not a throughput ceiling.** One key with a 1ms handler does 838 commits a second. Fifty keys do 28,000, because handlers overlap across keys while each key stays strictly in order.
 
 Run them yourself:
 
