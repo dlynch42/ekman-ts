@@ -66,6 +66,8 @@ export type {
   ResolvedMemoryConfig,
 } from "./memory";
 export { accountBytes, EVICTION_POLICIES } from "./memory";
+export type { ObservedEdges } from "./observed";
+export { allowFrom, observeEdges } from "./observed";
 export type {
   HistoryResult,
   Partiality,

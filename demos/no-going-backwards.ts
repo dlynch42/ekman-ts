@@ -10,11 +10,23 @@
  * The handler below is exactly that naive: it maps a message type to a state and commits.
  * It is identical in all three runs. The only thing that changes is the transition graph,
  * which is what makes the lifecycle a rule rather than a hope.
+ *
+ * The entity draws its own diagram, and the warn run reads its real graph back out of the
+ * stream it produced. That pairing is the whole discovery workflow: declare nothing, watch,
+ * then declare what you saw.
  */
 
 import type { Handler } from "ekman";
-import { defineEntity, Ekman, stay, transitionTo } from "ekman";
-import { stream } from "./lib";
+import {
+  allowFrom,
+  defineEntity,
+  Ekman,
+  observeEdges,
+  stay,
+  toMermaid,
+  transitionTo,
+} from "ekman";
+import { check, stream } from "./lib";
 
 type State = "pending" | "paid" | "shipped" | "delivered" | "cancelled";
 
@@ -94,7 +106,10 @@ async function main(): Promise<void> {
       "  Look at the second violation. It is cancelled -> delivered, not shipped ->\n" +
       "  cancelled, because the rewind at step 3 had already put the order back in paid,\n" +
       "  where cancelling IS legal. One accepted illegal move makes the next one look\n" +
-      "  fine. That compounding is the argument for not staying in warn."
+      "  fine. That compounding is the argument for not staying in warn.\n\n" +
+      "  Below, the graph this traffic actually walked, read back out of the same stream.\n" +
+      "  That is the workflow: watch in warn, read the map, declare what you meant, and\n" +
+      "  the two moves you did not mean are the two the diagram marks as observed."
   );
 
   await run(
@@ -152,7 +167,48 @@ async function run(
   stream("orders:a1", events);
 
   console.log(`\n  ${moral}`);
+
+  // The declared graph, drawn from the definition rather than from a comment beside it, so
+  // it cannot drift from what the runtime is enforcing.
+  console.log(`\n  declared:\n${indent(toMermaid(orders))}`);
+
+  if (policy === "warn") {
+    // And the graph the traffic actually walked. Under warn every move committed, so this
+    // is the real lifecycle, refusals and all, read back out of the same ordered record.
+    const observed = observeEdges(events);
+    console.log(
+      "\n  observed, which is what you would declare next:\n" +
+        `${indent(format(allowFrom(observed)))}`
+    );
+    console.log(
+      "\n  the two together, observed-only moves marked:\n" +
+        `${indent(toMermaid(orders, { observed: observed.taken }))}`
+    );
+
+    // The point of the run: warn let through moves the declaration did not have.
+    check(
+      observed.taken.get("shipped")?.has("paid") === true,
+      "warn was supposed to let the rewind through so it could be observed"
+    );
+  }
+
   await ekman.close();
+}
+
+/** An allow map as it would be written in a definition, ready to paste. */
+function format(allow: Record<string, readonly string[]>): string {
+  const entries = Object.entries(allow).map(
+    ([from, targets]) =>
+      `  ${JSON.stringify(from)}: [${targets.map((t) => JSON.stringify(t)).join(", ")}],`
+  );
+  return ["allow: {", ...entries, "}"].join("\n");
+}
+
+function indent(block: string): string {
+  return block
+    .split("\n")
+    .map((line) => `    ${line}`)
+    .join("\n");
 }
 
 /**
