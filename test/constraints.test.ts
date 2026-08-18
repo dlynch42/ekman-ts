@@ -13,6 +13,8 @@ import type { InstanceSnapshot, Trigger } from "../src/types";
 
 const STATES = ["pending", "approved", "shipped"] as const;
 
+const NO_WAY_OUT = /declared targets are: \(none\)/;
+
 function compile(
   config: ConstraintsConfig,
   states: readonly string[] = STATES
@@ -122,6 +124,47 @@ describe("compiling constraints", () => {
         })
       )
     ).toBe("INVALID_CONFIG");
+  });
+
+  it("refuses a temporal escalation the declared transitions would reject", () => {
+    // The escalation arrives as a trigger while the instance is still in "pending", so a
+    // handler could only move to a state "pending" declares. "shipped" is not one.
+    expect(
+      code(() =>
+        compile({
+          transitions: { allow: { pending: ["approved"] } },
+          temporal: [{ in: "pending", within: 10, escalateTo: "shipped" }],
+        })
+      )
+    ).toBe("INVALID_CONFIG");
+  });
+
+  it("says so plainly when the escalating state declares no way out at all", () => {
+    expect(() =>
+      compile({
+        transitions: { allow: { approved: ["shipped"] } },
+        temporal: [{ in: "pending", within: 10, escalateTo: "shipped" }],
+      })
+    ).toThrow(NO_WAY_OUT);
+  });
+
+  it("allows a temporal escalation to a declared target", () => {
+    expect(
+      compile({
+        transitions: { allow: { pending: ["approved"] } },
+        temporal: [{ in: "pending", within: 10, escalateTo: "approved" }],
+      })?.temporal
+    ).toHaveLength(1);
+  });
+
+  it("leaves an escalation alone when no transitions are declared", () => {
+    // Without an overlay every transition is legal, so there is nothing to refuse and no
+    // opinion to have about where an escalation points.
+    expect(
+      compile({
+        temporal: [{ in: "pending", within: 10, escalateTo: "shipped" }],
+      })?.temporal
+    ).toHaveLength(1);
   });
 
   it("derives a name for every constraint that does not declare one", () => {

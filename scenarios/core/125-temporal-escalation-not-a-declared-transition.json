@@ -1,0 +1,42 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/125-temporal-escalation-not-a-declared-transition",
+  "name": "a temporal escalation the declared transitions would reject is refused at definition",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "deployments",
+        "initial": "queued",
+        "states": [
+          { "state": "queued", "else": { "result": "stay" } },
+          { "state": "deploying", "else": { "result": "stay" } },
+          { "state": "live", "else": { "result": "stay" } },
+          { "state": "stalled", "else": { "result": "stay" } }
+        ],
+        "constraints": {
+          "transitions": {
+            "allow": {
+              "queued": ["deploying"],
+              "deploying": ["live"],
+              "live": [],
+              "stalled": []
+            }
+          },
+          "temporal": [
+            {
+              "in": "deploying",
+              "within": 1000,
+              "escalateTo": "stalled"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "then": {
+    "buildError": {
+      "code": "INVALID_CONFIG"
+    }
+  }
+}

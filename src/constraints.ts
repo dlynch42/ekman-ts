@@ -397,6 +397,7 @@ function compileTemporal<S extends string>(
 
     if (constraint.escalateTo !== undefined) {
       assertState(entity, "temporal", constraint.escalateTo, states);
+      assertEscalatable(entity, constraint.in, constraint.escalateTo, states);
     }
 
     if (!(Number.isFinite(constraint.within) && constraint.within > 0)) {
@@ -709,6 +710,42 @@ function assertState(
         `Declared states: ${states.names.join(", ")}`
     );
   }
+}
+
+/**
+ * An escalation the transition graph would refuse is refused at definition instead.
+ *
+ * The escalation is delivered as a trigger while the instance is still in the watched
+ * state, so the handler that receives it can only move in one step. A target that is
+ * reachable eventually, through some other state, does not help the handler holding the
+ * trigger: its `transitionTo` is refused and the instance stays exactly where the constraint
+ * was watching it. So the edge has to be declared, not merely reachable.
+ *
+ * Only checked when an edge overlay exists. Without one every transition is legal, so there
+ * is nothing here that could be refused.
+ */
+function assertEscalatable(
+  entity: string,
+  from: string,
+  escalateTo: string,
+  states: States
+): void {
+  if (!states.hasEdges) {
+    return;
+  }
+
+  const known = states.checkEdge(from, escalateTo);
+  if (known === undefined) {
+    return;
+  }
+
+  throw invalid(
+    entity,
+    `temporal constraint on "${from}" escalates to "${escalateTo}", which is not a ` +
+      `declared transition from "${from}". The escalation is delivered as a trigger while ` +
+      `the instance is still in "${from}", so the handler could not act on it. ` +
+      `From "${from}" the declared targets are: ${known.join(", ") || "(none)"}`
+  );
 }
 
 function assertCheck(entity: string, where: string, check: unknown): void {
