@@ -12,6 +12,7 @@ import {
 import { assertCommittable, CommitToken, fenceViolation } from "./fence";
 import { Inbox } from "./inbox";
 import { accountBytes } from "./memory";
+import type { NodeId, States } from "./states";
 import type { ReplayedState, Store, StoreSnapshot } from "./store";
 import { EMPTY_SEQ, replay } from "./store";
 import type { InstanceSnapshot, Values } from "./types";
@@ -30,13 +31,22 @@ export class InstanceRecord<
   readonly key: string;
   readonly entity: string;
 
-  #state: S;
+  /** Definite assignment: both are written by `#setState` in the constructor, which is the only writer either of them has, and keeping it that way is the point. */
+  #state!: S;
+  /**
+   * The interned id of `#state`, so an edge check does not derive it on every commit.
+   *
+   * A second representation of one fact, which is exactly the shape that drifts. It cannot
+   * here: `#setState` is the only writer of either, and nothing else assigns `#state`.
+   */
+  #stateId!: NodeId;
   #values: Readonly<V>;
   #seq: number;
   #enteredAt: number;
   #bytes: number;
   readonly #events: EkmanEvent<S, V>[] = [];
   readonly #deps: RuntimeDeps;
+  readonly #states: States;
 
   /**
    * Temporal constraints that have already fired for the current state.
@@ -98,6 +108,8 @@ export class InstanceRecord<
     entity: string;
     initial: S;
     initialValues: Readonly<V>;
+    /** The entity's states, for interning whatever state this record is in. */
+    states: States;
     at: number;
     cause: EventCause;
     deps: RuntimeDeps;
@@ -119,7 +131,8 @@ export class InstanceRecord<
 
     this.#initial = args.initial;
     this.#initialValues = args.initialValues;
-    this.#state = args.initial;
+    this.#states = args.states;
+    this.#setState(args.initial);
     this.#values = args.initialValues;
     this.#seq = 0;
     this.#enteredAt = args.at;
@@ -147,6 +160,27 @@ export class InstanceRecord<
 
   get state(): S {
     return this.#state;
+  }
+
+  /**
+   * The interned id of the current state, for a check that would otherwise look it up.
+   *
+   * `UNKNOWN_NODE` when a store hands back a state the entity no longer declares, which
+   * reads as "no edges" wherever it is used, the same answer the name would have produced.
+   */
+  get stateId(): NodeId {
+    return this.#stateId;
+  }
+
+  /**
+   * The one place the committed state changes.
+   *
+   * Two fields hold one fact here, and two fields holding one fact drift the moment there
+   * are two places that write them. There is one.
+   */
+  #setState(state: S): void {
+    this.#state = state;
+    this.#stateId = this.#states.idOf(state);
   }
 
   get values(): Readonly<V> {
@@ -347,7 +381,7 @@ export class InstanceRecord<
 
     // One synchronous block: state, values, sequence and event land together.
     const moved = next.state !== this.#state;
-    this.#state = next.state;
+    this.#setState(next.state);
     this.#values = next.values;
     this.#seq = event.seq;
     this.#events.push(event);
@@ -455,7 +489,7 @@ export class InstanceRecord<
       // next trigger is owed, and it has to land before that trigger dispatches, which is
       // why the hydration runs here rather than being left for a later turn that the
       // caller has already passed.
-      this.#state = this.#initial;
+      this.#setState(this.#initial);
       this.#values = this.#initialValues;
       this.#seq = 0;
       this.#bytes = this.#measure();
@@ -472,7 +506,7 @@ export class InstanceRecord<
       return;
     }
 
-    this.#state = current.state;
+    this.#setState(current.state);
     this.#values = current.values;
     this.#seq = current.seq;
     this.#enteredAt = current.enteredAt;
@@ -513,7 +547,7 @@ export class InstanceRecord<
       return;
     }
 
-    this.#state = current.state;
+    this.#setState(current.state);
     this.#values = current.values;
     this.#seq = current.seq;
     this.#enteredAt = current.enteredAt;

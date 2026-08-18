@@ -33,11 +33,12 @@ export class States {
    * Undefined means no overlay was declared, which means every transition is legal. That is
    * not the same as an overlay that happens to declare no edges out of a state.
    *
-   * Keyed by node name rather than by interned id, because an edge check arrives holding
-   * two names. Interning both of them to index this costs a hash lookup more than hashing
-   * them against it directly, which is measurable on a check this small.
+   * Indexed by the interned id of the source node, because a resident instance carries the
+   * id of the state it is in and so hands it over for free. The target stays a name: it is a
+   * string a handler produced a moment ago, and interning it in order to read a bitmask
+   * costs back exactly what the bitmask saves. Measured, not assumed.
    */
-  #edges: ReadonlyMap<string, Adjacency> | undefined;
+  #edges: readonly (Adjacency | undefined)[] | undefined;
 
   /**
    * Deduped through a Set rather than by a guard in the loop. Every caller that can reach
@@ -109,7 +110,9 @@ export class States {
       throw new Error("these states already have an edge overlay");
     }
 
-    const adjacency = new Map<string, Adjacency>();
+    const adjacency: (Adjacency | undefined)[] = Array.from({
+      length: this.size,
+    });
 
     for (const [from, targets] of edges) {
       this.#assertNode(from);
@@ -118,15 +121,20 @@ export class States {
       }
 
       const out = new Set(targets);
-      adjacency.set(from, Object.freeze({ out, declared: [...out] }));
+      adjacency[this.idOf(from)] = Object.freeze({ out, declared: [...out] });
     }
 
-    this.#edges = adjacency;
+    this.#edges = Object.freeze(adjacency);
   }
 
   /** Whether an edge exists. With no overlay, yes, for every pair of declared states. */
   allows(from: string, to: string): boolean {
     return this.checkEdge(from, to) === undefined;
+  }
+
+  /** The name form, for callers that are not holding an id already. */
+  checkEdge(from: string, to: string): readonly string[] | undefined {
+    return this.checkEdgeFrom(this.idOf(from), to);
   }
 
   /**
@@ -138,13 +146,15 @@ export class States {
    * is already doing the most work. Two hash lookups on the legal path, no allocation on
    * either, and this runs before the commit of every transition in the runtime.
    */
-  checkEdge(from: string, to: string): readonly string[] | undefined {
+  checkEdgeFrom(fromId: NodeId, to: string): readonly string[] | undefined {
     const edges = this.#edges;
     if (edges === undefined) {
       return;
     }
 
-    const adjacent = edges.get(from);
+    // A negative id indexes nothing, which is the whole handling an unknown source needs:
+    // it reads as no edges rather than as a case somebody has to remember to ask about.
+    const adjacent = edges[fromId];
     if (adjacent?.out.has(to) === true) {
       return;
     }
@@ -160,12 +170,17 @@ export class States {
    * no targets either way.
    */
   targetsOf(from: string): readonly string[] {
+    return this.targetsFrom(this.idOf(from));
+  }
+
+  /** The same list for a caller that already has the id. */
+  targetsFrom(fromId: NodeId): readonly string[] {
     const edges = this.#edges;
     if (edges === undefined) {
-      return this.has(from) ? this.#nodes : NO_TARGETS;
+      return fromId === UNKNOWN_NODE ? NO_TARGETS : this.#nodes;
     }
 
-    return edges.get(from)?.declared ?? NO_TARGETS;
+    return edges[fromId]?.declared ?? NO_TARGETS;
   }
 
   outDegree(from: string): number {

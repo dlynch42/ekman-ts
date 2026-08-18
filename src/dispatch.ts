@@ -479,6 +479,7 @@ function applyConstraints<S extends string, V extends Values>(
     instance: instance.snapshot(),
     next: args.next,
     trigger: args.trigger,
+    fromStateId: instance.stateId,
     transitioning: args.transitioning,
     mutatingValues: args.mutatingValues,
   });

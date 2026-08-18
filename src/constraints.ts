@@ -1,6 +1,6 @@
 import { ConstraintViolationError, EkmanError } from "./errors";
 import type { ConstraintKind } from "./events";
-import type { States } from "./states";
+import type { NodeId, States } from "./states";
 import type { InstanceSnapshot, Trigger, TriggerLike, Values } from "./types";
 
 /**
@@ -448,6 +448,13 @@ export function checkConstraints<
     instance: InstanceSnapshot<S, V>;
     next: ProposedCommit<S, V>;
     trigger: T;
+    /**
+     * The interned id of the state the instance is in, carried on the resident record so
+     * the edge check does not derive it. Required rather than optional: a default would be
+     * a branch on the hottest path in the runtime, in service of a caller that does not
+     * exist.
+     */
+    fromStateId: NodeId;
     /** A `transitionTo` result. What the graph and the guards gate. */
     transitioning: boolean;
     /** The result supplied values. Together with `transitioning`, what invariants gate. */
@@ -461,13 +468,19 @@ export function checkConstraints<
   const { instance, next, trigger, transitioning } = args;
   const { transitions, guards, invariants } = compiled;
 
-  // Created by the first violation and not before. The three blocks below repeat four lines
-  // rather than sharing a helper on purpose: hoisting them into a closure over this is what
-  // the previous version did, and that closure was 84% of what this function cost.
+  // Created by the first violation and not before, and threaded through the walkers by
+  // return value rather than captured. The previous version closed over it instead, and that
+  // closure, allocated on every call whether or not it was ever used, was 84% of what this
+  // function cost. Anything that reintroduces a per-call closure here undoes the phase.
   let violations: Violation[] | undefined;
 
   if (transitioning && transitions !== undefined) {
-    const found = checkGraph(transitions, instance.state, next.state);
+    const found = checkGraph(
+      transitions,
+      args.fromStateId,
+      instance.state,
+      next.state
+    );
     if (found !== undefined) {
       violations = [found];
       if (found.policy === "reject") {
@@ -477,34 +490,22 @@ export function checkConstraints<
   }
 
   if (transitioning && guards.length > 0) {
-    for (const guard of guards) {
-      if (guard.on !== next.state) {
-        continue;
-      }
-      const found = run(guard, next, instance, trigger);
-      if (found !== undefined) {
-        violations ??= [];
-        violations.push(found);
-        if (found.policy === "reject") {
-          return violations;
-        }
-      }
+    violations = walkGuards(guards, next, instance, trigger, violations);
+    if (halted(violations)) {
+      return violations;
     }
   }
 
   if ((transitioning || args.mutatingValues) && invariants.length > 0) {
-    for (const invariant of invariants) {
-      if (!applies(invariant, next.state)) {
-        continue;
-      }
-      const found = run(invariant, next, instance, trigger);
-      if (found !== undefined) {
-        violations ??= [];
-        violations.push(found);
-        if (found.policy === "reject") {
-          return violations;
-        }
-      }
+    violations = walkInvariants(
+      invariants,
+      next,
+      instance,
+      trigger,
+      violations
+    );
+    if (halted(violations)) {
+      return violations;
     }
   }
 
@@ -513,12 +514,95 @@ export function checkConstraints<
   return violations ?? EMPTY;
 }
 
+/**
+ * Guards that gate the state being entered, in declaration order.
+ *
+ * Takes the accumulator and hands it back rather than closing over it, and returns it
+ * unchanged when nothing was found, so a commit that violates nothing allocates nothing.
+ */
+function walkGuards<S extends string, V extends Values, T extends TriggerLike>(
+  guards: readonly CompiledGuard<S, V, T>[],
+  next: ProposedCommit<S, V>,
+  instance: InstanceSnapshot<S, V>,
+  trigger: T,
+  found: Violation[] | undefined
+): Violation[] | undefined {
+  let violations = found;
+
+  for (const guard of guards) {
+    if (guard.on !== next.state) {
+      continue;
+    }
+
+    const violation = run(guard, next, instance, trigger);
+    if (violation !== undefined) {
+      violations ??= [];
+      violations.push(violation);
+      if (violation.policy === "reject") {
+        return violations;
+      }
+    }
+  }
+
+  return violations;
+}
+
+/** The same walk for invariants, which filter on the state being entered rather than on it
+ * being entered at all. Written out rather than shared with the guards through a predicate
+ * parameter, which would make one call site serve two shapes. */
+function walkInvariants<
+  S extends string,
+  V extends Values,
+  T extends TriggerLike,
+>(
+  invariants: readonly CompiledInvariant<S, V, T>[],
+  next: ProposedCommit<S, V>,
+  instance: InstanceSnapshot<S, V>,
+  trigger: T,
+  found: Violation[] | undefined
+): Violation[] | undefined {
+  let violations = found;
+
+  for (const invariant of invariants) {
+    if (!applies(invariant, next.state)) {
+      continue;
+    }
+
+    const violation = run(invariant, next, instance, trigger);
+    if (violation !== undefined) {
+      violations ??= [];
+      violations.push(violation);
+      if (violation.policy === "reject") {
+        return violations;
+      }
+    }
+  }
+
+  return violations;
+}
+
+/**
+ * Whether the walk ended in a refusal.
+ *
+ * Read off the last entry rather than searched for, because a walk stops at the first
+ * refusal it finds, so a refusal can only ever be the last thing in the list. Only reached
+ * when a walk found something, which is not the common path.
+ */
+function halted(
+  violations: Violation[] | undefined
+): violations is Violation[] {
+  return violations !== undefined && violations.at(-1)?.policy === "reject";
+}
+
 function checkGraph(
   transitions: CompiledTransitions,
+  fromId: NodeId,
   from: string,
   to: string
 ): Violation | undefined {
-  const known = transitions.states.checkEdge(from, to);
+  // By id, which the caller is holding anyway. The name is still needed, because a refusal
+  // names the state it was refused from and an id is not something to show anybody.
+  const known = transitions.states.checkEdgeFrom(fromId, to);
   if (known === undefined) {
     return;
   }

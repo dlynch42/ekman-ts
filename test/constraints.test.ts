@@ -171,6 +171,9 @@ describe("checking constraints", () => {
   const transitioning = {
     instance: snapshot,
     trigger,
+    // Interned the same way the runtime interns it, rather than written as a literal, so
+    // this follows STATES if STATES changes.
+    fromStateId: new States(STATES).idOf(snapshot.state),
     transitioning: true,
     mutatingValues: false,
   };
@@ -285,6 +288,7 @@ describe("checking constraints", () => {
       checkConstraints(compiled, {
         instance: snapshot,
         trigger,
+        fromStateId: transitioning.fromStateId,
         transitioning: false,
         mutatingValues: true,
         next: { state: "pending", values: {} },
@@ -368,6 +372,7 @@ describe("checking constraints", () => {
       checkConstraints(compiled, {
         instance: snapshot,
         trigger,
+        fromStateId: transitioning.fromStateId,
         transitioning: false,
         mutatingValues: false,
         next: { state: "pending", values: {} },
