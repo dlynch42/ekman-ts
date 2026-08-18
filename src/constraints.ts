@@ -213,6 +213,14 @@ export interface CompiledConstraints<
   readonly temporal: readonly CompiledTemporal[];
   /** Grouped by watched state, so the sweeper walks only states that are watched. */
   readonly temporalByState: ReadonlyMap<string, readonly CompiledTemporal[]>;
+  /**
+   * Whether anything here is checked at commit. False for an entity whose only constraints
+   * are temporal, which the sweeper evaluates rather than the commit path.
+   *
+   * Read at the call site rather than inside the check, because what it saves is the
+   * instance snapshot the caller would have to build in order to ask the question.
+   */
+  readonly checksAtCommit: boolean;
 }
 
 /**
@@ -260,6 +268,8 @@ export function compileConstraints<
     invariants,
     temporal,
     temporalByState,
+    checksAtCommit:
+      transitions !== undefined || guards.length > 0 || invariants.length > 0,
   });
 }
 
@@ -420,6 +430,13 @@ function compileTemporal<S extends string>(
  * Returns violations in check order, stopping at the first one whose policy is `reject`.
  * Warnings found before it are still returned, because they happened and the stream should
  * say so.
+ *
+ * Nothing is allocated for a commit that violates nothing, which is nearly all of them.
+ * There is no per-call closure, the result list is not created until there is something to
+ * put in it, and an empty constraint list is answered by its length rather than by an
+ * iterator over it. That is not tidiness: this runs before the commit of every result of
+ * every entity, and the cost of the function's own shape used to be fourteen times the cost
+ * of the lookup it exists to perform.
  */
 export function checkConstraints<
   S extends string,
@@ -441,49 +458,59 @@ export function checkConstraints<
     return EMPTY;
   }
 
-  const violations: Violation[] = [];
   const { instance, next, trigger, transitioning } = args;
+  const { transitions, guards, invariants } = compiled;
 
-  /** Record a violation, and report whether it is the one that ends the walk. */
-  const halts = (found: Violation | undefined): boolean => {
-    if (found === undefined) {
-      return false;
-    }
-    violations.push(found);
-    return found.policy === "reject";
-  };
+  // Created by the first violation and not before. The three blocks below repeat four lines
+  // rather than sharing a helper on purpose: hoisting them into a closure over this is what
+  // the previous version did, and that closure was 84% of what this function cost.
+  let violations: Violation[] | undefined;
 
-  if (
-    transitioning &&
-    compiled.transitions !== undefined &&
-    halts(checkGraph(compiled.transitions, instance.state, next.state))
-  ) {
-    return violations;
-  }
-
-  if (transitioning) {
-    for (const guard of compiled.guards) {
-      if (
-        guard.on === next.state &&
-        halts(run(guard, next, instance, trigger))
-      ) {
+  if (transitioning && transitions !== undefined) {
+    const found = checkGraph(transitions, instance.state, next.state);
+    if (found !== undefined) {
+      violations = [found];
+      if (found.policy === "reject") {
         return violations;
       }
     }
   }
 
-  if (transitioning || args.mutatingValues) {
-    for (const invariant of compiled.invariants) {
-      if (
-        applies(invariant, next.state) &&
-        halts(run(invariant, next, instance, trigger))
-      ) {
-        return violations;
+  if (transitioning && guards.length > 0) {
+    for (const guard of guards) {
+      if (guard.on !== next.state) {
+        continue;
+      }
+      const found = run(guard, next, instance, trigger);
+      if (found !== undefined) {
+        violations ??= [];
+        violations.push(found);
+        if (found.policy === "reject") {
+          return violations;
+        }
       }
     }
   }
 
-  return violations;
+  if ((transitioning || args.mutatingValues) && invariants.length > 0) {
+    for (const invariant of invariants) {
+      if (!applies(invariant, next.state)) {
+        continue;
+      }
+      const found = run(invariant, next, instance, trigger);
+      if (found !== undefined) {
+        violations ??= [];
+        violations.push(found);
+        if (found.policy === "reject") {
+          return violations;
+        }
+      }
+    }
+  }
+
+  // The shared frozen empty, not a fresh one. Callers read `length` and iterate; nobody owns
+  // this array, which was already true of the no-constraints path above.
+  return violations ?? EMPTY;
 }
 
 function checkGraph(

@@ -468,7 +468,14 @@ function applyConstraints<S extends string, V extends Values>(
     mutatingValues: boolean;
   }
 ): void {
-  const violations = checkConstraints(definition.constraints, {
+  const compiled = definition.constraints;
+
+  // Entity with no constraints must not pay for a snapshot of an instance nobody inspects
+  if (compiled === undefined || !compiled.checksAtCommit) {
+    return;
+  }
+
+  const violations = checkConstraints(compiled, {
     instance: instance.snapshot(),
     next: args.next,
     trigger: args.trigger,

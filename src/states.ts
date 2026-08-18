@@ -95,7 +95,7 @@ export class States {
    * every name the entity does not declare; a caller folding states observed in production
    * has refused nothing. A structure that quietly accepts a node it does not have is how
    * that second caller corrupts it.
-   * 
+   *
    * A Set both dedupes and keeps insertion order, so the membership test and the
    * printable list are one decision rather than two that could disagree.
    * The list is deliberately not frozen, against the habit everywhere else in this

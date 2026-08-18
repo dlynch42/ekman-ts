@@ -212,6 +212,22 @@ describe("checking constraints", () => {
     expect(violations[0]?.reason).toContain("(none)");
   });
 
+  it("returns one shared empty result for every commit that violates nothing", () => {
+    const compiled = compile({
+      transitions: { allow: { pending: ["approved"] } },
+      guards: [{ on: "approved", check: () => true }],
+    });
+
+    const clean = { ...transitioning, next: { state: "approved", values: {} } };
+
+    // Identity, not equality. A commit that violates nothing is nearly every commit, and
+    // handing each one a fresh array is an allocation per commit for an empty answer.
+    expect(checkConstraints(compiled, clean)).toHaveLength(0);
+    expect(checkConstraints(compiled, clean)).toBe(
+      checkConstraints(compiled, clean)
+    );
+  });
+
   it("stops at the first rejecting violation but keeps the warnings before it", () => {
     const compiled = compile({
       transitions: { policy: "warn", allow: { pending: ["approved"] } },
@@ -228,6 +244,23 @@ describe("checking constraints", () => {
 
     expect(violations.map((v) => v.name)).toEqual(["transitions", "first"]);
     expect(rejection(violations)?.name).toBe("first");
+  });
+
+  it("keeps walking the guards after one that only warns", () => {
+    const compiled = compile({
+      guards: [
+        { name: "soft", on: "shipped", policy: "warn", check: () => "noted" },
+        { name: "hard", on: "shipped", check: () => "no" },
+      ],
+    });
+
+    const violations = checkConstraints(compiled, {
+      ...transitioning,
+      next: { state: "shipped", values: {} },
+    });
+
+    expect(violations.map((v) => v.name)).toEqual(["soft", "hard"]);
+    expect(rejection(violations)?.name).toBe("hard");
   });
 
   it("skips a guard whose target state is not the one being entered", () => {
