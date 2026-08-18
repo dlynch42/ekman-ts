@@ -30,6 +30,7 @@ import {
   compileConstraints,
   type ProposedCommit,
 } from "../src/constraints";
+import { States } from "../src/states";
 import {
   check,
   type Figure,
@@ -51,6 +52,7 @@ interface CheckArgs {
   instance: InstanceSnapshot;
   next: ProposedCommit;
   trigger: Trigger;
+  fromStateId: number;
   transitioning: boolean;
   mutatingValues: boolean;
 }
@@ -131,19 +133,20 @@ function drive(graph: Graph, legal: boolean, control = false): number {
  * measuring the allocator, which is not the thing this benchmark exists to resolve.
  */
 function ring(size: number): Graph {
-  const states = Array.from({ length: size }, (_, i) => `s${i}`);
+  const nodes = Array.from({ length: size }, (_, i) => `s${i}`);
   const allow: Record<string, readonly string[]> = {};
-  for (const [index, state] of states.entries()) {
-    allow[state] = [
-      states[(index + 1) % size] ?? "",
-      states[(index + 2) % size] ?? "",
+  for (const [index, node] of nodes.entries()) {
+    allow[node] = [
+      nodes[(index + 1) % size] ?? "",
+      nodes[(index + 2) % size] ?? "",
     ];
   }
 
+  const states = new States(nodes);
   const compiled = compileConstraints(
     "bench",
     { transitions: { allow } },
-    new Set(states)
+    states
   );
   check(compiled !== undefined, "the ring compiled to no constraints");
 
@@ -152,17 +155,21 @@ function ring(size: number): Graph {
     instance: snapshot(from),
     next: proposed(to),
     trigger: TRIGGER,
+    // Prepared, because a real caller does not compute this either: a resident instance
+    // carries it and hands it over. The *target* is deliberately not prepared, since it is
+    // a name the handler produced a moment ago and resolving it is a cost the check pays.
+    fromStateId: states.idOf(from),
     transitioning: true,
     mutatingValues: false,
   });
 
   return {
     compiled: compiled as CompiledConstraints,
-    legal: states.map((state, index) =>
-      call(state, states[(index + 1) % size] ?? "")
+    legal: nodes.map((node, index) =>
+      call(node, nodes[(index + 1) % size] ?? "")
     ),
-    illegal: states.map((state, index) =>
-      call(state, states[(index + half) % size] ?? "")
+    illegal: nodes.map((node, index) =>
+      call(node, nodes[(index + half) % size] ?? "")
     ),
   };
 }

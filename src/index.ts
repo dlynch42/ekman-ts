@@ -18,6 +18,8 @@
  */
 
 // biome-ignore-all lint/performance/noBarrelFile: this is the package entry point declared in `exports`, so one public surface is the point. File-scoped rather than line-scoped because the rule reports on whichever export sorts second, which moves as the surface grows.
+export type { Analysis } from "./analysis";
+export { analyze } from "./analysis";
 export type { AuditSink } from "./audit";
 export { DEFAULT_AUDIT_ATTEMPTS } from "./audit";
 export type { ResolvedInboxConfig } from "./config";
@@ -33,6 +35,8 @@ export type {
   ViolationPolicy,
 } from "./constraints";
 export { DEFAULT_TEMPORAL_TRIGGER } from "./constraints";
+export type { DiagramOptions } from "./diagram";
+export { toDot, toMermaid } from "./diagram";
 export { Ekman } from "./ekman";
 export { defineEntity, statesFromEntries } from "./entity";
 export type { EkmanErrorOptions, ErrorCode } from "./errors";
@@ -62,6 +66,8 @@ export type {
   ResolvedMemoryConfig,
 } from "./memory";
 export { accountBytes, EVICTION_POLICIES } from "./memory";
+export type { ObservedEdges } from "./observed";
+export { allowFrom, observeEdges } from "./observed";
 export type {
   HistoryResult,
   Partiality,
@@ -85,6 +91,8 @@ export type {
   StoreSpec,
 } from "./stack";
 export { createStore, resolveStack } from "./stack";
+export type { NodeId, States } from "./states";
+export { UNKNOWN_NODE } from "./states";
 export type {
   LoadResult,
   ReplayedState,
@@ -103,9 +111,6 @@ export {
   replay,
   scanKeys,
 } from "./store";
-// The built-in stores are configured by naming them (`store: "file"`), not by constructing
-// them, so their constructors are deliberately not part of the public surface. `Store`
-// stays exported: an adapter core does not ship is still passed as an instance.
 export type {
   FileStoreOptions,
   RetentionConfig,

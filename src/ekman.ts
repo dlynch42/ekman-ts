@@ -631,6 +631,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       entity: definition.name,
       initial: definition.initial,
       initialValues: definition.initialValues,
+      states: definition.states,
       at: this.#now(),
       cause: { type: "init", id: trigger.id as string },
       deps: this.#runtime,

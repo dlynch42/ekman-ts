@@ -86,7 +86,7 @@ export async function dispatch<S extends string, V extends Values>(
 
   // Resolved against the current committed state at the moment this trigger is
   // dequeued, never the state it was enqueued under.
-  const entry = definition.states.get(instance.state);
+  const entry = definition.handlers.get(instance.state);
 
   if (entry === undefined) {
     settle("refused", 1);
@@ -468,10 +468,18 @@ function applyConstraints<S extends string, V extends Values>(
     mutatingValues: boolean;
   }
 ): void {
-  const violations = checkConstraints(definition.constraints, {
+  const compiled = definition.constraints;
+
+  // Entity with no constraints must not pay for a snapshot of an instance nobody inspects
+  if (compiled === undefined || !compiled.checksAtCommit) {
+    return;
+  }
+
+  const violations = checkConstraints(compiled, {
     instance: instance.snapshot(),
     next: args.next,
     trigger: args.trigger,
+    fromStateId: instance.stateId,
     transitioning: args.transitioning,
     mutatingValues: args.mutatingValues,
   });

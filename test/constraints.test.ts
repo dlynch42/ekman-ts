@@ -8,12 +8,18 @@ import {
   violationError,
 } from "../src/constraints";
 import { isEkmanError } from "../src/errors";
+import { States } from "../src/states";
 import type { InstanceSnapshot, Trigger } from "../src/types";
 
-const STATES = new Set(["pending", "approved", "shipped"]);
+const STATES = ["pending", "approved", "shipped"] as const;
 
-function compile(config: ConstraintsConfig, states = STATES) {
-  return compileConstraints("orders", config, states);
+const NO_WAY_OUT = /declared targets are: \(none\)/;
+
+function compile(
+  config: ConstraintsConfig,
+  states: readonly string[] = STATES
+) {
+  return compileConstraints("orders", config, new States(states));
 }
 
 /** The error code of a throwing call, or "no-throw" if it did not throw. */
@@ -120,6 +126,106 @@ describe("compiling constraints", () => {
     ).toBe("INVALID_CONFIG");
   });
 
+  it("refuses a temporal escalation the declared transitions would reject", () => {
+    // The escalation arrives as a trigger while the instance is still in "pending", so a
+    // handler could only move to a state "pending" declares. "shipped" is not one.
+    expect(
+      code(() =>
+        compile({
+          transitions: { allow: { pending: ["approved"] } },
+          temporal: [{ in: "pending", within: 10, escalateTo: "shipped" }],
+        })
+      )
+    ).toBe("INVALID_CONFIG");
+  });
+
+  it("says so plainly when the escalating state declares no way out at all", () => {
+    expect(() =>
+      compile({
+        transitions: { allow: { approved: ["shipped"] } },
+        temporal: [{ in: "pending", within: 10, escalateTo: "shipped" }],
+      })
+    ).toThrow(NO_WAY_OUT);
+  });
+
+  it("allows a temporal escalation to a declared target", () => {
+    expect(
+      compile({
+        transitions: { allow: { pending: ["approved"] } },
+        temporal: [{ in: "pending", within: 10, escalateTo: "approved" }],
+      })?.temporal
+    ).toHaveLength(1);
+  });
+
+  it("leaves an escalation alone when no transitions are declared", () => {
+    // Without an overlay every transition is legal, so there is nothing to refuse and no
+    // opinion to have about where an escalation points.
+    expect(
+      compile({
+        temporal: [{ in: "pending", within: 10, escalateTo: "shipped" }],
+      })?.temporal
+    ).toHaveLength(1);
+  });
+
+  it("names a scoped guard after the edge it covers", () => {
+    const compiled = compile({
+      guards: [
+        { on: "shipped", from: ["pending", "approved"], check: () => true },
+      ],
+    });
+
+    expect(compiled?.guards[0]?.name).toBe("guard:pending|approved->shipped");
+  });
+
+  it("refuses a guard scoped to a source state that has no handler", () => {
+    expect(
+      code(() =>
+        compile({
+          guards: [{ on: "shipped", from: "gone", check: () => true }],
+        })
+      )
+    ).toBe("INVALID_CONFIG");
+  });
+
+  it("refuses a guard scoped to an edge the declared transitions do not have", () => {
+    // The guard could never run: the graph already refuses the transition it conditions.
+    // Left alone it reads like protection that is in force.
+    expect(
+      code(() =>
+        compile({
+          transitions: { allow: { pending: ["approved"] } },
+          guards: [{ on: "shipped", from: "pending", check: () => true }],
+        })
+      )
+    ).toBe("INVALID_CONFIG");
+  });
+
+  it("accepts a scoped guard on an edge the transitions do declare", () => {
+    expect(
+      compile({
+        transitions: { allow: { pending: ["approved"] } },
+        guards: [{ on: "approved", from: "pending", check: () => true }],
+      })?.guards
+    ).toHaveLength(1);
+  });
+
+  it("says so plainly when the guarded source declares no way out at all", () => {
+    expect(() =>
+      compile({
+        transitions: { allow: { approved: ["shipped"] } },
+        guards: [{ on: "shipped", from: "pending", check: () => true }],
+      })
+    ).toThrow(NO_WAY_OUT);
+  });
+
+  it("leaves a scoped guard alone when no transitions are declared", () => {
+    expect(
+      compile({
+        guards: [{ on: "shipped", from: "pending", check: () => true }],
+      })?.guards
+    ).toHaveLength(1);
+  });
+
   it("derives a name for every constraint that does not declare one", () => {
     const compiled = compile({
       guards: [{ on: "approved", check: () => true }],
@@ -167,6 +273,9 @@ describe("checking constraints", () => {
   const transitioning = {
     instance: snapshot,
     trigger,
+    // Interned the same way the runtime interns it, rather than written as a literal, so
+    // this follows STATES if STATES changes.
+    fromStateId: new States(STATES).idOf(snapshot.state),
     transitioning: true,
     mutatingValues: false,
   };
@@ -208,6 +317,22 @@ describe("checking constraints", () => {
     expect(violations[0]?.reason).toContain("(none)");
   });
 
+  it("returns one shared empty result for every commit that violates nothing", () => {
+    const compiled = compile({
+      transitions: { allow: { pending: ["approved"] } },
+      guards: [{ on: "approved", check: () => true }],
+    });
+
+    const clean = { ...transitioning, next: { state: "approved", values: {} } };
+
+    // Identity, not equality. A commit that violates nothing is nearly every commit, and
+    // handing each one a fresh array is an allocation per commit for an empty answer.
+    expect(checkConstraints(compiled, clean)).toHaveLength(0);
+    expect(checkConstraints(compiled, clean)).toBe(
+      checkConstraints(compiled, clean)
+    );
+  });
+
   it("stops at the first rejecting violation but keeps the warnings before it", () => {
     const compiled = compile({
       transitions: { policy: "warn", allow: { pending: ["approved"] } },
@@ -224,6 +349,55 @@ describe("checking constraints", () => {
 
     expect(violations.map((v) => v.name)).toEqual(["transitions", "first"]);
     expect(rejection(violations)?.name).toBe("first");
+  });
+
+  it("runs a scoped guard only for transitions out of the states it names", () => {
+    const compiled = compile({
+      guards: [
+        { name: "scoped", on: "shipped", from: "approved", check: () => "no" },
+      ],
+    });
+
+    // The shared snapshot is in "pending", so the guard does not apply to this move even
+    // though it targets the state being entered.
+    expect(
+      checkConstraints(compiled, {
+        ...transitioning,
+        next: { state: "shipped", values: {} },
+      })
+    ).toEqual([]);
+  });
+
+  it("runs a scoped guard when the transition comes from a state it names", () => {
+    const compiled = compile({
+      guards: [
+        { name: "scoped", on: "shipped", from: ["pending"], check: () => "no" },
+      ],
+    });
+
+    const violations = checkConstraints(compiled, {
+      ...transitioning,
+      next: { state: "shipped", values: {} },
+    });
+
+    expect(violations.map((v) => v.name)).toEqual(["scoped"]);
+  });
+
+  it("keeps walking the guards after one that only warns", () => {
+    const compiled = compile({
+      guards: [
+        { name: "soft", on: "shipped", policy: "warn", check: () => "noted" },
+        { name: "hard", on: "shipped", check: () => "no" },
+      ],
+    });
+
+    const violations = checkConstraints(compiled, {
+      ...transitioning,
+      next: { state: "shipped", values: {} },
+    });
+
+    expect(violations.map((v) => v.name)).toEqual(["soft", "hard"]);
+    expect(rejection(violations)?.name).toBe("hard");
   });
 
   it("skips a guard whose target state is not the one being entered", () => {
@@ -248,6 +422,7 @@ describe("checking constraints", () => {
       checkConstraints(compiled, {
         instance: snapshot,
         trigger,
+        fromStateId: transitioning.fromStateId,
         transitioning: false,
         mutatingValues: true,
         next: { state: "pending", values: {} },
@@ -331,6 +506,7 @@ describe("checking constraints", () => {
       checkConstraints(compiled, {
         instance: snapshot,
         trigger,
+        fromStateId: transitioning.fromStateId,
         transitioning: false,
         mutatingValues: false,
         next: { state: "pending", values: {} },

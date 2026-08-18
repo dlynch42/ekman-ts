@@ -1,5 +1,6 @@
 import { ConstraintViolationError, EkmanError } from "./errors";
 import type { ConstraintKind } from "./events";
+import type { NodeId, States } from "./states";
 import type { InstanceSnapshot, Trigger, TriggerLike, Values } from "./types";
 
 /**
@@ -77,10 +78,22 @@ export interface GuardConstraint<
   V extends Values = Values,
   T extends TriggerLike = Trigger,
 > {
-  /** Defaults to `guard:<on>`. Appears in the violation event and the error. */
+  /** Defaults to `guard:<on>`, or `guard:<from>-><on>` when the guard is scoped. */
   readonly name?: string;
   /** The state being entered. */
   readonly on: S;
+  /**
+   * The states the transition may come from. Omitted means any of them.
+   *
+   * This is what lets "entering `shipped` from `paid` requires payment cleared, but
+   * entering it from `manual_override` does not" be declared rather than hidden inside a
+   * check that reads the instance and returns true early. An exemption written that way is
+   * invisible to anything reading the constraint set, including the diagram.
+   *
+   * A scope naming an edge the declared transitions do not have is refused at definition:
+   * it is a condition on something that cannot happen.
+   */
+  readonly from?: S | readonly S[];
   /** Defaults to `reject`. */
   readonly policy?: ViolationPolicy;
   readonly check: ConstraintCheck<S, V, T>;
@@ -168,6 +181,8 @@ export interface CompiledGuard<
   T extends TriggerLike,
 > extends CompiledCheck<S, V, T> {
   readonly on: string;
+  /** Null means any source state, which is the default a guard gets. */
+  readonly from: ReadonlySet<string> | null;
 }
 
 export interface CompiledInvariant<
@@ -190,7 +205,8 @@ export interface CompiledTemporal {
 
 export interface CompiledTransitions {
   readonly policy: "reject" | "warn";
-  readonly allow: ReadonlyMap<string, ReadonlySet<string>>;
+  /** The entity's own states, with this constraint's edge overlay installed on them. */
+  readonly states: States;
 }
 
 /**
@@ -211,6 +227,14 @@ export interface CompiledConstraints<
   readonly temporal: readonly CompiledTemporal[];
   /** Grouped by watched state, so the sweeper walks only states that are watched. */
   readonly temporalByState: ReadonlyMap<string, readonly CompiledTemporal[]>;
+  /**
+   * Whether anything here is checked at commit. False for an entity whose only constraints
+   * are temporal, which the sweeper evaluates rather than the commit path.
+   *
+   * Read at the call site rather than inside the check, because what it saves is the
+   * instance snapshot the caller would have to build in order to ask the question.
+   */
+  readonly checksAtCommit: boolean;
 }
 
 /**
@@ -226,7 +250,7 @@ export function compileConstraints<
 >(
   entity: string,
   config: ConstraintsConfig<S, V, T>,
-  states: ReadonlySet<string>
+  states: States
 ): CompiledConstraints<S, V, T> | undefined {
   const transitions = compileTransitions(entity, config.transitions, states);
   const guards = compileGuards(entity, config.guards ?? [], states);
@@ -258,13 +282,15 @@ export function compileConstraints<
     invariants,
     temporal,
     temporalByState,
+    checksAtCommit:
+      transitions !== undefined || guards.length > 0 || invariants.length > 0,
   });
 }
 
 function compileTransitions<S extends string>(
   entity: string,
   declared: TransitionConstraint<S> | undefined,
-  states: ReadonlySet<string>
+  states: States
 ): CompiledTransitions | undefined {
   if (declared === undefined) {
     return;
@@ -284,7 +310,7 @@ function compileTransitions<S extends string>(
     );
   }
 
-  const allow = new Map<string, ReadonlySet<string>>();
+  const edges: [string, readonly string[]][] = [];
   for (const [from, targets] of entries) {
     assertState(entity, "transitions", from, states);
     if (!Array.isArray(targets)) {
@@ -297,10 +323,13 @@ function compileTransitions<S extends string>(
     for (const target of targets as string[]) {
       assertState(entity, "transitions", target, states);
     }
-    allow.set(from, new Set(targets as string[]));
+    edges.push([from, targets as string[]]);
   }
 
-  return Object.freeze({ policy, allow });
+  // Installed on the entity's own states rather than kept here, so the constraint and
+  // `definition.states` are the same edges rather than two copies that can disagree.
+  states.declareEdges(edges);
+  return Object.freeze({ policy, states });
 }
 
 function compileGuards<
@@ -310,7 +339,7 @@ function compileGuards<
 >(
   entity: string,
   declared: readonly GuardConstraint<S, V, T>[],
-  states: ReadonlySet<string>
+  states: States
 ): readonly CompiledGuard<S, V, T>[] {
   const compiled: CompiledGuard<S, V, T>[] = [];
 
@@ -319,11 +348,18 @@ function compileGuards<
     assertState(entity, "guard", guard.on, states);
     assertCheck(entity, "guard", guard.check);
 
+    const sources = guard.from === undefined ? undefined : [guard.from].flat();
+    for (const source of sources ?? []) {
+      assertState(entity, "guard", source, states);
+      assertGuardedEdge(entity, source, guard.on, states);
+    }
+
     if (policy !== "off") {
       compiled.push(
         Object.freeze({
-          name: guard.name ?? `guard:${guard.on}`,
+          name: guard.name ?? defaultGuardName(guard.on, sources),
           on: guard.on,
+          from: sources === undefined ? null : new Set<string>(sources),
           policy,
           check: guard.check,
         })
@@ -341,7 +377,7 @@ function compileInvariants<
 >(
   entity: string,
   declared: readonly InvariantConstraint<S, V, T>[],
-  states: ReadonlySet<string>
+  states: States
 ): readonly CompiledInvariant<S, V, T>[] {
   const compiled: CompiledInvariant<S, V, T>[] = [];
 
@@ -372,7 +408,7 @@ function compileInvariants<
 function compileTemporal<S extends string>(
   entity: string,
   declared: readonly TemporalConstraint<S>[],
-  states: ReadonlySet<string>
+  states: States
 ): readonly CompiledTemporal[] {
   const compiled: CompiledTemporal[] = [];
 
@@ -382,6 +418,7 @@ function compileTemporal<S extends string>(
 
     if (constraint.escalateTo !== undefined) {
       assertState(entity, "temporal", constraint.escalateTo, states);
+      assertEscalatable(entity, constraint.in, constraint.escalateTo, states);
     }
 
     if (!(Number.isFinite(constraint.within) && constraint.within > 0)) {
@@ -415,6 +452,13 @@ function compileTemporal<S extends string>(
  * Returns violations in check order, stopping at the first one whose policy is `reject`.
  * Warnings found before it are still returned, because they happened and the stream should
  * say so.
+ *
+ * Nothing is allocated for a commit that violates nothing, which is nearly all of them.
+ * There is no per-call closure, the result list is not created until there is something to
+ * put in it, and an empty constraint list is answered by its length rather than by an
+ * iterator over it. That is not tidiness: this runs before the commit of every result of
+ * every entity, and the cost of the function's own shape used to be fourteen times the cost
+ * of the lookup it exists to perform.
  */
 export function checkConstraints<
   S extends string,
@@ -426,6 +470,13 @@ export function checkConstraints<
     instance: InstanceSnapshot<S, V>;
     next: ProposedCommit<S, V>;
     trigger: T;
+    /**
+     * The interned id of the state the instance is in, carried on the resident record so
+     * the edge check does not derive it. Required rather than optional: a default would be
+     * a branch on the hottest path in the runtime, in service of a caller that does not
+     * exist.
+     */
+    fromStateId: NodeId;
     /** A `transitionTo` result. What the graph and the guards gate. */
     transitioning: boolean;
     /** The result supplied values. Together with `transitioning`, what invariants gate. */
@@ -436,42 +487,80 @@ export function checkConstraints<
     return EMPTY;
   }
 
-  const violations: Violation[] = [];
   const { instance, next, trigger, transitioning } = args;
+  const { transitions, guards, invariants } = compiled;
 
-  /** Record a violation, and report whether it is the one that ends the walk. */
-  const halts = (found: Violation | undefined): boolean => {
-    if (found === undefined) {
-      return false;
-    }
-    violations.push(found);
-    return found.policy === "reject";
-  };
+  // Created by the first violation and not before, and threaded through the walkers by
+  // return value rather than captured. The previous version closed over it instead, and that
+  // closure, allocated on every call whether or not it was ever used, was 84% of what this
+  // function cost. Anything that reintroduces a per-call closure here undoes the phase.
+  let violations: Violation[] | undefined;
 
-  if (
-    transitioning &&
-    halts(checkGraph(compiled.transitions, instance.state, next.state))
-  ) {
-    return violations;
-  }
-
-  if (transitioning) {
-    for (const guard of compiled.guards) {
-      if (
-        guard.on === next.state &&
-        halts(run(guard, next, instance, trigger))
-      ) {
+  if (transitioning && transitions !== undefined) {
+    const found = checkGraph(
+      transitions,
+      args.fromStateId,
+      instance.state,
+      next.state
+    );
+    if (found !== undefined) {
+      violations = [found];
+      if (found.policy === "reject") {
         return violations;
       }
     }
   }
 
-  if (transitioning || args.mutatingValues) {
-    for (const invariant of compiled.invariants) {
-      if (
-        applies(invariant, next.state) &&
-        halts(run(invariant, next, instance, trigger))
-      ) {
+  if (transitioning && guards.length > 0) {
+    violations = walkGuards(guards, next, instance, trigger, violations);
+    if (halted(violations)) {
+      return violations;
+    }
+  }
+
+  if ((transitioning || args.mutatingValues) && invariants.length > 0) {
+    violations = walkInvariants(
+      invariants,
+      next,
+      instance,
+      trigger,
+      violations
+    );
+    if (halted(violations)) {
+      return violations;
+    }
+  }
+
+  // The shared frozen empty, not a fresh one. Callers read `length` and iterate; nobody owns
+  // this array, which was already true of the no-constraints path above.
+  return violations ?? EMPTY;
+}
+
+/**
+ * Guards that gate the state being entered, in declaration order.
+ *
+ * Takes the accumulator and hands it back rather than closing over it, and returns it
+ * unchanged when nothing was found, so a commit that violates nothing allocates nothing.
+ */
+function walkGuards<S extends string, V extends Values, T extends TriggerLike>(
+  guards: readonly CompiledGuard<S, V, T>[],
+  next: ProposedCommit<S, V>,
+  instance: InstanceSnapshot<S, V>,
+  trigger: T,
+  found: Violation[] | undefined
+): Violation[] | undefined {
+  let violations = found;
+
+  for (const guard of guards) {
+    if (guard.on !== next.state || !appliesFrom(guard, instance.state)) {
+      continue;
+    }
+
+    const violation = run(guard, next, instance, trigger);
+    if (violation !== undefined) {
+      violations ??= [];
+      violations.push(violation);
+      if (violation.policy === "reject") {
         return violations;
       }
     }
@@ -480,21 +569,66 @@ export function checkConstraints<
   return violations;
 }
 
+/** The same walk for invariants, which filter on the state being entered rather than on it
+ * being entered at all. Written out rather than shared with the guards through a predicate
+ * parameter, which would make one call site serve two shapes. */
+function walkInvariants<
+  S extends string,
+  V extends Values,
+  T extends TriggerLike,
+>(
+  invariants: readonly CompiledInvariant<S, V, T>[],
+  next: ProposedCommit<S, V>,
+  instance: InstanceSnapshot<S, V>,
+  trigger: T,
+  found: Violation[] | undefined
+): Violation[] | undefined {
+  let violations = found;
+
+  for (const invariant of invariants) {
+    if (!applies(invariant, next.state)) {
+      continue;
+    }
+
+    const violation = run(invariant, next, instance, trigger);
+    if (violation !== undefined) {
+      violations ??= [];
+      violations.push(violation);
+      if (violation.policy === "reject") {
+        return violations;
+      }
+    }
+  }
+
+  return violations;
+}
+
+/**
+ * Whether the walk ended in a refusal.
+ *
+ * Read off the last entry rather than searched for, because a walk stops at the first
+ * refusal it finds, so a refusal can only ever be the last thing in the list. Only reached
+ * when a walk found something, which is not the common path.
+ */
+function halted(
+  violations: Violation[] | undefined
+): violations is Violation[] {
+  return violations !== undefined && violations.at(-1)?.policy === "reject";
+}
+
 function checkGraph(
-  transitions: CompiledTransitions | undefined,
+  transitions: CompiledTransitions,
+  fromId: NodeId,
   from: string,
   to: string
 ): Violation | undefined {
-  if (transitions === undefined) {
+  // By id, which the caller is holding anyway. The name is still needed, because a refusal
+  // names the state it was refused from and an id is not something to show anybody.
+  const known = transitions.states.checkEdgeFrom(fromId, to);
+  if (known === undefined) {
     return;
   }
 
-  const targets = transitions.allow.get(from);
-  if (targets?.has(to) === true) {
-    return;
-  }
-
-  const known = targets === undefined ? [] : [...targets];
   return {
     kind: "transition",
     name: "transitions",
@@ -503,6 +637,14 @@ function checkGraph(
       `"${from}" to "${to}" is not a declared transition. ` +
       `From "${from}" the declared targets are: ${known.join(", ") || "(none)"}`,
   };
+}
+
+/** Null scope means any source state, which is the default a guard gets. */
+function appliesFrom<S extends string, V extends Values, T extends TriggerLike>(
+  guard: CompiledGuard<S, V, T>,
+  from: string
+): boolean {
+  return guard.from === null || guard.from.has(from);
 }
 
 /** Null scope means every state, which is the default an invariant gets. */
@@ -588,15 +730,91 @@ function assertState(
   entity: string,
   where: string,
   state: string,
-  states: ReadonlySet<string>
+  states: States
 ): void {
   if (!states.has(state)) {
     throw invalid(
       entity,
       `${where} names state "${state}", which has no handler. ` +
-        `Declared states: ${[...states].join(", ")}`
+        `Declared states: ${states.names.join(", ")}`
     );
   }
+}
+
+/**
+ * An escalation the transition graph would refuse is refused at definition instead.
+ *
+ * The escalation is delivered as a trigger while the instance is still in the watched
+ * state, so the handler that receives it can only move in one step. A target that is
+ * reachable eventually, through some other state, does not help the handler holding the
+ * trigger: its `transitionTo` is refused and the instance stays exactly where the constraint
+ * was watching it. So the edge has to be declared, not merely reachable.
+ *
+ * Only checked when an edge overlay exists. Without one every transition is legal, so there
+ * is nothing here that could be refused.
+ */
+function assertEscalatable(
+  entity: string,
+  from: string,
+  escalateTo: string,
+  states: States
+): void {
+  if (!states.hasEdges) {
+    return;
+  }
+
+  const known = states.checkEdge(from, escalateTo);
+  if (known === undefined) {
+    return;
+  }
+
+  throw invalid(
+    entity,
+    `temporal constraint on "${from}" escalates to "${escalateTo}", which is not a ` +
+      `declared transition from "${from}". The escalation is delivered as a trigger while ` +
+      `the instance is still in "${from}", so the handler could not act on it. ` +
+      `From "${from}" the declared targets are: ${known.join(", ") || "(none)"}`
+  );
+}
+
+/**
+ * A guard scoped to an edge the declared transitions do not have is refused.
+ *
+ * The check could never run: the transition it conditions is already refused by the graph.
+ * Left alone it reads like protection that is in force, which is the worst kind of dead
+ * configuration. Only meaningful when an overlay exists, since without one every edge does.
+ */
+function assertGuardedEdge(
+  entity: string,
+  from: string,
+  on: string,
+  states: States
+): void {
+  if (!states.hasEdges) {
+    return;
+  }
+
+  const known = states.checkEdge(from, on);
+  if (known === undefined) {
+    return;
+  }
+
+  throw invalid(
+    entity,
+    `guard on "${on}" is scoped to transitions from "${from}", which is not a declared ` +
+      `transition, so the guard could never run. From "${from}" the declared targets ` +
+      `are: ${known.join(", ") || "(none)"}`
+  );
+}
+
+/** `guard:<on>` unscoped, `guard:<from>-><on>` scoped, so a name says what it covers. */
+function defaultGuardName(
+  on: string,
+  sources: readonly string[] | undefined
+): string {
+  return sources === undefined
+    ? `guard:${on}`
+    : `guard:${sources.join("|")}->${on}`;
 }
 
 function assertCheck(entity: string, where: string, check: unknown): void {

@@ -119,6 +119,8 @@ export interface ConstraintsSpec {
   readonly guards?: readonly {
     readonly name?: string;
     readonly on: string;
+    /** Source states the guard is scoped to. Omitted means any of them. */
+    readonly from?: readonly string[];
     readonly policy?: ViolationPolicySpec;
     readonly check: CheckSpec;
   }[];

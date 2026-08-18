@@ -1,0 +1,97 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/135-guard-scoped-to-the-source-state",
+  "name": "a guard scoped to a source state gates that edge and exempts the others",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "paid",
+        "constraints": {
+          "guards": [
+            {
+              "name": "payment-cleared",
+              "on": "shipped",
+              "from": ["paid"],
+              "check": {
+                "values": "cleared",
+                "exists": true,
+                "reason": "shipping a paid order requires the payment to have cleared"
+              }
+            }
+          ]
+        },
+        "states": [
+          {
+            "state": "paid",
+            "cases": [
+              {
+                "when": { "trigger": "ship" },
+                "do": { "result": "transitionTo", "to": "shipped" }
+              },
+              {
+                "when": { "trigger": "override" },
+                "do": { "result": "transitionTo", "to": "manual_override" }
+              }
+            ]
+          },
+          {
+            "state": "manual_override",
+            "cases": [
+              {
+                "when": { "trigger": "ship" },
+                "do": { "result": "transitionTo", "to": "shipped" }
+              }
+            ]
+          },
+          { "state": "shipped", "else": { "result": "stay" } }
+        ]
+      }
+    ]
+  },
+  "when": [
+    { "send": { "key": "orders:a", "trigger": { "type": "ship" } } },
+    { "send": { "key": "orders:b", "trigger": { "type": "override" } } },
+    { "send": { "key": "orders:b", "trigger": { "type": "ship" } } }
+  ],
+  "then": {
+    "sends": [
+      { "outcome": "rejected", "code": "CONSTRAINT_VIOLATED" },
+      { "outcome": "committed", "state": "manual_override", "seq": 1 },
+      { "outcome": "committed", "state": "shipped", "seq": 2 }
+    ],
+    "events": {
+      "orders:a": [
+        { "type": "transition", "from": null, "to": "paid", "seq": 0 },
+        {
+          "type": "violation",
+          "seq": 0,
+          "policy": "reject",
+          "constraint": { "kind": "guard", "name": "payment-cleared" },
+          "reason": "shipping a paid order requires the payment to have cleared",
+          "attempted": { "from": "paid", "to": "shipped" }
+        }
+      ],
+      "orders:b": [
+        { "type": "transition", "from": null, "to": "paid", "seq": 0 },
+        {
+          "type": "transition",
+          "from": "paid",
+          "to": "manual_override",
+          "seq": 1
+        },
+        {
+          "type": "transition",
+          "from": "manual_override",
+          "to": "shipped",
+          "seq": 2
+        }
+      ]
+    },
+    "state": {
+      "orders:a": { "state": "paid", "seq": 0 },
+      "orders:b": { "state": "shipped", "seq": 2 }
+    }
+  }
+}

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { EkmanError } from "../src/errors";
 import { isTransitionEvent } from "../src/events";
 import { InstanceRecord, sealValues } from "../src/instance";
+import { States } from "../src/states";
 import { memoryStore } from "../src/stores/memory";
 import { testDeps } from "./deps";
 
@@ -18,6 +19,9 @@ const commit = (
   next: Parameters<InstanceRecord<string, Record<string, unknown>>["commit"]>[0]
 ) => instance.commit(next, instance.issueToken(1));
 
+/** Widened like the records below: these tests commit to states beyond the declared ones. */
+const STATES = new States(["pending", "approved", "shipped"]);
+
 const make = (values: Record<string, unknown> = {}) =>
   // Widened on purpose: these tests commit to states beyond the initial one.
   new InstanceRecord<string, Record<string, unknown>>({
@@ -25,6 +29,7 @@ const make = (values: Record<string, unknown> = {}) =>
     entity: "orders",
     initial: "pending",
     initialValues: Object.freeze(values),
+    states: STATES,
     at: 1000,
     cause: { type: "init", id: "t1" },
     deps,
@@ -64,6 +69,7 @@ describe("InstanceRecord", () => {
       entity: "orders",
       initial: "pending",
       initialValues: Object.freeze({}),
+      states: STATES,
       at: 1000,
       cause: { type: "init", id: "t1" },
       deps: stored,

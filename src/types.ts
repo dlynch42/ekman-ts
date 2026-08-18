@@ -6,6 +6,7 @@ import type { ExecutionPolicy } from "./policy";
 import type { HistoryResult, QueryCriteria, QueryResult } from "./query";
 import type { HandlerResult } from "./results";
 import type { Coordination, StoreLayer } from "./stack";
+import type { States } from "./states";
 // Type-only, and so erased: `telemetry.ts` names `OverflowPolicy` from here, and this
 // names `TelemetrySink` from there. Neither import survives compilation, so the cycle
 // exists only for the typechecker, which resolves it fine.
@@ -213,7 +214,16 @@ export interface EntityDefinition<
   readonly unknownPolicy: UnknownPolicy;
   /** Null means every trigger type is recognized. */
   readonly triggers: ReadonlySet<string> | null;
-  readonly states: ReadonlyMap<string, StateEntry<S, V, T>>;
+  /**
+   * The states this entity has and the moves between them it allows, present whether or not
+   * any constraint was declared. With no edges declared, every transition is legal.
+   */
+  readonly states: States;
+  /**
+   * What the entity attaches to each of its states. One handler per state, which is what
+   * makes the entity the implementer of the structure above rather than a description of it.
+   */
+  readonly handlers: ReadonlyMap<string, StateEntry<S, V, T>>;
   readonly errorHandlers: ReadonlyMap<string, ErrorHandler<S, V>>;
   readonly classify: (error: Error) => string;
   /**

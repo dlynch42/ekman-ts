@@ -2,6 +2,7 @@ import { compileConstraints } from "./constraints";
 import { EkmanError } from "./errors";
 import { buildKey } from "./key";
 import type { ExecutionPolicy } from "./policy";
+import { States } from "./states";
 import type {
   EntityConfig,
   EntityDefinition,
@@ -39,13 +40,13 @@ export function defineEntity<
 >(name: N, config: EntityConfig<S, V, T>): EntityDefinition<N, S, V, T> {
   assertEntityName(name);
 
-  const states = new Map<string, StateEntry<S, V, T>>(
+  const handlers = new Map<string, StateEntry<S, V, T>>(
     (Object.entries(config.states) as [string, StateConfig<S, V, T>][]).map(
       ([state, declared]) => [state, toStateEntry(declared, config.policy)]
     )
   );
 
-  if (states.size === 0) {
+  if (handlers.size === 0) {
     throw new EkmanError(
       "MISSING_INITIAL_STATE",
       `entity "${name}" declares no states`
@@ -60,11 +61,11 @@ export function defineEntity<
     );
   }
 
-  if (!states.has(initial)) {
+  if (!handlers.has(initial)) {
     throw new EkmanError(
       "INITIAL_STATE_NOT_IN_STATES",
       `entity "${name}" declares initial state "${initial}", which has no handler. ` +
-        `Declared states: ${[...states.keys()].join(", ")}`
+        `Declared states: ${[...handlers.keys()].join(", ")}`
     );
   }
 
@@ -88,16 +89,14 @@ export function defineEntity<
   }) as Readonly<V>;
   const classify = config.classify ?? defaultClassify;
 
+  const states = new States(handlers.keys());
+
   // Compiled last, because every constraint names states and the check is worth making
   // against the states that survived validation rather than against the raw config.
   const constraints =
     config.constraints === undefined
       ? undefined
-      : compileConstraints<S, V, T>(
-          name,
-          config.constraints,
-          new Set(states.keys())
-        );
+      : compileConstraints<S, V, T>(name, config.constraints, states);
 
   return Object.freeze({
     name,
@@ -106,6 +105,7 @@ export function defineEntity<
     unknownPolicy: config.unknown ?? "reject",
     triggers,
     states,
+    handlers,
     errorHandlers,
     classify,
     constraints,

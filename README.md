@@ -84,6 +84,10 @@ It samples itself while it runs, so you can watch 200 handlers stay in flight un
 
 Constraints (transition graphs, guards, invariants, time-in-state bounds) are opt-in, each with a `reject` / `warn` / `off` dial. `warn` is the point of the dial: turn a constraint on in `warn`, read the violations your real traffic produces, and switch to `reject` once you know what your graph actually is. Violations land in the same per-key stream as transitions under either policy, so "everything that would have been refused last week" is one query rather than a log-scraping exercise. A refused result is classified, so `onError` can catch it and commit something legal instead.
 
+`warn` mode ends with a diagram rather than a log read. `observeEdges` folds a per-key stream into the transitions your traffic actually made, `allowFrom` turns that into a map you paste straight into the constraint, and `toMermaid` draws the declared and observed graphs together with the moves you never declared marked as observed. The demo below does exactly this to itself: it runs unconstrained, then in `warn`, prints the graph its own traffic walked, and then enforces it.
+
+A guard can be scoped to where a transition comes from as well as where it goes, so "entering `shipped` from `paid` requires payment cleared, but entering it from `manual_override` does not" is something you declare rather than something you hide inside a check. A guard scoped to a transition your graph does not allow is refused when the entity is defined, because a condition on something that cannot happen reads like protection that is in force.
+
 A time-in-state bound fires as a *trigger*, never as a write. The runtime hands your handler the escalation and your handler decides, exactly as with any other input, which keeps every state change attributable to one piece of your code. Evaluate on your own schedule with `temporal: { sweepMs }`, or call `await ekman.sweep()` yourself.
 
 ```
@@ -254,7 +258,7 @@ Reports pass or fail per scenario per level, and exits non-zero if a claimed lev
 
 ## Roadmap
 
-- **v0.1**: TypeScript reference implementation. Entities, dispatch, per-key inbox, retries/timeouts/fencing, constraints (transition graph, guards, invariants, temporal), memory budget and eviction, memory and file stores, storage retention, transition history, queries, audit sinks. Passes Core and Durable.
+- **v0.1**: TypeScript reference implementation. Entities, dispatch, per-key inbox, retries/timeouts/fencing, constraints (transition graph, guards including source scoping, invariants, temporal), state diagrams and observed-graph discovery, memory budget and eviction, memory and file stores, storage retention, transition history, queries, audit sinks. Passes Core and Durable.
 - **v0.2**: Redis adapter, Kafka trigger adapter, worker-thread sharding for throughput.
 - **v0.3**: Postgres adapter, multi-runtime conflict detection (the Coordinated level).
 - **v0.4**: Go implementation against the conformance suite.
