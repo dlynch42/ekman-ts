@@ -255,9 +255,18 @@ Reports pass or fail per scenario per level, and exits non-zero if a claimed lev
 ## Roadmap
 
 - **v0.1**: TypeScript reference implementation. Entities, dispatch, per-key inbox, retries/timeouts/fencing, constraints (transition graph, guards, invariants, temporal), memory budget and eviction, memory and file stores, storage retention, transition history, queries, audit sinks. Passes Core and Durable.
-- **v0.2**: Redis adapter, Kafka trigger adapter.
+- **v0.2**: Redis adapter, Kafka trigger adapter, worker-thread sharding for throughput.
 - **v0.3**: Postgres adapter, multi-runtime conflict detection (the Coordinated level).
 - **v0.4**: Go implementation against the conformance suite.
+
+Worker-thread sharding is an optimization, not a new model. Keys are already the unit of
+everything, so a shard owns a disjoint set of them and per-key ordering holds without any
+cross-thread locking. It stays behind identical public semantics: the same `send`, the same
+guarantees, configured rather than assumed. It is worth being precise about what it buys.
+Handing a trigger to another thread and waiting for its commit costs more than committing it
+where it already is, so sharding pays when the callers are sharded too and each thread works
+its own keys, and it does not pay when every trigger funnels through one thread on its way
+out. Handlers that keep a core busy are the case it is for.
 
 Multi-runtime coordination sits with the adapters rather than ahead of them, because it is
 not something a runtime can provide on its own: it needs a store whose conditional append is
