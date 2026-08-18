@@ -1,0 +1,148 @@
+{
+  "env": {
+    "node": "v22.22.0",
+    "platform": "darwin",
+    "arch": "arm64",
+    "cpu": "Apple M2 Max",
+    "cores": 12
+  },
+  "capturedAt": "2026-08-18T00:37:17.453Z",
+  "suites": {
+    "commit-rate": {
+      "stay, one key": {
+        "unit": "ops/sec",
+        "better": "higher",
+        "value": 272586.48923975736,
+        "spread": 0.04255113561890481
+      },
+      "transitionTo, one key": {
+        "unit": "ops/sec",
+        "better": "higher",
+        "value": 246213.18883540877,
+        "spread": 0.04438828451090262
+      },
+      "send to commit, p50": {
+        "unit": "ms",
+        "better": "lower",
+        "value": 0.003458,
+        "spread": 0.06043956043956043
+      },
+      "send to commit, p99": {
+        "unit": "ms",
+        "better": "lower",
+        "value": 0.008041,
+        "spread": 0.41450068399452794
+      }
+    },
+    "constraints": {
+      "no constraints": {
+        "unit": "ops/sec",
+        "better": "higher",
+        "value": 244128.45433828712,
+        "spread": 0.07625807135245694
+      },
+      "transition graph": {
+        "unit": "ops/sec",
+        "better": "higher",
+        "value": 229460.86345916401,
+        "spread": 0.03480343097511501
+      },
+      "graph + 2 guards": {
+        "unit": "ops/sec",
+        "better": "higher",
+        "value": 228904.10602691697,
+        "spread": 0.026976346474600944
+      },
+      "graph + guards + invariant": {
+        "unit": "ops/sec",
+        "better": "higher",
+        "value": 223220.51645660333,
+        "spread": 0.08135254429098299
+      }
+    },
+    "fan-out": {
+      "commits, 500 keys in flight": {
+        "unit": "ops/sec",
+        "better": "higher",
+        "value": 175290.08888276777,
+        "spread": 0.11801739770906398
+      },
+      "resident instances": {
+        "unit": "count",
+        "better": "neither",
+        "value": 500,
+        "spread": 0
+      }
+    },
+    "overflow": {
+      "capacity 8: shed": {
+        "unit": "%",
+        "better": "neither",
+        "value": 99.55000000000001,
+        "spread": 0
+      },
+      "capacity 8: burst settled": {
+        "unit": "ms",
+        "better": "lower",
+        "value": 18.51775,
+        "spread": 0.08640131765468272
+      },
+      "capacity 128: shed": {
+        "unit": "%",
+        "better": "neither",
+        "value": 93.55,
+        "spread": 0
+      },
+      "capacity 128: burst settled": {
+        "unit": "ms",
+        "better": "lower",
+        "value": 19.034125,
+        "spread": 1.0044875716640507
+      },
+      "capacity 1024: shed": {
+        "unit": "%",
+        "better": "neither",
+        "value": 48.75,
+        "spread": 0
+      },
+      "capacity 1024: burst settled": {
+        "unit": "ms",
+        "better": "lower",
+        "value": 13.234375,
+        "spread": 0.08419989610389612
+      }
+    },
+    "edge-check": {
+      "legal edge, 4 states": {
+        "unit": "ops/sec",
+        "better": "higher",
+        "value": 4735599.162520654,
+        "spread": 0.10758131464712675
+      },
+      "legal edge, 32 states": {
+        "unit": "ops/sec",
+        "better": "higher",
+        "value": 4685648.619695773,
+        "spread": 0.059478169091591836
+      },
+      "legal edge, 128 states": {
+        "unit": "ops/sec",
+        "better": "higher",
+        "value": 4552614.131293321,
+        "spread": 0.031652483112884336
+      },
+      "rejected edge, 32 states": {
+        "unit": "ops/sec",
+        "better": "higher",
+        "value": 3059265.2333244234,
+        "spread": 0.024037415932771602
+      },
+      "control: no constraints": {
+        "unit": "ops/sec",
+        "better": "higher",
+        "value": 148127574.87386012,
+        "spread": 0.09103426546371388
+      }
+    }
+  }
+}
