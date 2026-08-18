@@ -10,6 +10,11 @@ import type { AnyEntityDefinition } from "./types";
  *
  * Both renderers take the same shape and differ only in syntax, because the thing worth
  * getting right is which edges appear, and that should not be decided twice.
+ *
+ * The mermaid output is checked against mermaid itself rather than only against the strings
+ * this file intends to emit. Asserting the arrows told us nothing about whether a diagram
+ * parses, and the first version of the aliasing below emitted a label that closed its own
+ * quotes and broke every diagram containing one.
  */
 export interface DiagramOptions {
   /**
@@ -36,7 +41,7 @@ export function toMermaid(
   for (const state of states.names) {
     const alias = id(state);
     if (alias !== state) {
-      lines.push(`  state "${state}" as ${alias}`);
+      lines.push(`  state "${mermaidLabel(state)}" as ${alias}`);
     }
   }
 
@@ -162,10 +167,28 @@ function safeId(name: string): string {
   return SAFE_ID.test(name) ? name : `s_${name.replace(UNSAFE_CHARS, "_")}`;
 }
 
+/**
+ * A state's real name, made safe to sit inside a quoted mermaid label.
+ *
+ * Mermaid labels are double quoted and take `#nnn;` entity escapes, so a name containing a
+ * quote closes the label early and produces a diagram that does not parse. Escaping the
+ * hash first matters: doing it second would mangle the escapes this function just wrote.
+ * Newlines are folded to spaces because a label is one line and a raw newline ends the
+ * statement rather than wrapping it.
+ */
+function mermaidLabel(name: string): string {
+  return name
+    .replace(HASH, "#35;")
+    .replace(QUOTES, "#quot;")
+    .replace(NEWLINES, " ");
+}
+
 function quoted(value: string): string {
   return `"${value.replace(QUOTES, '\\"')}"`;
 }
 
+const HASH = /#/g;
+const NEWLINES = /[\r\n]+/g;
 const SAFE_ID = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const UNSAFE_CHARS = /[^A-Za-z0-9_]/g;
 const QUOTES = /"/g;

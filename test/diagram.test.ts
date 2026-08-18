@@ -85,6 +85,39 @@ describe("toMermaid", () => {
     expect(drawn).toContain("s_retired_state --> pending : observed");
   });
 
+  it("escapes a label that would otherwise close its own quotes", () => {
+    const odd = defineEntity("odd", {
+      initial: "start",
+      states: { start: noop, 'say "hi"': noop },
+      constraints: { transitions: { allow: { start: ['say "hi"'] } } },
+    });
+
+    // Mermaid labels are double quoted and take `#nnn;` escapes. An unescaped quote closes
+    // the label early and the whole diagram stops parsing, which no assertion on the arrow
+    // lines would have caught.
+    expect(toMermaid(odd)).toContain(
+      'state "say #quot;hi#quot;" as s_say__hi_'
+    );
+  });
+
+  it("escapes a hash before writing its own escapes, not after", () => {
+    const odd = defineEntity("odd", {
+      initial: "start",
+      states: { start: noop, "a#b": noop },
+    });
+
+    expect(toMermaid(odd)).toContain('state "a#35;b" as s_a_b');
+  });
+
+  it("folds a newline in a name, because a label is one line", () => {
+    const odd = defineEntity("odd", {
+      initial: "start",
+      states: { start: noop, "two\nlines": noop },
+    });
+
+    expect(toMermaid(odd)).toContain('state "two lines" as s_two_lines');
+  });
+
   it("marks an observed transition that was never declared", () => {
     const drawn = toMermaid(declared(), {
       observed: new Map([["shipped", new Set(["pending"])]]),
