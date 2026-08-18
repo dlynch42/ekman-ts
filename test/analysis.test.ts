@@ -65,7 +65,15 @@ describe("analyze", () => {
     expect(analysis.terminals).toEqual(["archived"]);
   });
 
-  it("is frozen, so a report cannot be edited into a different report", () => {
-    expect(Object.isFrozen(analyze(orders()))).toBe(true);
+  it("freezes the lists as well as the report holding them", () => {
+    const analysis = analyze(
+      orders({ pending: ["approved"], approved: [], shipped: [], archived: [] })
+    );
+
+    // Freezing only the wrapper would stop the fields being swapped and leave the lists
+    // editable, which is a weaker promise than the type makes.
+    expect(Object.isFrozen(analysis)).toBe(true);
+    expect(Object.isFrozen(analysis.terminals)).toBe(true);
+    expect(Object.isFrozen(analysis.unreachable)).toBe(true);
   });
 });

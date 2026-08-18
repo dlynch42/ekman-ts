@@ -32,13 +32,18 @@ export interface Analysis {
  *
  * Pure, and cheap enough to call at startup on every entity a runtime holds. Nothing here
  * reads runtime state: this answers what an instance *can* do, not where any instance is.
+ *
+ * The lists are frozen and not only the object holding them, since freezing the wrapper
+ * alone leaves the contents editable. Affordable because nothing reads this on a commit
+ * path: a frozen array is slower to join, which is why the declared-target lists in
+ * `states.ts` are left unfrozen and rely on their type instead.
  */
 export function analyze(definition: AnyEntityDefinition): Analysis {
   const { states, initial } = definition;
 
   return Object.freeze({
     constrained: states.hasEdges,
-    terminals: states.terminals(),
-    unreachable: states.unreachableFrom(initial),
+    terminals: Object.freeze(states.terminals()),
+    unreachable: Object.freeze(states.unreachableFrom(initial)),
   });
 }

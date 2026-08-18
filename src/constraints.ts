@@ -327,7 +327,7 @@ function compileTransitions<S extends string>(
   }
 
   // Installed on the entity's own states rather than kept here, so the constraint and
-  // `definition.graph` are the same edges rather than two copies that can disagree.
+  // `definition.states` are the same edges rather than two copies that can disagree.
   states.declareEdges(edges);
   return Object.freeze({ policy, states });
 }

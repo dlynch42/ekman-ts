@@ -148,8 +148,15 @@ describe("observeEdges", () => {
     expect(edgesOf(first.taken)).toEqual({ pending: ["paid"] });
   });
 
-  it("is frozen, so a folded answer cannot be edited into a different one", () => {
-    expect(Object.isFrozen(observeEdges([]))).toBe(true);
+  it("freezes the result, which fixes which maps it holds and not what is in them", () => {
+    // `Object.freeze` does not reach inside a Map or a Set, and there is no cheap way to
+    // make one genuinely immutable, so `ReadonlyMap` is the contract for the contents and
+    // the freeze covers only the fields. Asserted narrowly so the guarantee is not
+    // overstated here the way it once was.
+    const observed = observeEdges([transition("pending", "paid", 1)]);
+
+    expect(Object.isFrozen(observed)).toBe(true);
+    expect(observed.taken.get("pending")?.has("paid")).toBe(true);
   });
 });
 
