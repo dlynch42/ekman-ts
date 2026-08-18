@@ -86,7 +86,7 @@ export async function dispatch<S extends string, V extends Values>(
 
   // Resolved against the current committed state at the moment this trigger is
   // dequeued, never the state it was enqueued under.
-  const entry = definition.states.get(instance.state);
+  const entry = definition.handlers.get(instance.state);
 
   if (entry === undefined) {
     settle("refused", 1);

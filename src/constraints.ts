@@ -1,5 +1,6 @@
 import { ConstraintViolationError, EkmanError } from "./errors";
 import type { ConstraintKind } from "./events";
+import type { States } from "./states";
 import type { InstanceSnapshot, Trigger, TriggerLike, Values } from "./types";
 
 /**
@@ -190,7 +191,8 @@ export interface CompiledTemporal {
 
 export interface CompiledTransitions {
   readonly policy: "reject" | "warn";
-  readonly allow: ReadonlyMap<string, ReadonlySet<string>>;
+  /** The entity's own states, with this constraint's edge overlay installed on them. */
+  readonly states: States;
 }
 
 /**
@@ -226,7 +228,7 @@ export function compileConstraints<
 >(
   entity: string,
   config: ConstraintsConfig<S, V, T>,
-  states: ReadonlySet<string>
+  states: States
 ): CompiledConstraints<S, V, T> | undefined {
   const transitions = compileTransitions(entity, config.transitions, states);
   const guards = compileGuards(entity, config.guards ?? [], states);
@@ -264,7 +266,7 @@ export function compileConstraints<
 function compileTransitions<S extends string>(
   entity: string,
   declared: TransitionConstraint<S> | undefined,
-  states: ReadonlySet<string>
+  states: States
 ): CompiledTransitions | undefined {
   if (declared === undefined) {
     return;
@@ -284,7 +286,7 @@ function compileTransitions<S extends string>(
     );
   }
 
-  const allow = new Map<string, ReadonlySet<string>>();
+  const edges: [string, readonly string[]][] = [];
   for (const [from, targets] of entries) {
     assertState(entity, "transitions", from, states);
     if (!Array.isArray(targets)) {
@@ -297,10 +299,13 @@ function compileTransitions<S extends string>(
     for (const target of targets as string[]) {
       assertState(entity, "transitions", target, states);
     }
-    allow.set(from, new Set(targets as string[]));
+    edges.push([from, targets as string[]]);
   }
 
-  return Object.freeze({ policy, allow });
+  // Installed on the entity's own states rather than kept here, so the constraint and
+  // `definition.graph` are the same edges rather than two copies that can disagree.
+  states.declareEdges(edges);
+  return Object.freeze({ policy, states });
 }
 
 function compileGuards<
@@ -310,7 +315,7 @@ function compileGuards<
 >(
   entity: string,
   declared: readonly GuardConstraint<S, V, T>[],
-  states: ReadonlySet<string>
+  states: States
 ): readonly CompiledGuard<S, V, T>[] {
   const compiled: CompiledGuard<S, V, T>[] = [];
 
@@ -341,7 +346,7 @@ function compileInvariants<
 >(
   entity: string,
   declared: readonly InvariantConstraint<S, V, T>[],
-  states: ReadonlySet<string>
+  states: States
 ): readonly CompiledInvariant<S, V, T>[] {
   const compiled: CompiledInvariant<S, V, T>[] = [];
 
@@ -372,7 +377,7 @@ function compileInvariants<
 function compileTemporal<S extends string>(
   entity: string,
   declared: readonly TemporalConstraint<S>[],
-  states: ReadonlySet<string>
+  states: States
 ): readonly CompiledTemporal[] {
   const compiled: CompiledTemporal[] = [];
 
@@ -450,6 +455,7 @@ export function checkConstraints<
 
   if (
     transitioning &&
+    compiled.transitions !== undefined &&
     halts(checkGraph(compiled.transitions, instance.state, next.state))
   ) {
     return violations;
@@ -481,20 +487,15 @@ export function checkConstraints<
 }
 
 function checkGraph(
-  transitions: CompiledTransitions | undefined,
+  transitions: CompiledTransitions,
   from: string,
   to: string
 ): Violation | undefined {
-  if (transitions === undefined) {
+  const known = transitions.states.checkEdge(from, to);
+  if (known === undefined) {
     return;
   }
 
-  const targets = transitions.allow.get(from);
-  if (targets?.has(to) === true) {
-    return;
-  }
-
-  const known = targets === undefined ? [] : [...targets];
   return {
     kind: "transition",
     name: "transitions",
@@ -588,13 +589,13 @@ function assertState(
   entity: string,
   where: string,
   state: string,
-  states: ReadonlySet<string>
+  states: States
 ): void {
   if (!states.has(state)) {
     throw invalid(
       entity,
       `${where} names state "${state}", which has no handler. ` +
-        `Declared states: ${[...states].join(", ")}`
+        `Declared states: ${states.names.join(", ")}`
     );
   }
 }

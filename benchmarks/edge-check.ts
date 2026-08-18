@@ -30,6 +30,7 @@ import {
   compileConstraints,
   type ProposedCommit,
 } from "../src/constraints";
+import { States } from "../src/states";
 import {
   check,
   type Figure,
@@ -143,7 +144,7 @@ function ring(size: number): Graph {
   const compiled = compileConstraints(
     "bench",
     { transitions: { allow } },
-    new Set(states)
+    new States(states)
   );
   check(compiled !== undefined, "the ring compiled to no constraints");
 

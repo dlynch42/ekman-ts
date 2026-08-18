@@ -8,12 +8,16 @@ import {
   violationError,
 } from "../src/constraints";
 import { isEkmanError } from "../src/errors";
+import { States } from "../src/states";
 import type { InstanceSnapshot, Trigger } from "../src/types";
 
-const STATES = new Set(["pending", "approved", "shipped"]);
+const STATES = ["pending", "approved", "shipped"] as const;
 
-function compile(config: ConstraintsConfig, states = STATES) {
-  return compileConstraints("orders", config, states);
+function compile(
+  config: ConstraintsConfig,
+  states: readonly string[] = STATES
+) {
+  return compileConstraints("orders", config, new States(states));
 }
 
 /** The error code of a throwing call, or "no-throw" if it did not throw. */

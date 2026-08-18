@@ -31,7 +31,7 @@ describe("defineEntity", () => {
 
     expect(orders.name).toBe("orders");
     expect(orders.initial).toBe("pending");
-    expect([...orders.states.keys()]).toEqual(["pending", "approved"]);
+    expect([...orders.handlers.keys()]).toEqual(["pending", "approved"]);
     expect(orders.unknownPolicy).toBe("reject");
   });
 
@@ -181,9 +181,24 @@ describe("defineEntity validation", () => {
       constraints: { transitions: { allow: { a: ["b"] } } },
     });
 
-    expect(orders.constraints?.transitions?.allow.get("a")).toEqual(
-      new Set(["b"])
-    );
+    // One structure, not two. The constraint reads the entity's own edges rather than a
+    // copy of them, which is what stops the two disagreeing.
+    expect(orders.constraints?.transitions?.states).toBe(orders.states);
+    expect(orders.states.allows("a", "b")).toBe(true);
+    expect(orders.states.allows("b", "a")).toBe(false);
+  });
+
+  it("gives every entity a graph, including one that declares no constraints", () => {
+    const orders = defineEntity("orders", {
+      initial: "a",
+      states: { a: noop, b: noop },
+    });
+
+    expect(orders.constraints).toBeUndefined();
+    expect(orders.states.names).toEqual(["a", "b"]);
+    // No overlay means no edge was ever refused, which is not the same as no edges.
+    expect(orders.states.hasEdges).toBe(false);
+    expect(orders.states.allows("b", "a")).toBe(true);
   });
 
   it("leaves constraints undefined when none are declared", () => {
@@ -207,6 +222,25 @@ describe("defineEntity validation", () => {
     // Undefined rather than an empty structure, so "declared nothing" and "declared
     // everything off" are the same path at dispatch time.
     expect(orders.constraints).toBeUndefined();
+    // The nodes survive a constraint that is off. The edges it declared do not, and
+    // neither does any validation of them.
+    expect(orders.states.names).toEqual(["a", "b"]);
+    expect(orders.states.hasEdges).toBe(false);
+  });
+
+  it("does not validate a transition constraint that is off", () => {
+    // An off constraint compiles away before its targets are looked at, which is what it
+    // did before the graph existed. Building the overlay any earlier would change that.
+    const orders = defineEntity("orders", {
+      initial: "a",
+      states: { a: noop, b: noop },
+      constraints: {
+        transitions: { policy: "off", allow: { a: ["nowhere" as "a"] } },
+      },
+    });
+
+    expect(orders.constraints).toBeUndefined();
+    expect(orders.states.hasEdges).toBe(false);
   });
 });
 
