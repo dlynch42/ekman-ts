@@ -217,6 +217,63 @@ codes mean over HTTP is a lookup table, because every failure carries a stable o
 
 Then stop the process and start it again. Everything is still there.
 
+## Performance
+### What one operation costs
+
+| Operation | Time |
+|---|---|
+| Commit a value update (`stay`) | **3.4µs** |
+| Commit a state change (`transitionTo`) | **3.7µs** |
+| Send to commit, p50 | **3µs** |
+| Send to commit, p99 | **7µs** |
+| Transition-graph check, 4 states | **14.8ns** |
+| Transition-graph check, 32 states | **18.6ns** |
+| Transition-graph check, 128 states | **19.2ns** |
+| Refused transition, check plus the explanation it produces | **95ns** |
+
+### What one commit costs as you turn strictness up
+
+The same workload, the same handler, four levels of enforcement.
+
+| Enforcement | Per commit | Commits per second |
+|---|---|---|
+| No constraints | 3.74µs | 267,000 |
+| Transition graph | 3.81µs | 263,000 |
+| Graph + 2 guards | 3.85µs | 260,000 |
+| Graph + guards + invariant | 3.91µs | 256,000 |
+
+The whole range is 0.17µs wide, which is smaller than this benchmark's own run-to-run
+variation. It can tell you enforcement costs under 5% of a commit; resolving it more finely
+takes `edge-check`, which measures the check with no commit under it and puts the graph
+lookup at 18.6ns.
+
+### What one process sustains
+
+| Workload | Throughput |
+|---|---|
+| One key, fully serialized | **290,000 commits/sec** |
+| 500 keys, handler returns immediately | **211,000 commits/sec** |
+| 50 keys, 1ms handler | **32,500 commits/sec** |
+| One key, 1ms handler | 847 commits/sec |
+| 2,000-trigger burst against a 128-deep inbox | settles in **17ms** |
+
+**A commit is microseconds, so the runtime disappears next to your handler.** Anything that touches a database, a queue or the network is three orders of magnitude slower than the machinery around it.
+
+**Enforcement is too cheap for the end-to-end benchmark to see.** A transition graph, two guards and an invariant, all checked before every single commit, move the commit rate by less than the noise between runs. The strictness dial is only worth having if you can afford to turn it up, and you can.
+
+**A bigger state machine is not a slower one.** The graph check is flat from 4 states to 128, so model your domain as precisely as it deserves.
+
+**Ordering per key is not a throughput ceiling.** One key with a 1ms handler does 847 commits a second. Fifty keys do 32,500, because handlers overlap across keys while each key stays strictly in order.
+
+Run them yourself:
+
+```
+npm run bench                 # every suite
+npm run bench -- edge-check   # one suite
+```
+
+What each suite measures, and what it deliberately does not, is in [`benchmarks/README.md`](benchmarks/README.md). These figures are the runtime with no store configured: what Ekman adds to your handler, not what your whole system will do.
+
 ## What it is not
 
 - **Not an orchestration platform.** No mandatory server, cluster, sidecar, or control plane.

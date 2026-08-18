@@ -47,13 +47,53 @@ harness will not let the file pretend otherwise.
 another library. The suites exist to catch a regression in this implementation between two
 commits, which is a question they can actually answer.
 
-**The end-to-end suites do not resolve small costs.** One commit costs a few microseconds,
-most of it in work every commit has to do. The `constraints` suite says so in its own
-output: the transition-graph check is smaller than the run-to-run spread of the rate it is
-part of, so those four suites can bound that cost but cannot measure it. That is what
-`edge-check` is for, and the two agree: `edge-check` puts a constraint check at roughly
-200ns and `commit-rate` puts a commit at roughly 4µs, which is the 5% that `constraints`
-brackets between 1% and 11%.
+**The end-to-end suites do not resolve small costs.** A commit costs microseconds, most of it
+in work every commit has to do, while a constraint check costs nanoseconds. An instrument
+that pays for a whole commit on every sample cannot resolve a change to something that is a
+fraction of a percent of it. The `constraints` suite says so in its own output rather than
+leaving you to infer it: it reports the bound it can support and states that it cannot
+measure the check. That is what `edge-check` exists for, and why its figures are per-check
+rather than per-commit.
+
+**They measure the runtime with no store configured.** Every suite builds `new Ekman({
+entities })` and nothing else, so there is no durability, no network, and no fsync in any
+figure here. What they report is what Ekman adds to a handler, not what a system built on
+it will do.
+
+## What each suite is telling you
+
+Current figures live in the [project README](../README.md). This file is about how they are
+produced and how to read them, so it deliberately does not repeat them: two copies of the
+same numbers is two things to update and they will drift.
+
+**`commit-rate`.** One key, fully serialized. The two latency figures are inherently noisier
+than the rate figures, and p99 especially so, since it is a tail statistic over a few
+thousand samples. Treat a p99 change under about 50% as weather.
+
+**`constraints`.** The same workload at four levels of strictness. This suite bounds the cost
+of a constraint set rather than measuring it: the whole range across all four levels is
+narrower than the suite's own run-to-run variation, which the suite says in its own output
+rather than leaving you to work out. That bound is the useful thing it produces. Resolving
+the check itself is what `edge-check` is for.
+
+**`edge-check`.** Three graph sizes, because a hash lookup is flat in the number of states
+and other representations are not, so a figure taken at one size would hide whichever of
+those is about to matter. Flatness across the sweep is the property being checked, not a
+nice-to-have. The refusal path is measured separately and runs several times the cost of the
+legal path, because it builds a violation message: string work rather than lookup work, and
+the path an entity in `warn` mode takes on every violation it exists to discover.
+
+**`fan-out`.** Both halves of the fan-out argument are here on purpose. With a handler that
+returns immediately, many keys aggregate to *less* than the one-key rate in `commit-rate`:
+there is nothing to overlap, so keys cost throughput. With a handler that waits, which is
+what real handlers do, keys overlap and throughput multiplies. The first figure read alone
+says "keys are expensive", which is true only of a runtime with nothing to overlap and was
+actively misleading on its own. The 50-key figure carries a wide spread; do not read small
+changes in it.
+
+**`overflow`.** The shed rates are deterministic, which is why their spread is zero and why
+the suite marks them `neither` rather than claiming a direction. A larger inbox sheds less
+and takes longer to drain, which is the trade the capacity setting exists to make.
 
 ## Adding a suite
 
