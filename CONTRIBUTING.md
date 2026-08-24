@@ -28,17 +28,26 @@ Feature requests go in the issue tracker too, via the [feature request template]
 
 ### Pull requests
 
-1. **Fork** the repository and create a branch from `main`.
+1. **Fork** the repository and create a branch from `release`.
 2. **Set up** your local environment (see [Getting set up](#getting-set-up)).
 3. **Commit** with clear, concise messages. Imperative mood (`Add foo`, not `Added foo`); first line under 72 chars; reference issues with `Closes #N` in the body.
 4. **Test**: `npm run typecheck`, `npm run lint`, `npm test`, and `npm run conformance` must all pass locally before you push.
-5. **Submit** a PR against `release` using the [PR template](.github/PULL_REQUEST_TEMPLATE.md). Fill out every section.
+5. **Submit** a PR against `release` using the [PR template](.github/PULL_REQUEST_TEMPLATE.md). Fill out every section. GitHub will offer `main` as the base; change it to `release`.
 
 For small fixes (typos, doc clarifications, obvious one-line bugs), feel free to skip the issue and go straight to a PR. For non-trivial changes, open an issue first; it saves rework if the design needs iteration.
 
 ## Releases
 
-Releases are automated with [`auto`](https://intuit.github.io/auto/). Merging to `main` runs `npx auto shipit`: it picks the semver bump from the merged PRs' labels, generates `CHANGELOG.md`, bumps the version in `package.json`, creates the `vX.Y.Z` git tag and GitHub release, and publishes to npm.
+Releases are automated with [`auto`](https://intuit.github.io/auto/). There are two branches and two channels:
+
+| Branch | Runs | Publishes | Install with |
+|---|---|---|---|
+| `release` | on every merge | a release candidate, `X.Y.Z-rc.N` | `npm install ekman@rc` |
+| `main` | when `release` is merged into it | the stable release, `X.Y.Z` | `npm install ekman` |
+
+Work lands on `release`, so every merged PR is installable as a release candidate within a few minutes. When a batch is ready, a maintainer opens a `release` into `main` PR and the accumulated changes graduate to a stable version under the `latest` tag. `auto` picks the semver bump from the merged PRs' labels, generates `CHANGELOG.md`, bumps the version in `package.json`, creates the `vX.Y.Z` tag and GitHub release, and publishes to npm.
+
+A release candidate's number is derived, not chosen: the bump ratchets up and never down. If a `minor` PR merges and then a `patch` PR merges, the second lands as `0.2.0-rc.1`, not `0.1.1-rc.0`. The pending minor is not lost.
 
 **Contributors do not touch the changelog, the version, or the labels.**
 
@@ -48,7 +57,13 @@ Releases are automated with [`auto`](https://intuit.github.io/auto/). Merging to
 
 All you need to do is fill in the **Change impact** line in the PR template with your read: breaking change, feature, or fix. It is a hint for the maintainer, not a decision, and it is fine if it lands differently than you guessed.
 
-Ekman is pre-1.0, so minor versions may make breaking changes.
+Ekman is pre-1.0, so minor versions may make breaking changes. In practice that means a breaking change is labelled `minor`: the `major` label would take the package straight to `1.0.0`, which is a decision about stability commitments rather than about one PR.
+
+### For maintainers
+
+Each PR wants two labels. The topic labels (`spec`, `runtime`, `constraints`, `store`, `perf`, `docs`, `ci`, `dependencies`) only decide which section of the changelog the entry lands in; with the exception of `dependencies` they do not bump anything. The semver label (`major` / `minor` / `patch` / `skip-release`) is what moves the version. A PR with no semver label still releases, as a patch.
+
+The label set itself lives in `.autorc` and is applied to the repository with `npx auto create-labels`.
 
 ## Getting set up
 
@@ -70,6 +85,14 @@ npm run lint           # ultracite / biome, no writes. `npm run format` autofixe
 npm test               # Vitest unit tests plus the conformance suite
 npm run conformance    # standalone report, pass/fail per scenario per level
 npm run test:coverage  # coverage gate. Floor is 90%; actual coverage is 100%
+```
+
+If you changed anything about how the package is built or what it exports:
+
+```bash
+npm run build
+npm run verify:package # packs, audits the tarball, installs it elsewhere, and
+                       # imports it as ESM, as CJS, and for types
 ```
 
 CI runs the same set. They must pass.

@@ -1,0 +1,134 @@
+name: Release
+
+# Two channels, one workflow file. Merges to `release` publish a release
+# candidate on the `rc` dist-tag; merges to `main` publish stable on `latest`.
+# They share a file because npm's trusted publisher configuration names a single
+# workflow, so a second publishing workflow could not authenticate.
+on:
+  push:
+    branches: [main, release]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: >-
+          Force an exact version instead of computing one from PR labels.
+          Only needed to bootstrap the first release, which has no prior tag
+          to compute from. Example: 0.1.0
+        required: false
+        type: string
+
+concurrency:
+  # Deliberately not keyed on the ref: a stable release and a release candidate
+  # must never run at the same time, since both move tags and read the registry.
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    # Gated behind the "release" GitHub Environment so an approval rule can be added.
+    environment: release
+    # Belt and braces against a publish loop. The primary protection is the
+    # `[skip ci]` that `auto` appends to its own "Bump version to:" and
+    # "Update CHANGELOG.md" commits, which GitHub honors natively. This second
+    # check matches the author `auto` commits as, which it takes from the
+    # `email` field in .autorc rather than from the Actions identity.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.head_commit.author.email != '45407464+dlynch42@users.noreply.github.com'
+    permissions:
+      contents: write # push the version bump commit + tag, create the GitHub release
+      issues: write # auto comments on issues fixed by the release
+      pull-requests: write # auto comments on released PRs
+      id-token: write # OIDC for npm trusted publishing + build provenance
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # auto reads the whole history to find the previous release and the
+          # PRs merged since it.
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24.x
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The gate runs here, before `auto` is invoked, on purpose. package.json
+      # also carries it as `prepublishOnly` for anyone publishing from a laptop,
+      # but a failure at that point would leave `auto` half-finished: version
+      # bumped and tag created, nothing published.
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Conformance
+        run: npm run conformance
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify the packed tarball
+        run: npm run verify:package
+
+      # Publishes via npm trusted publishing (OIDC) once a trusted publisher is
+      # configured for this repo and this workflow file; until then NPM_TOKEN
+      # carries it. Provenance attaches automatically under OIDC.
+      - name: Release stable
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            npx auto shipit --use-version "${{ inputs.version }}"
+          else
+            npx auto shipit
+          fi
+
+      # `auto` takes both the semver prerelease identifier and the npm dist-tag
+      # from the branch name, with no way to configure them apart. It reads that
+      # branch name from GITHUB_REF rather than from git, so aliasing the ref is
+      # what turns a merge into `release` into 0.2.0-rc.N on the `rc` tag. The
+      # local checkout is still needed: auto ends by pushing that branch.
+      - name: Release candidate
+        if: github.ref == 'refs/heads/release'
+        env:
+          GITHUB_REF: refs/heads/rc
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          git checkout -B rc
+          # Assert the alias took before anything is published. This is not
+          # paranoia: with the override missing, `auto` resolves the branch as
+          # `release`, which is neither the base branch nor a prerelease branch,
+          # and it publishes a plain stable release to `latest` instead. Failing
+          # here is the difference between a broken build and a bad release.
+          node -e '
+            const { getCurrentBranch } = require("@auto-it/core");
+            const branch = getCurrentBranch();
+            if (branch !== "rc") {
+              console.error(`::error::auto resolved the branch as "${branch}", expected "rc". The GITHUB_REF alias is not taking effect, and publishing now would ship a stable release from the staging branch.`);
+              process.exit(1);
+            }
+            console.log(`auto sees branch: ${branch}`);
+          '
+          npx auto shipit
+
+      # The alias branch is an implementation detail of the step above and has
+      # no reason to exist on the remote. Tags are independent refs and survive.
+      - name: Remove the rc alias branch
+        if: always() && github.ref == 'refs/heads/release'
+        run: git push origin --delete rc || true
