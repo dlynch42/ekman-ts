@@ -26,11 +26,16 @@
   ],
   "keywords": [
     "state-machine",
+    "state-management",
+    "states",
+    "status",
+    "real-time",
     "actor",
     "virtual-actor",
     "stateful",
     "entity",
     "embedded",
+    "runtime",
     "workflow"
   ],
   "scripts": {
