@@ -43,19 +43,13 @@ entrypoint. A runtime you embed, not a platform you operate.
 npm install ekman
 ```
 
-Node 20 or newer. Zero runtime dependencies. ESM and CommonJS entry points are both shipped, and
-TypeScript types are bundled.
+Node 20 or newer. Zero runtime dependencies. ESM and CommonJS entry points are both shipped and
+TypeScript types are bundled, so `import` from an ESM project and `require` from a CommonJS one
+both work with no configuration on your side.
 
 ## Quickstart
 
-```
-npm install ekman
-npm pkg set type=module     # Ekman is ESM-first, and tsx needs this for top-level await
-npx tsx quickstart.ts
-```
-
 ```ts
-// quickstart.ts
 import { defineEntity, Ekman, isTransitionEvent, stay, transitionTo } from "ekman";
 
 /** Stand-in for whatever actually takes the money. */
