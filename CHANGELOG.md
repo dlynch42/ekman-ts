@@ -1,4 +1,4 @@
-# v0.0.1 (Mon Aug 24 2026)
+# v0.1.0 (Mon Aug 24 2026)
 
 #### 🔩 Dependency Updates
 
