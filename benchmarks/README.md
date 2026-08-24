@@ -1,5 +1,7 @@
 # Benchmarks
 
+[Back to the main README](../README.md)
+
 ```
 npm run bench                  every suite, compared against the committed baseline
 npm run bench -- fan-out       one suite
@@ -23,6 +25,55 @@ a runtime. That is a deliberate cost, taken because the other suites cannot reso
 change that small, and it is the reason its figures are per-check rather than per-commit.
 It carries a control that runs the same loop against an entity with no constraints, so the
 share of each figure that is the loop rather than the check is visible instead of assumed.
+
+## Recorded figures
+These are the runtime with no store configured: what Ekman adds to your handler, not what a whole system will do. Reproduce with `npm run bench`. 
+
+### What one operation costs
+
+| Operation | Time |
+|---|---|
+| Commit a value update (`stay`) | 3.6µs |
+| Commit a state change (`transitionTo`) | 3.9µs |
+| Send to commit, p50 | 3µs |
+| Send to commit, p99 | 7µs |
+| Transition-graph check, 4 states | 17ns |
+| Transition-graph check, 32 states | 19ns |
+| Transition-graph check, 128 states | 20ns |
+| Refused transition, check plus the explanation it produces | 95ns |
+
+The graph check is flat from 4 states to 128, so the size of a state machine is not what makes it
+slow.
+
+### What one commit costs as strictness goes up
+
+The same workload, the same handler, four levels of enforcement.
+
+| Enforcement | Per commit |
+|---|---|
+| No constraints | ~4.0µs |
+| Transition graph | ~4.0µs |
+| Graph + 2 guards | ~4.1µs |
+| Graph + guards + invariant | ~4.1µs |
+
+They are the same number, and that is the finding. The gap across all four levels is narrower than
+this benchmark's own run-to-run variation, so it can tell you enforcement costs under 5% of a
+commit but cannot put a figure on it. Resolving it takes `edge-check`, which measures the check
+with no commit under it and puts the graph lookup at 19ns.
+
+### What one process sustains
+
+| Workload | Throughput |
+|---|---|
+| One key, fully serialized | 280,000 commits/sec |
+| 500 keys, handler returns immediately | 200,000 commits/sec |
+| 50 keys, 1ms handler | 28,000 commits/sec |
+| One key, 1ms handler | 838 commits/sec |
+| 2,000-trigger burst against a 128-deep inbox | settles in 19ms |
+
+One key with a 1ms handler does 838 commits a second; fifty keys do 28,000, because handlers
+overlap across keys while each key stays strictly in order. Per-key ordering is not a throughput
+ceiling.
 
 ## Reading the output
 

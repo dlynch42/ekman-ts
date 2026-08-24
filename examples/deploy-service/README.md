@@ -1,5 +1,7 @@
 # deploy-service
 
+[Back to the main README](../../README.md)
+
 A small service that tracks deployments, built the way you would actually build one. It
 exists to answer the question the README cannot: **where does this go in my codebase?**
 
@@ -10,6 +12,13 @@ no dependencies beyond Ekman itself.
 npm run example:api      # start it, poke it with curl
 npm run example:smoke    # boot it on an ephemeral port, drive it end to end, assert
 ```
+
+> **This directory is not a standalone project.** Its `import ... from "ekman"` resolves through
+> the repository's `tsconfig.json` path alias, which maps `ekman` to `src/index.ts`, and both
+> commands above are scripts in the repository root. Copying the directory out on its own gives
+> you an unresolvable import. To lift it into a project of your own, run `npm install ekman`
+> there; nothing in the source needs to change, because the alias points at the same public
+> surface the package publishes.
 
 ## The layout
 

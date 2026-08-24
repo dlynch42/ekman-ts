@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/dlynch42/ekman-ts/tree/main/docs
+    about: "The full reference: API, concepts, constraints, stores, error codes. Check here before opening an issue."
+  - name: Report a security vulnerability
+    url: https://github.com/dlynch42/ekman-ts/security/advisories/new
+    about: Do not file security issues publicly. Open a private advisory. See SECURITY.md.
+  - name: Questions and design discussions
+    url: https://github.com/dlynch42/ekman-ts/discussions
+    about: For design questions and anything that doesn't fit a bug report or feature request.

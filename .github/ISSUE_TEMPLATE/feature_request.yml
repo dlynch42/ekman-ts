@@ -1,0 +1,47 @@
+name: Feature request
+description: Propose a change to what Ekman does
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before writing this up, please read
+        [Scope](https://github.com/dlynch42/ekman-ts#scope) and
+        [The scope line](https://github.com/dlynch42/ekman-ts/blob/main/CONTRIBUTING.md#the-scope-line).
+
+        Ekman is deliberately narrow. It is not an orchestration platform, not a workflow DSL, not
+        tied to a transport, not a distributed transaction coordinator, and not durable by default.
+        A proposal that moves it toward any of those will be declined however well argued, and it
+        is better to know that before you spend time on it.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do, and what happens when you try it today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you are proposing
+      description: If it changes the public API, show the code as you would want to write it.
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you tried instead
+      description: Existing options you considered, and why they did not work.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - label: I have read Scope in the README and believe this fits it.
+          required: true

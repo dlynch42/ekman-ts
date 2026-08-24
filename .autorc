@@ -1,0 +1,56 @@
+{
+  "plugins": ["npm", "released"],
+  "name": "Devin Lynch",
+  "email": "45407464+dlynch42@users.noreply.github.com",
+  "baseBranch": "main",
+  "labels": [
+    {
+      "name": "spec",
+      "changelogTitle": "📐 Conformance",
+      "releaseType": "none",
+      "description": "Changes to conformance scenarios or the levels claimed"
+    },
+    {
+      "name": "runtime",
+      "changelogTitle": "⚙️ Runtime",
+      "releaseType": "none",
+      "description": "Dispatch, inbox, execution policy, fencing, commit path"
+    },
+    {
+      "name": "constraints",
+      "changelogTitle": "🚧 Constraints",
+      "releaseType": "none",
+      "description": "Transition graphs, guards, invariants, temporal bounds, diagrams"
+    },
+    {
+      "name": "store",
+      "changelogTitle": "💾 Stores and Durability",
+      "releaseType": "none",
+      "description": "Store adapters, layering, retention, memory budget and eviction"
+    },
+    {
+      "name": "perf",
+      "changelogTitle": "🚀 Performance",
+      "releaseType": "none",
+      "description": "Throughput, latency or allocation changes"
+    },
+    {
+      "name": "docs",
+      "changelogTitle": "📚 Documentation",
+      "releaseType": "none",
+      "description": "README, docs/, or reference documentation only"
+    },
+    {
+      "name": "ci",
+      "changelogTitle": "🤖 CI/CD",
+      "releaseType": "none",
+      "description": "Adds or updates CI/CD configuration"
+    },
+    {
+      "name": "dependencies",
+      "changelogTitle": "🔩 Dependency Updates",
+      "releaseType": "patch",
+      "description": "Pull requests that update a dependency file"
+    }
+  ]
+}

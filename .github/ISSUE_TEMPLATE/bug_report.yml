@@ -1,0 +1,70 @@
+name: Bug report
+description: Something behaves differently from what the docs say
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. The store configuration field below is required and is not
+        boilerplate: most of Ekman's behaviour branches on the store stack, and a report without
+        it usually cannot be acted on.
+
+  - type: input
+    id: version
+    attributes:
+      label: Ekman version
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: node
+    attributes:
+      label: Node version
+      placeholder: "v22.22.0 (output of `node -v`)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: store
+    attributes:
+      label: Store configuration
+      description: The `store` option exactly as you pass it, and `memory`, `inbox` or `coordination` if you set them.
+      render: ts
+      placeholder: |
+        store: ["memory", { kind: "file", dir: "/var/lib/app" }],
+        memory: { maxBytes: 32 * 1024 * 1024, eviction: { policy: "lru" } },
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      description: Include the full error, with its `code`, if there was one.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: The smallest program that shows it. A single file that runs under `tsx` is ideal.
+      render: ts
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: Telemetry events you saw, relevant `history()` output, or what you already ruled out.
+    validations:
+      required: false

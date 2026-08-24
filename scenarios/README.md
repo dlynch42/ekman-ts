@@ -1,5 +1,7 @@
 # Ekman conformance scenarios
 
+[Back to the main README](../README.md)
+
 Language-agnostic conformance scenarios for Ekman. Every scenario is a single JSON file.
 Every implementation copies this directory verbatim and writes a thin runner that reads
 these files, drives its own runtime through its **public API only**, and diffs actual
