@@ -38,14 +38,15 @@ For small fixes (typos, doc clarifications, obvious one-line bugs), feel free to
 
 ## Releases
 
-Releases are automated with [`auto`](https://intuit.github.io/auto/). There are two branches and two channels:
+Releases are automated with [`auto`](https://intuit.github.io/auto/). There are three branches and two published channels:
 
-| Branch | Runs | Publishes | Install with |
+| Branch | Role | Publishes | Install with |
 |---|---|---|---|
-| `release` | on every merge | a release candidate, `X.Y.Z-rc.N` | `npm install ekman@rc` |
-| `main` | when `release` is merged into it | the stable release, `X.Y.Z` | `npm install ekman` |
+| `release` | trunk, where work lands | nothing | |
+| `rc` | prerelease | `X.Y.Z-rc.N` | `npm install ekman@rc` |
+| `main` | stable | `X.Y.Z` | `npm install ekman` |
 
-Work lands on `release`, so every merged PR is installable as a release candidate within a few minutes. When a batch is ready, a maintainer opens a `release` into `main` PR and the accumulated changes graduate to a stable version under the `latest` tag. `auto` picks the semver bump from the merged PRs' labels, generates `CHANGELOG.md`, bumps the version in `package.json`, creates the `vX.Y.Z` tag and GitHub release, and publishes to npm.
+Changes promote in one direction: a pull request lands on `release`, a maintainer merges `release` into `rc` to cut a release candidate, and merges `rc` into `main` to graduate it to a stable version under the `latest` tag. `auto` picks the semver bump from the merged pull requests' labels, generates `CHANGELOG.md`, bumps the version in `package.json`, creates the `vX.Y.Z` tag and GitHub release, and publishes to npm.
 
 A release candidate's number is derived, not chosen: the bump ratchets up and never down. If a `minor` PR merges and then a `patch` PR merges, the second lands as `0.2.0-rc.1`, not `0.1.1-rc.0`. The pending minor is not lost.
 

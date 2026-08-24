@@ -6,7 +6,7 @@ name: Release
 # workflow, so a second publishing workflow could not authenticate.
 on:
   push:
-    branches: [main, release]
+    branches: [main, rc]
   workflow_dispatch:
 
 concurrency:
@@ -79,47 +79,18 @@ jobs:
       - name: Verify the packed tarball
         run: npm run verify:package
 
+      # One step for both channels: `auto shipit` is context aware, publishing
+      # a stable release from the base branch and a prerelease from a branch
+      # listed in `prereleaseBranches`. `rc` is a real branch, so the version
+      # identifier and the npm dist-tag it derives from the branch name are
+      # simply `rc`.
+      #
       # Publishes via npm trusted publishing (OIDC). No token is involved: the
       # package on npmjs.com carries a trusted publisher for this repository,
       # this workflow file and the `release` environment, and provenance is
       # attached automatically. Deliberately no NODE_AUTH_TOKEN, because
       # setup-node writes one into .npmrc and npm would prefer it over OIDC.
-      - name: Release stable
-        if: github.ref == 'refs/heads/main'
+      - name: Release
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: npx auto shipit
-
-      # `auto` takes both the semver prerelease identifier and the npm dist-tag
-      # from the branch name, with no way to configure them apart. It reads that
-      # branch name from GITHUB_REF rather than from git, so aliasing the ref is
-      # what turns a merge into `release` into 0.2.0-rc.N on the `rc` tag. The
-      # local checkout is still needed: auto ends by pushing that branch.
-      - name: Release candidate
-        if: github.ref == 'refs/heads/release'
-        env:
-          GITHUB_REF: refs/heads/rc
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-        run: |
-          git checkout -B rc
-          # Assert the alias took before anything is published. This is not
-          # paranoia: with the override missing, `auto` resolves the branch as
-          # `release`, which is neither the base branch nor a prerelease branch,
-          # and it publishes a plain stable release to `latest` instead. Failing
-          # here is the difference between a broken build and a bad release.
-          node -e '
-            const { getCurrentBranch } = require("@auto-it/core");
-            const branch = getCurrentBranch();
-            if (branch !== "rc") {
-              console.error(`::error::auto resolved the branch as "${branch}", expected "rc". The GITHUB_REF alias is not taking effect, and publishing now would ship a stable release from the staging branch.`);
-              process.exit(1);
-            }
-            console.log(`auto sees branch: ${branch}`);
-          '
-          npx auto shipit
-
-      # The alias branch is an implementation detail of the step above and has
-      # no reason to exist on the remote. Tags are independent refs and survive.
-      - name: Remove the rc alias branch
-        if: always() && github.ref == 'refs/heads/release'
-        run: git push origin --delete rc || true
