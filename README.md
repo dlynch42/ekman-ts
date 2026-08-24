@@ -14,9 +14,6 @@ transition history, constraints, retries and timeouts, queries, and a memory bud
 server to deploy, no cluster to run, and no sidecar: it is a library you construct at your
 entrypoint. A runtime you embed, not a platform you operate.
 
-> **v0.1.** Targets Ekman spec 0.1. Passes the Core and Durable conformance levels; Coordinated
-> is not claimed. Pre-1.0, so minor versions may make breaking changes.
-
 <details>
 <summary>Contents</summary>
 
@@ -403,6 +400,7 @@ Reports pass or fail per scenario per level, and exits non-zero if a claimed lev
 | Module formats | ESM (`import`) and CommonJS (`require`), both shipped |
 | TypeScript | Types bundled. Resolves under `NodeNext`, `Bundler` and `Node16`. |
 | Runtime dependencies | None |
+| Versioning | Pre-1.0, so minor versions may make breaking changes |
 
 ## Documentation
 
