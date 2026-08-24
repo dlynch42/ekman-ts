@@ -3,6 +3,7 @@
   "name": "Devin Lynch",
   "email": "45407464+dlynch42@users.noreply.github.com",
   "baseBranch": "main",
+  "prereleaseBranches": ["rc"],
   "labels": [
     {
       "name": "spec",
