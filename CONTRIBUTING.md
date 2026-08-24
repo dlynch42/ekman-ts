@@ -32,7 +32,7 @@ Feature requests go in the issue tracker too, via the [feature request template]
 2. **Set up** your local environment (see [Getting set up](#getting-set-up)).
 3. **Commit** with clear, concise messages. Imperative mood (`Add foo`, not `Added foo`); first line under 72 chars; reference issues with `Closes #N` in the body.
 4. **Test**: `npm run typecheck`, `npm run lint`, `npm test`, and `npm run conformance` must all pass locally before you push.
-5. **Submit** a PR against `main` using the [PR template](.github/PULL_REQUEST_TEMPLATE.md). Fill out every section.
+5. **Submit** a PR against `release` using the [PR template](.github/PULL_REQUEST_TEMPLATE.md). Fill out every section.
 
 For small fixes (typos, doc clarifications, obvious one-line bugs), feel free to skip the issue and go straight to a PR. For non-trivial changes, open an issue first; it saves rework if the design needs iteration.
 
