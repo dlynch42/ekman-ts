@@ -8,14 +8,6 @@ on:
   push:
     branches: [main, release]
   workflow_dispatch:
-    inputs:
-      version:
-        description: >-
-          Force an exact version instead of computing one from PR labels.
-          Only needed to bootstrap the first release, which has no prior tag
-          to compute from. Example: 0.1.0
-        required: false
-        type: string
 
 concurrency:
   # Deliberately not keyed on the ref: a stable release and a release candidate
@@ -96,15 +88,7 @@ jobs:
         if: github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-          # Through the environment rather than interpolated into the script, so
-          # the input cannot be read as shell.
-          FORCED_VERSION: ${{ inputs.version }}
-        run: |
-          if [ -n "$FORCED_VERSION" ]; then
-            npx auto shipit --use-version "$FORCED_VERSION"
-          else
-            npx auto shipit
-          fi
+        run: npx auto shipit
 
       # `auto` takes both the semver prerelease identifier and the npm dist-tag
       # from the branch name, with no way to configure them apart. It reads that
