@@ -75,6 +75,7 @@
     "prepublishOnly": "npm run typecheck && npm run lint && npm test && npm run conformance && npm run build"
   },
   "devDependencies": {
+    "@auto-it/core": "^11.3.6",
     "@auto-it/npm": "^11.3.6",
     "@biomejs/biome": "^2.5.6",
     "@types/node": "^22.9.0",
