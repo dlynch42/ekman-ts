@@ -91,9 +91,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # Through the environment rather than interpolated into the script, so
+          # the input cannot be read as shell.
+          FORCED_VERSION: ${{ inputs.version }}
         run: |
-          if [ -n "${{ inputs.version }}" ]; then
-            npx auto shipit --use-version "${{ inputs.version }}"
+          if [ -n "$FORCED_VERSION" ]; then
+            npx auto shipit --use-version "$FORCED_VERSION"
           else
             npx auto shipit
           fi

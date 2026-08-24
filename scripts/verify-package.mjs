@@ -11,7 +11,14 @@
  * from the tarball.
  */
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -25,7 +32,8 @@ const ALLOWED_DIR = "dist/";
 const REQUIRED = ["dist/index.js", "dist/index.cjs", "dist/index.d.ts"];
 
 /** Documents that must never ship. */
-const PRIVATE_DOCS = /(^|\/)(SPEC|DESIGN|CLAUDE|IMPLEMENTATION|DECISIONS)\.md$/i;
+const PRIVATE_DOCS =
+  /(^|\/)(SPEC|DESIGN|CLAUDE|IMPLEMENTATION|DECISIONS)\.md$/i;
 
 const failures = [];
 const fail = (message) => failures.push(message);
@@ -51,7 +59,9 @@ const [packed] = JSON.parse(packOutput);
 const tarball = join(ROOT, packed.filename);
 const entries = packed.files.map((f) => f.path);
 
-console.log(`${packed.filename} (${entries.length} files, ${packed.size} bytes)`);
+console.log(
+  `${packed.filename} (${entries.length} files, ${packed.size} bytes)`
+);
 
 // audit contents
 
@@ -97,7 +107,12 @@ try {
 
   run(
     "npm",
-    ["install", tarball, `typescript@${devDep("typescript")}`, `@types/node@${devDep("@types/node")}`],
+    [
+      "install",
+      tarball,
+      `typescript@${devDep("typescript")}`,
+      `@types/node@${devDep("@types/node")}`,
+    ],
     { cwd: scratch }
   );
   installed = true;
@@ -105,97 +120,38 @@ try {
 
   // ESM
 
-  // Deliberately the README quickstart's shape, so this also proves the
-  // published example still compiles and runs against the published package.
-  const QUICKSTART = [
-    'import { defineEntity, Ekman, isTransitionEvent, stay, transitionTo } from "ekman";',
-    "",
-    "const orders = defineEntity(\"orders\", {",
-    '  initial: "pending",',
-    "  values: { total: 0 },",
-    "  states: {",
-    "    pending: (order, trigger) =>",
-    '      trigger.type === "pay"',
-    '        ? transitionTo("paid", { total: order.values.total + 4200 })',
-    "        : stay(order.values),",
-    "    paid: (order) => stay(order.values),",
-    "  },",
-    "});",
-    "",
-    "const ekman = new Ekman({ entities: [orders] });",
-    'const committed = await ekman.send("orders:a-1", { type: "pay" });',
-    'if (committed.state !== "paid") {',
-    "  throw new Error(`expected paid, got ${committed.state}`);",
-    "}",
-    "if (committed.values.total !== 4200) {",
-    "  throw new Error(`expected 4200, got ${committed.values.total}`);",
-    "}",
-    "",
-    'const { events } = await ekman.entities.orders.history("a-1");',
-    "const path = events",
-    "  .filter(isTransitionEvent)",
-    '  .map((e) => `${e.from ?? "(new)"} -> ${e.to}`)',
-    '  .join(", ");',
-    'if (path !== "(new) -> pending, pending -> paid") {',
-    "  throw new Error(`unexpected history: ${path}`);",
-    "}",
-    "",
-    "await ekman.close();",
-  ];
+  // The probe sources are real files under scripts/probes/ rather than string
+  // literals here, so they stay readable and lintable. quickstart.ts is the
+  // README's own example: it must be valid as both JS and TS, and it is written
+  // into the scratch project three ways.
+  const quickstart = readFileSync(
+    join(import.meta.dirname, "probes", "quickstart.ts"),
+    "utf8"
+  ).split("\n");
+  // Matches the last line of the import whether the formatter has kept it on
+  // one line or wrapped it across several.
+  const importAt = quickstart.findIndex((line) =>
+    line.includes('from "ekman"')
+  );
+  const preamble = quickstart.slice(0, importAt + 1).join("\n");
+  const statements = quickstart.slice(importAt + 1);
 
   step("Importing as ESM");
   writeFileSync(
     join(scratch, "probe.mjs"),
-    `${[...QUICKSTART, 'console.log("  esm ok");'].join("\n")}\n`
+    `${[preamble, ...statements, 'console.log("  esm ok");'].join("\n")}\n`
   );
   run("node", ["probe.mjs"], { cwd: scratch, inherit: true });
 
   // CJS
 
   step("Requiring as CommonJS");
-  writeFileSync(
-    join(scratch, "probe.cjs"),
-    `${[
-      'const ekman = require("ekman");',
-      "",
-      "const expected = [",
-      '  "Ekman",',
-      '  "defineEntity",',
-      '  "transitionTo",',
-      '  "stay",',
-      '  "fail",',
-      '  "isTransitionEvent",',
-      "];",
-      "",
-      "const missing = expected.filter((name) => typeof ekman[name] !== \"function\");",
-      "if (missing.length > 0) {",
-      '  throw new Error(`require("ekman") is missing: ${missing.join(", ")}`);',
-      "}",
-      "",
-      "const orders = ekman.defineEntity(\"orders\", {",
-      '  initial: "pending",',
-      "  states: {",
-      '    pending: (order) => ekman.stay(order.values),',
-      "  },",
-      "});",
-      "",
-      "const runtime = new ekman.Ekman({ entities: [orders] });",
-      "runtime",
-      '  .send("orders:a-1", { type: "poke" })',
-      "  .then((committed) => {",
-      '    if (committed.state !== "pending") {',
-      "      throw new Error(`expected pending, got ${committed.state}`);",
-      "    }",
-      "    return runtime.close();",
-      "  })",
-      '  .then(() => console.log("  cjs ok"))',
-      "  .catch((error) => {",
-      "    console.error(error);",
-      "    process.exit(1);",
-      "  });",
-    ].join("\n")}\n`
+  copyFileSync(
+    join(import.meta.dirname, "probes", "require.cjs"),
+    join(scratch, "probe.cjs")
   );
   run("node", ["probe.cjs"], { cwd: scratch, inherit: true });
+  console.log("  cjs ok");
 
   // type resolution
 
@@ -232,12 +188,10 @@ try {
 
     // Top-level await is only legal in the ESM probe, so the CJS one runs the
     // same statements inside an async function rather than a rewritten copy.
-    const [importLine, ...statements] = QUICKSTART;
     const body =
       flavor === "module"
-        ? QUICKSTART
+        ? statements
         : [
-            importLine,
             "",
             "async function main() {",
             ...statements.map((line) => (line === "" ? "" : `  ${line}`)),
@@ -250,6 +204,7 @@ try {
       join(dir, "probe.ts"),
       `${[
         'import type { EkmanEvent, TransitionEvent } from "ekman";',
+        preamble,
         ...body,
         "",
         "export type Probe = TransitionEvent | EkmanEvent;",
