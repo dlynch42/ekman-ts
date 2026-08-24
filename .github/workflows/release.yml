@@ -29,14 +29,18 @@ jobs:
     runs-on: ubuntu-latest
     # Gated behind the "release" GitHub Environment so an approval rule can be added.
     environment: release
-    # Belt and braces against a publish loop. The primary protection is the
-    # `[skip ci]` that `auto` appends to its own "Bump version to:" and
-    # "Update CHANGELOG.md" commits, which GitHub honors natively. This second
-    # check matches the author `auto` commits as, which it takes from the
-    # `email` field in .autorc rather than from the Actions identity.
+    # Guards against a publish loop. `auto` appends `[skip ci]` to its own
+    # "Bump version to:" and "Update CHANGELOG.md" commits, and GitHub honors
+    # that natively by not triggering at all, so this condition is a second
+    # layer rather than the mechanism.
+    #
+    # Deliberately not keyed on the commit author: `auto` takes its identity
+    # from the `email` field in .autorc, which is the maintainer's own address,
+    # so an author check cannot tell a release commit from a human one. Keying
+    # on the author skips every release instead of just auto's own.
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      github.event.head_commit.author.email != '45407464+dlynch42@users.noreply.github.com'
+      !contains(github.event.head_commit.message, '[skip ci]')
     permissions:
       contents: write # push the version bump commit + tag, create the GitHub release
       issues: write # auto comments on issues fixed by the release
