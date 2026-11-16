@@ -1,3 +1,4 @@
+import type { CompiledTemporal } from "./constraints";
 import { compileConstraints } from "./constraints";
 import { EkmanError } from "./errors";
 import { buildKey } from "./key";
@@ -97,6 +98,8 @@ export function defineEntity<
     config.constraints === undefined
       ? undefined
       : compileConstraints<S, V, T>(name, config.constraints, states);
+
+  assertEscalationsRecognized(name, triggers, constraints?.temporal ?? []);
 
   return Object.freeze({
     name,
@@ -205,5 +208,34 @@ function assertEntityName(name: string): void {
       `entity name ${JSON.stringify(name)} must not contain ":" or whitespace, ` +
         "because it is the first segment of every key it addresses"
     );
+  }
+}
+
+/**
+ * Refuse a time bound whose escalation the entity would refuse on arrival.
+ *
+ * An escalation is delivered as a trigger. An entity that declares which trigger types it
+ * recognizes and leaves this one out would refuse it as unknown, and the instance the bound
+ * was watching would stay exactly where it was stuck. A bound that only warns delivers
+ * nothing, so it is not held to this.
+ */
+function assertEscalationsRecognized(
+  entity: string,
+  triggers: ReadonlySet<string> | null,
+  bounds: readonly CompiledTemporal[]
+): void {
+  if (triggers === null) {
+    return;
+  }
+
+  for (const bound of bounds) {
+    if (bound.policy !== "warn" && !triggers.has(bound.trigger)) {
+      throw new EkmanError(
+        "INVALID_CONFIG",
+        `entity "${entity}": temporal constraint "${bound.name}" delivers trigger type ` +
+          `"${bound.trigger}", which is not in the declared triggers list. Add it to ` +
+          "`triggers`, or set `trigger` on the constraint to one that is declared."
+      );
+    }
   }
 }

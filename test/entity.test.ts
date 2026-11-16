@@ -11,6 +11,8 @@ import type { EntityDefinition } from "../src/types.js";
 // Deliberately unannotated. Annotating this `Handler` would widen its return to
 // HandlerResult<string>, which is not assignable to a handler for a narrow state union,
 // and the widening would look like a library bug rather than a test-helper bug.
+const UNDECLARED_ESCALATION = /"constraint\.temporal".*declared triggers/s;
+
 const noop = () => stay();
 
 const code = (fn: () => unknown) => {
@@ -96,6 +98,30 @@ describe("defineEntity", () => {
 });
 
 describe("defineEntity validation", () => {
+  it("refuses a time bound whose escalation the entity would not recognize", () => {
+    const define = () =>
+      defineEntity("orders", {
+        initial: "a",
+        triggers: ["start"],
+        states: { a: noop },
+        constraints: { temporal: [{ in: "a", within: 10 }] },
+      });
+
+    expect(code(define)).toBe("INVALID_CONFIG");
+    expect(define).toThrow(UNDECLARED_ESCALATION);
+  });
+
+  it("accepts an undeclared escalation type on a bound that only warns", () => {
+    const definition = defineEntity("orders", {
+      initial: "a",
+      triggers: ["start"],
+      states: { a: noop },
+      constraints: { temporal: [{ in: "a", within: 10, policy: "warn" }] },
+    });
+
+    expect(definition.constraints?.temporal).toHaveLength(1);
+  });
+
   it("rejects a missing initial state", () => {
     expect(
       code(() =>

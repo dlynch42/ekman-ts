@@ -202,7 +202,6 @@ describe("loading an instance from the store", () => {
 
     await ekman.entities.orders.send("1", { type: "close" }).catch(() => 0);
 
-    // Nothing was read, so nothing is held: no phantom at sequence 0.
     expect(ekman.residentKeys).toEqual([]);
     expect(ekman.memoryUsage).toMatchObject({ instances: 0, bytes: 0 });
     expect(ekman.entities.orders.inspect("1")).toBeUndefined();
@@ -228,7 +227,6 @@ describe("loading an instance from the store", () => {
     const ekman = new Ekman({ entities: [orders], store });
     const sent = ekman.entities.orders.send("1", { type: "poke" });
 
-    // Until the load lands the record holds the initial state, which the store is past.
     expect(ekman.entities.orders.inspect("1")).toBeUndefined();
     const during = await ekman.entities.orders.query({ state: "open" });
     expect(during.instances).toEqual([]);
@@ -262,7 +260,6 @@ describe("loading an instance from the store", () => {
     await writer.close();
 
     const reader = new Ekman({ entities: [notes], store: shared });
-    // A trigger that commits nothing, so the only accounting is the reload's own.
     await reader.entities.notes.send("1", { type: "bad" }).catch(() => 0);
 
     expect(reader.memoryUsage.bytes).toBe(
@@ -283,7 +280,6 @@ describe("loading an instance from the store", () => {
 
     await a.entities.orders.send("1", { type: "poke" });
     await b.entities.orders.forget("1");
-    // Refused: the stream a was appending to is gone.
     await a.entities.orders.send("1", { type: "poke" }).catch(() => 0);
 
     now = 5000;
@@ -476,7 +472,6 @@ describe("a second writer", () => {
       reason: { code: "STORE_CONFLICT" },
     });
 
-    // The loser re-reads the key rather than trying to create it again forever.
     const recovered = await b.entities.orders.send("1", { type: "poke" });
     expect(recovered.seq).toBe(2);
     await a.close();

@@ -58,6 +58,16 @@ export class InstanceRecord<
   readonly #firedTemporal = new Set<string>();
 
   /**
+   * Temporal constraints whose escalation was raised and turned away for a reason that
+   * passes, by name, with the id of the trigger that was raised.
+   *
+   * The violation is already in the stream by then, so the retry on a later sweep reuses
+   * the id rather than recording a second one, and the commit that finally answers it
+   * carries the cause the violation named. Cleared with `#firedTemporal`.
+   */
+  readonly #undeliveredTemporal = new Map<string, string>();
+
+  /**
    * Whether this record still has to be reconciled with the store.
    *
    * The record is created synchronously inside `send()`, because FIFO order is call order
@@ -218,6 +228,21 @@ export class InstanceRecord<
 
   markFired(constraint: string): void {
     this.#firedTemporal.add(constraint);
+    this.#undeliveredTemporal.delete(constraint);
+  }
+
+  /** The trigger id of an escalation still owed to this constraint, if one was turned away. */
+  undelivered(constraint: string): string | undefined {
+    return this.#undeliveredTemporal.get(constraint);
+  }
+
+  markUndelivered(constraint: string, triggerId: string): void {
+    this.#undeliveredTemporal.set(constraint, triggerId);
+  }
+
+  #rearmTemporal(): void {
+    this.#firedTemporal.clear();
+    this.#undeliveredTemporal.clear();
   }
 
   /**
@@ -411,7 +436,7 @@ export class InstanceRecord<
 
     if (moved) {
       this.#enteredAt = next.at;
-      this.#firedTemporal.clear();
+      this.#rearmTemporal();
     }
 
     this.#bytes = this.#measure();
@@ -495,7 +520,9 @@ export class InstanceRecord<
    * thing that would have happened had the two arrived in the other order.
    *
    * A key another writer deleted comes back as gone rather than as its old self, so it
-   * re-initializes on the next trigger like any other key nothing holds.
+   * re-initializes on the next trigger like any other key nothing holds. That is a new
+   * life: it enters the initial state now, and no temporal constraint that fired in the
+   * deleted one counts as fired.
    */
   async #reload(authority: Store): Promise<void> {
     const loaded = await authority.load(this.key);
@@ -517,9 +544,8 @@ export class InstanceRecord<
       this.#seq = 0;
       this.#bytes = this.#measure();
 
-      // A new life: entered now, with no bound from the deleted one counted as fired.
       this.#enteredAt = this.#deps.now();
-      this.#firedTemporal.clear();
+      this.#rearmTemporal();
 
       const pending: PendingInit<S, V> = {
         initial: this.#initial,

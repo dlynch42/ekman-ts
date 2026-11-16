@@ -1,3 +1,6 @@
+import type { ErrorCode } from "./errors";
+import { isEkmanError } from "./errors";
+
 /**
  * The index of who is sitting where, and since when.
  *
@@ -73,4 +76,41 @@ export class TemporalIndex {
   get size(): number {
     return this.#placement.size;
   }
+}
+
+/**
+ * How one attempt to escalate a temporal constraint ended.
+ *
+ * `delivered` and `warned` are the two ways of having said what there was to say. The two
+ * refusals differ in what the next sweep should do: a `refused` escalation would be refused
+ * again, so the constraint is done for this entry into its state, while one
+ * `refused-transiently` was turned away by a condition that passes and is owed another try.
+ */
+export type EscalationOutcome =
+  | "delivered"
+  | "warned"
+  | "refused"
+  | "refused-transiently";
+
+/**
+ * Refusals that say nothing about the trigger itself: the inbox or the memory budget was
+ * full, the attempt ran out of time, or the store could not take the write just then.
+ */
+const TRANSIENT_REFUSALS: ReadonlySet<ErrorCode> = new Set<ErrorCode>([
+  "INBOX_OVERFLOW",
+  "TRIGGER_DROPPED",
+  "MEMORY_EXHAUSTED",
+  "HANDLER_TIMEOUT",
+  "STORE_CONFLICT",
+  "STORE_UNAVAILABLE",
+  "STORE_FULL",
+]);
+
+/** Classify the error an escalation's `send()` rejected with. */
+export function refusalOutcome(
+  error: unknown
+): Extract<EscalationOutcome, "refused" | "refused-transiently"> {
+  return isEkmanError(error) && TRANSIENT_REFUSALS.has(error.code)
+    ? "refused-transiently"
+    : "refused";
 }

@@ -1,0 +1,46 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/073-two-temporal-constraints-need-distinct-names",
+  "name": "two temporal constraints that would share a name are refused at definition, because which ones have fired is tracked by name",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "deployments",
+        "initial": "deploying",
+        "states": [
+          {
+            "state": "deploying",
+            "else": {
+              "result": "stay"
+            }
+          },
+          {
+            "state": "stalled",
+            "else": {
+              "result": "stay"
+            }
+          }
+        ],
+        "constraints": {
+          "temporal": [
+            {
+              "in": "deploying",
+              "within": 1000
+            },
+            {
+              "in": "deploying",
+              "within": 1000,
+              "escalateTo": "stalled"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "then": {
+    "buildError": {
+      "code": "INVALID_CONFIG"
+    }
+  }
+}

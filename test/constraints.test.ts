@@ -13,6 +13,7 @@ import type { InstanceSnapshot, Trigger } from "../src/types";
 
 const STATES = ["pending", "approved", "shipped"] as const;
 
+const SHARED_NAME = /share the name "temporal:pending:10"/;
 const NO_WAY_OUT = /declared targets are: \(none\)/;
 
 function compile(
@@ -239,8 +240,43 @@ describe("compiling constraints", () => {
     expect(compiled?.guards[0]?.name).toBe("guard:approved");
     expect(compiled?.invariants[0]?.name).toBe("invariant:*");
     expect(compiled?.invariants[1]?.name).toBe("invariant:pending|approved");
-    expect(compiled?.temporal[0]?.name).toBe("temporal:pending");
+    expect(compiled?.temporal[0]?.name).toBe("temporal:pending:10");
     expect(compiled?.temporal[0]?.trigger).toBe(DEFAULT_TEMPORAL_TRIGGER);
+  });
+
+  it("gives unnamed temporal constraints on one state distinct names", () => {
+    const compiled = compile({
+      temporal: [
+        { in: "pending", within: 10 },
+        { in: "pending", within: 100 },
+      ],
+    });
+
+    expect(compiled?.temporal.map((bound) => bound.name)).toEqual([
+      "temporal:pending:10",
+      "temporal:pending:100",
+    ]);
+  });
+
+  it("refuses two temporal constraints that would share a name", () => {
+    const unnamed = () =>
+      compile({
+        temporal: [
+          { in: "pending", within: 10 },
+          { in: "pending", within: 10, escalateTo: "approved" },
+        ],
+      });
+    const named = () =>
+      compile({
+        temporal: [
+          { name: "late", in: "pending", within: 10 },
+          { name: "late", in: "approved", within: 100 },
+        ],
+      });
+
+    expect(code(unnamed)).toBe("INVALID_CONFIG");
+    expect(unnamed).toThrow(SHARED_NAME);
+    expect(code(named)).toBe("INVALID_CONFIG");
   });
 
   it("groups several temporal constraints watching one state", () => {

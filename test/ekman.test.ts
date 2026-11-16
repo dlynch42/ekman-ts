@@ -920,11 +920,12 @@ describe("sweeping for temporal constraints", () => {
   it("reports an escalation that could not be delivered rather than swallowing it", async () => {
     const stuck = defineEntity("stuck", {
       initial: "waiting",
-      states: { waiting: () => stay(), other: () => stay() },
-      // The entity recognizes only this one trigger type, so its own escalation is
-      // refused on arrival. Contrived, but it is the same shape as the realistic case:
-      // an instance stranded in a state whose handler was removed.
-      triggers: ["begin"],
+      states: {
+        waiting: (_instance, trigger) =>
+          trigger.type === "constraint.temporal"
+            ? fail(new Error("cannot move"))
+            : stay(),
+      },
       constraints: {
         temporal: [{ name: "waited", in: "waiting", within: 10 }],
       },
@@ -944,10 +945,108 @@ describe("sweeping for temporal constraints", () => {
     clock.advance(50);
     expect(await ekman.sweep()).toBe(1);
 
-    expect((unhandled[0] as EkmanError).code).toBe("UNKNOWN_TRIGGER");
+    expect((unhandled[0] as EkmanError).code).toBe("HANDLER_FAILED");
     expect(events.find((e) => e.type === "constraint.escalated")).toMatchObject(
       { delivered: false, constraint: "waited" }
     );
+    expect(await ekman.sweep()).toBe(0);
+    await ekman.close();
+  });
+
+  it("tries a refused escalation again on the next sweep, recording one violation", async () => {
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const busy = defineEntity("busy", {
+      initial: "waiting",
+      states: {
+        waiting: async (_instance, trigger) => {
+          if (trigger.type === "hold") {
+            await held;
+          }
+          return trigger.type === "constraint.temporal"
+            ? transitionTo("late")
+            : stay();
+        },
+        late: () => stay(),
+      },
+      constraints: {
+        temporal: [{ name: "waited", in: "waiting", within: 10 }],
+      },
+    });
+
+    const clock = frozenClock();
+    const unhandled: unknown[] = [];
+    const escalated: boolean[] = [];
+    const ekman = new Ekman({
+      entities: [busy],
+      now: clock.now,
+      inbox: { capacity: 0 },
+      onUnhandled: (error) => unhandled.push(error),
+      telemetry: {
+        "constraint.escalated": (event) => escalated.push(event.delivered),
+      },
+    });
+
+    await ekman.entities.busy.send("a", { type: "start" });
+    const holding = ekman.entities.busy.send("a", { type: "hold" });
+    clock.advance(50);
+
+    expect(await ekman.sweep()).toBe(1);
+    expect((unhandled[0] as EkmanError).code).toBe("INBOX_OVERFLOW");
+
+    release();
+    await holding;
+    expect(await ekman.sweep()).toBe(1);
+    expect(await ekman.sweep()).toBe(0);
+
+    expect(ekman.entities.busy.inspect("a")).toMatchObject({ state: "late" });
+    expect(escalated).toEqual([false, true]);
+
+    const { events } = await ekman.entities.busy.history("a");
+    const violations = events.filter((event) => event.type === "violation");
+    expect(violations).toHaveLength(1);
+    expect(events.at(-1)).toMatchObject({
+      type: "transition",
+      to: "late",
+      cause: violations[0]?.cause,
+    });
+    await ekman.close();
+  });
+
+  it("stops evaluating an instance once an escalation has moved it", async () => {
+    const twice = defineEntity("twice", {
+      initial: "waiting",
+      states: {
+        waiting: (_instance, trigger) =>
+          trigger.type === "constraint.temporal"
+            ? transitionTo("late")
+            : stay(),
+        late: () => stay(),
+      },
+      constraints: {
+        temporal: [
+          { name: "first", in: "waiting", within: 10 },
+          { name: "second", in: "waiting", within: 20 },
+        ],
+      },
+    });
+
+    const clock = frozenClock();
+    const ekman = new Ekman({ entities: [twice], now: clock.now });
+    await ekman.entities.twice.send("a", { type: "start" });
+    clock.advance(50);
+
+    expect(await ekman.sweep()).toBe(1);
+
+    const { events } = await ekman.entities.twice.history("a");
+    expect(events.map((event) => `${event.type}@${event.seq}`)).toEqual([
+      "transition@0",
+      "transition@1",
+      "violation@1",
+      "transition@2",
+    ]);
     await ekman.close();
   });
 
@@ -1147,7 +1246,6 @@ describe("forgetting an instance", () => {
 
   it("makes a send that arrives mid-forget start a fresh instance", async () => {
     const inner = memoryStore();
-    // A refusal is written unawaited, so a slow one is still in flight when forget runs.
     const store: Store = {
       name: inner.name,
       capabilities: inner.capabilities,
@@ -1177,7 +1275,6 @@ describe("forgetting an instance", () => {
     const sent = ekman.entities.gated.send("g1", { type: "poke" });
     await forgetting;
 
-    // Loading before the delete would have restored the old stream and committed onto it.
     expect(await sent).toMatchObject({ seq: 1 });
     const { events } = await ekman.entities.gated.history("g1");
     expect(events.map((event) => `${event.type}@${event.seq}`)).toEqual([

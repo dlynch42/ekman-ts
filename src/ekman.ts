@@ -25,7 +25,8 @@ import type { StorageSweep, Store } from "./store";
 import { EMPTY_SEQ } from "./store";
 import type { TelemetryEvent } from "./telemetry";
 import { emit, telemetryNow } from "./telemetry";
-import { TemporalIndex } from "./temporal";
+import type { EscalationOutcome } from "./temporal";
+import { refusalOutcome, TemporalIndex } from "./temporal";
 import type {
   AnyEntityDefinition,
   CommitResult,
@@ -230,7 +231,9 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * Refused with `KEY_BUSY` while a handler is in flight. A commit landing into a key that
    * had just been deleted would resurrect it at a sequence nothing accounts for, and the
    * fence cannot help: an attempt already writing has sealed its token. Refusing is the
-   * honest answer, and a caller that wants to wait can retry.
+   * honest answer, and a caller that wants to wait can retry. Idle is enough to know: the
+   * inbox starts draining synchronously when it accepts, so an idle instance has nothing
+   * queued and nothing in flight.
    *
    * Forgetting a key that was never here is not an error, so a sweep that dies halfway
    * behaves the same way when it is run again.
@@ -238,6 +241,12 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * The record leaves the table before the delete is awaited, and a record created for the
    * same key meanwhile waits for the delete before it loads. Otherwise it would restore the
    * stream being removed and commit on top of it, and that commit would then be deleted.
+   * What that record waits on never rejects, since a failed delete is this caller's to hear.
+   *
+   * The delete itself waits for the record's queued writes, because a refusal written
+   * without being awaited would otherwise land afterwards and recreate the stream. It then
+   * clears every layer, not only the authority: a cache still holding the stream would
+   * serve it back on the next load.
    */
   async forget(key: string): Promise<void> {
     const parsed = parseKey(key).key;
@@ -256,9 +265,6 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       }
     }
 
-    // A non-empty queue implies a running drain, because the inbox starts draining
-    // synchronously when it accepts. So an idle instance has nothing queued and nothing
-    // in flight, and there is no attempt left to fence.
     if (instance !== undefined && !instance.idle) {
       throw new EkmanError(
         "KEY_BUSY",
@@ -269,22 +275,18 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       );
     }
 
-    // Out of the table before anything is awaited, so a send that arrives now starts afresh.
     const bytes = instance === undefined ? 0 : this.#release(instance);
 
     const deleting = (this.#forgetting.get(parsed) ?? Promise.resolve()).then(
       async () => {
-        // An unawaited refusal landing after the delete would recreate the stream.
         await instance?.flushed();
 
-        // Every layer: a cache still holding the stream would serve it back.
         await allSettledOrThrow(
           this.#stack.layers.map((layer) => layer.forget?.(parsed))
         );
       }
     );
 
-    // What a new record waits on never rejects; a failed delete is this caller's to hear.
     const settled = deleting.then(noop, noop);
     this.#forgetting.set(parsed, settled);
     try {
@@ -853,11 +855,16 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     return bytes;
   }
 
+  /**
+   * Release an idle instance to make room, snapshotting it first when a store exists.
+   *
+   * A record another writer has overtaken is released without a snapshot: its view is
+   * known to be behind the store, and the store is where the next load reads from.
+   */
   #evict(instance: AnyInstance): void {
     const { authority } = this.#stack;
     // Gated on a store existing, not on it being durable. Snapshotting into an ephemeral
     // store is worth doing: it is exactly what the next in-process reload reads.
-    // Skipped for a record another writer overtook, whose view is known to be behind.
     const snapshotted =
       this.#memory.snapshotOnEvict &&
       authority !== undefined &&
@@ -1078,30 +1085,41 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     return fired;
   }
 
-  /** Evaluate one instance against the constraints watching the state it is in. */
+  /**
+   * Evaluate one instance against the constraints watching the state it is in.
+   *
+   * Constraints run in declaration order. One is marked fired only once its escalation has
+   * been delivered or refused for good, so an escalation turned away by a full inbox is
+   * raised again by the next sweep. The pass ends as soon as the instance has left the
+   * state: the remaining constraints watch somewhere it no longer is.
+   *
+   * @returns how many escalations were raised, delivered or not
+   */
   async #sweepInstance(
     key: string,
     state: string,
     constraints: readonly CompiledTemporal[],
     at: number
   ): Promise<number> {
-    const aged = this.#ageOf(key, state, at);
-    if (aged === undefined) {
-      return 0;
-    }
-
-    const { instance, elapsedMs } = aged;
     let fired = 0;
 
     for (const constraint of constraints) {
+      const aged = this.#ageOf(key, state, at);
+      if (aged === undefined) {
+        return fired;
+      }
+
+      const { instance, elapsedMs } = aged;
       if (elapsedMs < constraint.within || instance.hasFired(constraint.name)) {
         continue;
       }
 
-      instance.markFired(constraint.name);
       fired += 1;
-      // biome-ignore lint/performance/noAwaitInLoops: two constraints on one state fire in declaration order, and the second observes what the first produced
-      await this.#escalate(instance, constraint, elapsedMs, at);
+      // biome-ignore lint/performance/noAwaitInLoops: two constraints on one state fire in declaration order, and the second runs only if the first left the instance where it was
+      const outcome = await this.#escalate(instance, constraint, elapsedMs, at);
+      if (outcome !== "refused-transiently") {
+        instance.markFired(constraint.name);
+      }
     }
 
     return fired;
@@ -1225,19 +1243,27 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * already doing and dispatches against the state it is in when its turn comes. The
    * runtime never writes state on its own: `escalateTo` rides on the trigger, and the
    * handler decides.
+   *
+   * A trigger id is allocated even for a warning, so the recorded violation always has a
+   * traceable cause and the counter advances identically under either policy. When an
+   * earlier sweep raised this escalation and it was turned away, the violation is already
+   * in the stream, so only the trigger is sent again, under the id that violation named.
+   *
+   * A send that rejects is reported through `onUnhandled` rather than thrown: the usual
+   * cause is that the state an instance is stuck in cannot handle the trigger, which is
+   * exactly the situation the constraint was watching for.
    */
   async #escalate(
     instance: AnyInstance,
     constraint: CompiledTemporal,
     elapsedMs: number,
     at: number
-  ): Promise<void> {
-    // Allocated even for a warning, so the recorded violation always has a cause that can
-    // be traced, and so the counter advances identically under either policy.
-    const id = this.#nextTriggerId();
+  ): Promise<EscalationOutcome> {
+    const owed = instance.undelivered(constraint.name);
+    const id = owed ?? this.#nextTriggerId();
+    const cause = { type: constraint.trigger, id };
     const trigger = {
-      type: constraint.trigger,
-      id,
+      ...cause,
       constraint: constraint.name,
       state: constraint.in,
       sinceMs: elapsedMs,
@@ -1246,6 +1272,50 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
         : { escalateTo: constraint.escalateTo }),
     } as Trigger;
 
+    if (owed === undefined) {
+      this.#recordTemporalViolation(instance, constraint, elapsedMs, at, cause);
+    }
+
+    if (constraint.policy === "warn") {
+      return "warned";
+    }
+
+    let outcome: EscalationOutcome = "delivered";
+    try {
+      await this.send(instance.key, trigger);
+    } catch (error) {
+      outcome = refusalOutcome(error);
+      this.#onUnhandled(error);
+    }
+
+    if (outcome === "refused-transiently") {
+      instance.markUndelivered(constraint.name, id);
+    }
+
+    this.#emit({
+      type: "constraint.escalated",
+      key: instance.key,
+      entity: instance.entity,
+      constraint: constraint.name,
+      state: constraint.in,
+      elapsedMs,
+      escalateTo: constraint.escalateTo,
+      trigger: cause,
+      delivered: outcome === "delivered",
+      at: telemetryNow(),
+    });
+
+    return outcome;
+  }
+
+  /** Write a temporal violation to the instance's stream and mirror it in telemetry. */
+  #recordTemporalViolation(
+    instance: AnyInstance,
+    constraint: CompiledTemporal,
+    elapsedMs: number,
+    at: number,
+    cause: { type: string; id: string }
+  ): void {
     const reason =
       `has been in "${constraint.in}" for ${elapsedMs}ms, over its bound of ` +
       `${constraint.within}ms`;
@@ -1258,7 +1328,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
         reason,
       },
       at,
-      cause: { type: constraint.trigger, id },
+      cause,
     });
 
     this.#emit({
@@ -1270,35 +1340,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       constraint: constraint.name,
       policy: constraint.policy,
       reason,
-      trigger: { type: constraint.trigger, id },
-      at: telemetryNow(),
-    });
-
-    if (constraint.policy === "warn") {
-      return;
-    }
-
-    let delivered = true;
-    try {
-      await this.send(instance.key, trigger);
-    } catch (error) {
-      // An escalation that cannot be delivered is itself worth knowing about: the usual
-      // cause is that the state an instance is stuck in has no handler, which is exactly
-      // the situation the constraint was watching for.
-      delivered = false;
-      this.#onUnhandled(error);
-    }
-
-    this.#emit({
-      type: "constraint.escalated",
-      key: instance.key,
-      entity: instance.entity,
-      constraint: constraint.name,
-      state: constraint.in,
-      elapsedMs,
-      escalateTo: constraint.escalateTo,
-      trigger: { type: constraint.trigger, id },
-      delivered,
+      trigger: cause,
       at: telemetryNow(),
     });
   }
