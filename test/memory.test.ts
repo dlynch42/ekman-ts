@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { isEkmanError } from "../src/errors";
 import type { MemoryConfig } from "../src/memory";
-import { accountBytes, MemoryLedger, resolveMemoryConfig } from "../src/memory";
+import {
+  accountBytes,
+  accountValueBytes,
+  byteLength,
+  MemoryLedger,
+  resolveMemoryConfig,
+} from "../src/memory";
 
 const code = (run: () => unknown): string => {
   try {
@@ -129,7 +135,7 @@ describe("MemoryLedger", () => {
     const ledger = new MemoryLedger();
     expect(ledger.total).toBe(0);
     expect(ledger.size).toBe(0);
-    expect(ledger.lru).toEqual([]);
+    expect([...ledger.lruKeys()]).toEqual([]);
     expect(ledger.has("orders:1")).toBe(false);
     expect(ledger.bytesFor("orders:1")).toBe(0);
   });
@@ -159,11 +165,11 @@ describe("MemoryLedger", () => {
     ledger.record("orders:2", 1);
     ledger.record("orders:3", 1);
 
-    expect(ledger.lru).toEqual(["orders:1", "orders:2", "orders:3"]);
+    expect([...ledger.lruKeys()]).toEqual(["orders:1", "orders:2", "orders:3"]);
 
     // Re-measuring counts as use, which is what makes commit order drive eviction order.
     ledger.record("orders:1", 2);
-    expect(ledger.lru).toEqual(["orders:2", "orders:3", "orders:1"]);
+    expect([...ledger.lruKeys()]).toEqual(["orders:2", "orders:3", "orders:1"]);
   });
 
   it("moves a key to the back on a touch without changing what it costs", () => {
@@ -172,7 +178,7 @@ describe("MemoryLedger", () => {
     ledger.record("orders:2", 10);
 
     ledger.touch("orders:1");
-    expect(ledger.lru).toEqual(["orders:2", "orders:1"]);
+    expect([...ledger.lruKeys()]).toEqual(["orders:2", "orders:1"]);
     expect(ledger.total).toBe(20);
   });
 
@@ -180,7 +186,7 @@ describe("MemoryLedger", () => {
     const ledger = new MemoryLedger();
     ledger.record("orders:1", 10);
     ledger.touch("orders:404");
-    expect(ledger.lru).toEqual(["orders:1"]);
+    expect([...ledger.lruKeys()]).toEqual(["orders:1"]);
   });
 
   it("returns what a released key was costing", () => {
@@ -208,5 +214,44 @@ describe("a budget of zero", () => {
 
   it("is accepted under lru", () => {
     expect(resolve({ maxBytes: 0 }).policy).toBe("lru");
+  });
+});
+
+describe("walking the ledger while releasing from it", () => {
+  it("visits every key once, coldest first, as keys are released", () => {
+    const ledger = new MemoryLedger();
+    for (const key of ["orders:1", "orders:2", "orders:3"]) {
+      ledger.record(key, 1);
+    }
+
+    const visited: string[] = [];
+    for (const key of ledger.lruKeys()) {
+      visited.push(key);
+      ledger.release(key);
+    }
+
+    expect(visited).toEqual(["orders:1", "orders:2", "orders:3"]);
+    expect(ledger.size).toBe(0);
+  });
+});
+
+describe("the accounting basis, by parts", () => {
+  it("counts a string the way an encoder would, lone surrogates included", () => {
+    const encoded = (text: string) => new TextEncoder().encode(text).length;
+
+    for (const text of ["plain", "日本語", "\uD800", "a\uDC00b", "😀"]) {
+      expect(byteLength(text)).toBe(encoded(text));
+    }
+  });
+
+  it("is the key, the state and the values added together", () => {
+    const values = { note: "日本語" };
+
+    expect(accountBytes("orders:1", "open", values, undefined)).toBe(
+      byteLength("orders:1") +
+        byteLength("open") +
+        accountValueBytes(values, undefined)
+    );
+    expect(accountValueBytes(values, () => 7)).toBe(7);
   });
 });

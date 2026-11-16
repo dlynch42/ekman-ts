@@ -6,6 +6,7 @@ import { Ekman } from "../src/ekman";
 import { defineEntity } from "../src/entity";
 import { EkmanError } from "../src/errors";
 import type { EkmanEvent, TransitionEvent } from "../src/events";
+import { RESIDENT_HISTORY_LIMIT } from "../src/instance";
 import { fail, stay, transitionTo } from "../src/results";
 import type { Store } from "../src/store";
 import { memoryStore } from "../src/stores/memory";
@@ -2055,6 +2056,54 @@ describe("deciding whether a failure is worth another attempt", () => {
     await ekman.entities.nested.send("a", { type: "run" });
 
     expect(calls).toBe(2);
+    await ekman.close();
+  });
+});
+
+describe("history held in memory", () => {
+  const counting = defineEntity("counting", {
+    initial: "open",
+    values: { n: 0 },
+    states: { open: (instance) => stay({ n: instance.values.n + 1 }) },
+  });
+
+  it("is capped per key, and says so once the cap has been reached", async () => {
+    const ekman = new Ekman({ entities: [counting] });
+    const send = () => ekman.entities.counting.send("a", { type: "tick" });
+
+    await send();
+    const early = await ekman.entities.counting.history("a");
+    expect(early.reasons).toEqual(["no-durable-store"]);
+
+    for (let n = 0; n < RESIDENT_HISTORY_LIMIT; n += 1) {
+      // biome-ignore lint/performance/noAwaitInLoops: one key is fully serialized
+      await send();
+    }
+
+    const late = await ekman.entities.counting.history("a");
+    expect(late.events).toHaveLength(RESIDENT_HISTORY_LIMIT);
+    expect(late.events.at(-1)).toMatchObject({
+      seq: RESIDENT_HISTORY_LIMIT + 1,
+    });
+    expect(late.complete).toBe(false);
+    expect(late.reasons).toEqual(["no-durable-store", "history-capped"]);
+    expect(ekman.entities.counting.inspect("a")?.values).toEqual({
+      n: RESIDENT_HISTORY_LIMIT + 1,
+    });
+    await ekman.close();
+  });
+
+  it("is not capped when a store holds the stream", async () => {
+    const ekman = new Ekman({ entities: [counting], store: "memory" });
+
+    for (let n = 0; n < RESIDENT_HISTORY_LIMIT + 10; n += 1) {
+      // biome-ignore lint/performance/noAwaitInLoops: one key is fully serialized
+      await ekman.entities.counting.send("a", { type: "tick" });
+    }
+
+    const { events, reasons } = await ekman.entities.counting.history("a");
+    expect(events).toHaveLength(RESIDENT_HISTORY_LIMIT + 11);
+    expect(reasons).not.toContain("history-capped");
     await ekman.close();
   });
 });

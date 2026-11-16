@@ -807,7 +807,13 @@
     },
     "partiality": {
       "description": "Why an answer is not the whole answer. A result is complete exactly when there are none.",
-      "enum": ["no-durable-store", "unsupported-criteria", "limit-reached"]
+      "enum": [
+        "no-durable-store",
+        "unsupported-criteria",
+        "limit-reached",
+        "compacted",
+        "history-capped"
+      ]
     },
     "errorCode": {
       "enum": [

@@ -30,6 +30,19 @@ memory: { maxBytes: 32 * 1024 * 1024, sizeOf: (values) => values.blob.byteLength
 
 `ekman.memoryUsage` reports `{ bytes, instances, maxBytes }` at any time.
 
+### History is not in the budget, and is bounded separately
+
+The basis counts an instance's current values, not the events that led to them. What a runtime
+keeps of a key's history depends on whether anything else holds it:
+
+- **With a store**, the stream lives in the store and `history()` reads it from there. An
+  instance keeps none of its own transitions in memory, so a key that commits for the life of
+  a process costs the same resident memory on its millionth commit as on its first.
+- **With no store**, the runtime's copy is the only one, so each instance keeps its most recent
+  1,000 events and drops older ones. `history()` then reports `history-capped` beside
+  `no-durable-store`. Current state, values and sequence are never affected. If you need the
+  whole stream, configure a store.
+
 ## When the budget is full
 
 | Policy | What happens |

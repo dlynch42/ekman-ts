@@ -735,6 +735,8 @@ Partiality reasons:
 | `no-durable-store` | The answer covers only what the runtime and any ephemeral store retain. |
 | `unsupported-criteria` | A store could not evaluate a filter, so the runtime applied it afterwards. |
 | `limit-reached` | The answer was truncated. |
+| `compacted` | A store folded part of the stream into a snapshot, so a history is missing its middle. |
+| `history-capped` | No store holds the stream and the runtime keeps a bounded number of events per key in memory, so a history is missing its oldest events. |
 
 A result is `complete` exactly when there are no reasons. A memory-only runtime is never
 complete, even when it happens to hold everything, because it cannot know that it does.

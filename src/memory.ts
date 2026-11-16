@@ -84,8 +84,6 @@ export interface ResolvedMemoryConfig {
   readonly bounded: boolean;
 }
 
-const encoder = new TextEncoder();
-
 /**
  * The accounting basis, stated once so it can be relied on.
  *
@@ -103,12 +101,36 @@ export function accountBytes(
   values: Values,
   sizeOf: ((values: Values) => number) | undefined
 ): number {
-  const valueBytes =
-    sizeOf === undefined
-      ? encoder.encode(JSON.stringify(values)).length
-      : sizeOf(values);
+  return (
+    byteLength(key) + byteLength(state) + accountValueBytes(values, sizeOf)
+  );
+}
 
-  return encoder.encode(key).length + encoder.encode(state).length + valueBytes;
+/**
+ * The values' share of the accounting basis: their serialized UTF-8 length, or whatever
+ * the caller's `sizeOf` says.
+ *
+ * Separate from `accountBytes` because it is the only part that changes on every commit.
+ * A record holds its key's length for life and its state's until it moves, so the commit
+ * path measures this alone.
+ */
+export function accountValueBytes(
+  values: Values,
+  sizeOf: ((values: Values) => number) | undefined
+): number {
+  return sizeOf === undefined
+    ? byteLength(JSON.stringify(values))
+    : sizeOf(values);
+}
+
+/**
+ * UTF-8 byte length of a string, without encoding it.
+ *
+ * Counts what an encoder would produce, including three bytes for a lone surrogate, but
+ * allocates nothing, where encoding to measure allocates a buffer per string per commit.
+ */
+export function byteLength(text: string): number {
+  return Buffer.byteLength(text, "utf8");
 }
 
 const MEMORY_KEYS = ["maxBytes", "sizeOf", "eviction"] as const;
@@ -225,9 +247,15 @@ export class MemoryLedger {
     return this.#bytes.size;
   }
 
-  /** Keys from least to most recently used. */
-  get lru(): readonly string[] {
-    return [...this.#bytes.keys()];
+  /**
+   * Keys from least to most recently used, without copying them.
+   *
+   * Safe to release from while walking: a `Map` iterator tolerates entries being deleted
+   * under it. Eviction usually stops after one key, so a copy of every resident key per
+   * idle transition was the whole cost of evicting.
+   */
+  lruKeys(): IterableIterator<string> {
+    return this.#bytes.keys();
   }
 
   has(key: string): boolean {

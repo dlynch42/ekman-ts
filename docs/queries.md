@@ -56,6 +56,9 @@ The whole per-key ordered stream: transitions, refused triggers, constraint viol
 reloads, in order. It reads through the commit authority when one is configured, so it covers
 the instance's whole life and not only what this process happened to see.
 
+With no store, the answer comes from what the runtime holds in memory, which is the most
+recent 1,000 events for the key. A longer history is reported as `history-capped`, below.
+
 ```ts
 import { isTransitionEvent } from "ekman";
 
@@ -85,6 +88,7 @@ if (!complete) {
 | `unsupported-criteria` | A store could not evaluate one of the filters, so it was applied after the fact. |
 | `limit-reached` | The answer was truncated by `limit`. |
 | `compacted` | The stream was compacted, so events before the snapshot are gone. Current state, values and sequence are unaffected; what is missing is the middle of the history. |
+| `history-capped` | No store holds the stream, and the instance has more events than a runtime keeps in memory per key (the most recent 1,000), so the oldest are gone. Current state, values and sequence are unaffected. Only `history` reports this, and always alongside `no-durable-store`. |
 
 `complete: false` does not mean the answer is wrong. It means something in the configuration
 cannot see everything, and `reasons` says what.

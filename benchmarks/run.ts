@@ -14,6 +14,7 @@
 import { NAME as COMMIT_RATE, run as commitRate } from "./commit-rate";
 import { NAME as CONSTRAINTS, run as constraints } from "./constraints";
 import { NAME as EDGE_CHECK, run as edgeCheck } from "./edge-check";
+import { NAME as EVICTION_CHURN, run as evictionChurn } from "./eviction-churn";
 import { NAME as FAN_OUT, run as fanOut } from "./fan-out";
 import {
   BASELINE_PATH,
@@ -27,13 +28,16 @@ import {
   sameMachine,
   writeBaseline,
 } from "./lib";
+import { NAME as LONG_HISTORY, run as longHistory } from "./long-history";
 import { NAME as OVERFLOW, run as overflow } from "./overflow";
 
 const SUITES: ReadonlyMap<string, () => Promise<SuiteResult>> = new Map([
   [COMMIT_RATE, commitRate],
   [CONSTRAINTS, constraints],
   [EDGE_CHECK, edgeCheck],
+  [EVICTION_CHURN, evictionChurn],
   [FAN_OUT, fanOut],
+  [LONG_HISTORY, longHistory],
   [OVERFLOW, overflow],
 ]);
 

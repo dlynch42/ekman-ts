@@ -13,6 +13,11 @@ import type { Values } from "./types";
  * Only plain objects and arrays are frozen. Anything else structured clone carries (a
  * `Date`, a `Map`, binary data) is copied and left as it is, because freezing a typed
  * array throws and freezing a `Map` does not stop it being written to.
+ *
+ * Values are nearly always plain JSON data, and for that a structured clone is most of
+ * what a commit costs. So plain data is copied and frozen in one walk here, and anything
+ * that walk cannot express is handed to structured clone, which decides what is and is
+ * not serializable exactly as it always did.
  */
 
 /**
@@ -30,7 +35,7 @@ export function sealValues<V extends Values>(
   key: string
 ): Readonly<V> {
   try {
-    return freezeValues(structuredClone(values));
+    return copyFrozen(values);
   } catch (cause) {
     // biome-ignore lint/style/useErrorCause: EkmanError takes `cause` in its options bag and forwards it to the Error constructor
     throw new EkmanError(
@@ -61,7 +66,7 @@ export function sealInitialValues<V extends Values>(
 ): Readonly<V> {
   try {
     assertPlainJson(values, "values", []);
-    return freezeValues(structuredClone(values));
+    return copyFrozen(values);
   } catch (cause) {
     // biome-ignore lint/style/useErrorCause: EkmanError takes `cause` in its options bag and forwards it to the Error constructor
     throw new EkmanError(
@@ -133,6 +138,57 @@ function assertPlainJson(
   for (const [key, nested] of Object.entries(value)) {
     assertPlainJson(nested, `${path}.${key}`, within);
   }
+}
+
+/** How deep the plain walk goes before leaving the rest to structured clone. */
+const MAX_PLAIN_DEPTH = 32;
+
+/** Returned by the plain walk when it meets something it cannot copy faithfully. */
+const NOT_PLAIN = Symbol("not plain data");
+
+/**
+ * A frozen deep copy, by the plain walk when the values allow it and by structured clone
+ * when they do not.
+ */
+function copyFrozen<V>(values: V): Readonly<V> {
+  const copied = copyPlain(values, 0);
+  return copied === NOT_PLAIN
+    ? freezeValues(structuredClone(values))
+    : (copied as Readonly<V>);
+}
+
+/**
+ * Copy and freeze plain data, or report that it is not plain.
+ *
+ * Gives up, rather than guessing, on anything structured clone treats specially: a
+ * function or symbol (which it refuses), a built-in or class instance (which it copies by
+ * kind), and a key named `__proto__` (which assignment would turn into a prototype). It
+ * also gives up past a fixed depth, which is what keeps a value that refers to itself from
+ * being walked forever; structured clone copies such a value correctly.
+ */
+function copyPlain(value: unknown, depth: number): unknown {
+  if (typeof value !== "object" || value === null) {
+    return typeof value === "function" || typeof value === "symbol"
+      ? NOT_PLAIN
+      : value;
+  }
+  if (depth > MAX_PLAIN_DEPTH || !isPlain(value)) {
+    return NOT_PLAIN;
+  }
+
+  const source = value as Record<string, unknown>;
+  const copy: Record<string, unknown> | unknown[] = Array.isArray(value)
+    ? new Array(value.length)
+    : {};
+
+  for (const key of Object.keys(source)) {
+    const nested = copyPlain(source[key], depth + 1);
+    if (nested === NOT_PLAIN || key === "__proto__") {
+      return NOT_PLAIN;
+    }
+    (copy as Record<string, unknown>)[key] = nested;
+  }
+  return Object.freeze(copy);
 }
 
 function isPlain(value: unknown): value is object {

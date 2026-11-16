@@ -331,7 +331,10 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
         key: parsed,
         events: (instance?.events ?? []) as readonly EkmanEvent<S, V>[],
         complete: false,
-        reasons: NO_DURABLE_STORE,
+        reasons:
+          instance?.historyTrimmed === true
+            ? CAPPED_IN_MEMORY
+            : NO_DURABLE_STORE,
         sources: RESIDENT_ONLY,
       });
     }
@@ -786,17 +789,14 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
 
   /** Reconcile an instance with the store, reporting a reload when one happened. */
   async #hydrate(instance: AnyInstance): Promise<void> {
-    const before = instance.events.length;
+    const before = instance.lastRestored;
     await instance.ready();
 
     this.#ledger.record(instance.key, instance.bytes);
     this.#temporal.enter(instance.key, instance.entity, instance.state);
 
-    const restored = instance.events
-      .slice(before)
-      .find((event) => event.type === "restored");
-
-    if (restored !== undefined && restored.type === "restored") {
+    const restored = instance.lastRestored;
+    if (restored !== undefined && restored !== before) {
       this.#emit({
         type: "instance.restored",
         key: instance.key,
@@ -860,7 +860,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * over rather than a commit going missing.
    */
   #evictToFit(): void {
-    for (const key of this.#ledger.lru) {
+    for (const key of this.#ledger.lruKeys()) {
       if (this.#ledger.total <= this.#memory.maxBytes) {
         return;
       }
@@ -1396,6 +1396,10 @@ const EMPTY_SWEEP: StorageSweep = Object.freeze({
 const NONE: readonly Partiality[] = Object.freeze([]);
 const NO_DURABLE_STORE: readonly Partiality[] = Object.freeze([
   "no-durable-store" as const,
+]);
+const CAPPED_IN_MEMORY: readonly Partiality[] = Object.freeze([
+  "no-durable-store" as const,
+  "history-capped" as const,
 ]);
 const RESIDENT_ONLY: readonly string[] = Object.freeze(["resident"]);
 const COMPACTED: readonly Partiality[] = Object.freeze(["compacted"]);
