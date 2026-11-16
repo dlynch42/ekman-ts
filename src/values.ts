@@ -45,10 +45,11 @@ export function sealValues<V extends Values>(
 /**
  * Deep-copy and freeze an entity's declared initial values.
  *
- * Held to what a commit is held to, plus the one thing a commit checks later: that JSON
- * can represent them. A `BigInt` survives structured clone and cannot be measured or
- * persisted, so without the second check the definition would be accepted and every
- * instance of it would fail on its first trigger.
+ * Held to a stricter rule than a commit: they must be plain JSON data, checked before
+ * anything is copied. Every instance of the entity shares these values, so anything in
+ * them that cannot be frozen (a `Map`, a `Date`, binary data) would be mutable state shared
+ * across instances, and would not come back the same from a store. A `BigInt` or a
+ * function would be accepted here and fail every instance on its first trigger instead.
  *
  * @param values the entity's `values`, or an empty object when it declares none
  * @param entity the entity name, for the error
@@ -59,9 +60,8 @@ export function sealInitialValues<V extends Values>(
   entity: string
 ): Readonly<V> {
   try {
-    const sealed = freezeValues(structuredClone(values));
-    JSON.stringify(sealed);
-    return sealed;
+    assertPlainJson(values, "values", []);
+    return freezeValues(structuredClone(values));
   } catch (cause) {
     // biome-ignore lint/style/useErrorCause: EkmanError takes `cause` in its options bag and forwards it to the Error constructor
     throw new EkmanError(
@@ -78,21 +78,61 @@ export function sealInitialValues<V extends Values>(
  * Freeze values in place, at every depth.
  *
  * For values nothing else holds a reference to: a fresh copy, or what a store handed back
- * on a load. An object that is already frozen is taken to have been walked, which is also
- * what stops a value that refers to itself from being walked forever.
+ * on a load. Objects already visited are remembered rather than inferred from being
+ * frozen: a store may hand back something frozen only at the top, and what is below it
+ * still has to be walked. Remembering them is also what ends the walk for a value that
+ * refers to itself.
  *
  * @returns the same object, frozen
  */
 export function freezeValues<V>(values: V): Readonly<V> {
-  if (!isPlain(values) || Object.isFrozen(values)) {
-    return values;
+  freezeWithin(values, new WeakSet());
+  return values;
+}
+
+function freezeWithin(value: unknown, visited: WeakSet<object>): void {
+  if (!isPlain(value) || visited.has(value)) {
+    return;
   }
 
-  Object.freeze(values);
-  for (const nested of Object.values(values)) {
-    freezeValues(nested);
+  visited.add(value);
+  Object.freeze(value);
+  for (const nested of Object.values(value)) {
+    freezeWithin(nested, visited);
   }
-  return values;
+}
+
+/**
+ * Throw unless a value is plain JSON data all the way down, naming where it is not.
+ *
+ * `ancestors` is the chain of objects currently being walked, so a value that contains
+ * itself is reported instead of followed.
+ */
+function assertPlainJson(
+  value: unknown,
+  path: string,
+  ancestors: readonly object[]
+): void {
+  const kind = typeof value;
+  if (kind === "function" || kind === "symbol" || kind === "bigint") {
+    throw new TypeError(`${path} is a ${kind}`);
+  }
+  if (kind !== "object" || value === null) {
+    return;
+  }
+  if (!isPlain(value)) {
+    throw new TypeError(
+      `${path} is a ${(value as object).constructor?.name ?? "non-plain object"}`
+    );
+  }
+  if (ancestors.includes(value)) {
+    throw new TypeError(`${path} contains itself`);
+  }
+
+  const within = [...ancestors, value];
+  for (const [key, nested] of Object.entries(value)) {
+    assertPlainJson(nested, `${path}.${key}`, within);
+  }
 }
 
 function isPlain(value: unknown): value is object {

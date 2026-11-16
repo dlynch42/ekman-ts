@@ -263,6 +263,35 @@ const CONSTRAINT_KEYS = [
 
 const STATE_KEYS = ["handler", ...POLICY_KEYS] as const;
 
+/** The options each kind of constraint declaration takes, by the key it is declared under. */
+const DECLARATION_KEYS = {
+  transitions: ["allow", "policy"],
+  guards: ["name", "on", "from", "policy", "check"],
+  invariants: ["name", "in", "policy", "check"],
+  temporal: ["name", "in", "within", "escalateTo", "trigger", "policy"],
+} as const;
+
+/**
+ * Refuse an unrecognized option on any single constraint declaration.
+ *
+ * The same reasoning as for every other level, with a sharper edge: a misspelled `policy`
+ * leaves a constraint on its default of `reject`, so a rule meant only to warn starts
+ * failing commits.
+ */
+function assertDeclarationKeys(where: string, constraints: object = {}): void {
+  for (const [kind, known] of Object.entries(DECLARATION_KEYS)) {
+    const declared = (constraints as Record<string, unknown>)[kind];
+    const each = Array.isArray(declared) ? declared : [declared];
+
+    each.forEach((declaration, i) => {
+      if (typeof declaration === "object" && declaration !== null) {
+        const which = Array.isArray(declared) ? `${kind}[${i}]` : kind;
+        assertKnownKeys(`${where} constraints.${which}`, declaration, known);
+      }
+    });
+  }
+}
+
 /**
  * Refuse an entity config that says something the runtime would silently not do.
  *
@@ -284,6 +313,7 @@ function assertEntityConfig(
 
   assertKnownKeys(where, config, ENTITY_KEYS);
   assertKnownKeys(`${where} constraints`, config.constraints, CONSTRAINT_KEYS);
+  assertDeclarationKeys(where, config.constraints);
   assertPolicyKeys(config.policy, `${where} policy`);
 
   for (const [state, declared] of Object.entries(config.states ?? {})) {

@@ -296,6 +296,15 @@ describe("sealing values", () => {
     expect(sealed.loop.self).toBe(sealed.loop);
   });
 
+  it("freezes below an object that was already frozen at the top", () => {
+    const loaded = Object.freeze({ nested: { deeper: { n: 1 } } });
+
+    freezeValues(loaded);
+
+    expect(Object.isFrozen(loaded.nested)).toBe(true);
+    expect(Object.isFrozen(loaded.nested.deeper)).toBe(true);
+  });
+
   it("freezes in place what a store handed back", () => {
     const loaded = { nested: { n: 1 } };
 

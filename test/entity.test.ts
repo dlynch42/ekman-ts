@@ -18,6 +18,12 @@ const UNKNOWN_POLICY = /unknown policy "ignore"/;
 
 const noop = () => stay();
 
+function selfReferring(): Record<string, unknown> {
+  const loop: Record<string, unknown> = {};
+  loop.self = loop;
+  return { loop };
+}
+
 const code = (fn: () => unknown) => {
   try {
     fn();
@@ -416,6 +422,11 @@ describe("initial values", () => {
   it.each([
     ["a function", { fn: () => 1 }],
     ["a value JSON cannot represent", { big: 10n }],
+    ["a Map, which a store would not bring back", { nested: new Map() }],
+    ["a Date", { nested: { when: new Date(0) } }],
+    ["binary data", { blob: new Uint8Array(2) }],
+    ["a class instance", { list: [new (class Point {})()] }],
+    ["a value that contains itself", selfReferring()],
   ])("refuses %s at definition", (_what, values) => {
     const define = () =>
       defineEntity("orders", { initial: "a", values, states: { a: noop } });
@@ -439,6 +450,35 @@ describe("unrecognized configuration", () => {
   it.each([
     ["the entity", { ...base, intial: "a" }, '"intial"'],
     ["its constraints", { ...base, constraints: { guard: [] } }, '"guard"'],
+    [
+      "a transition graph",
+      { ...base, constraints: { transitions: { allow: {}, polcy: "warn" } } },
+      '"polcy"',
+    ],
+    [
+      "a guard",
+      {
+        ...base,
+        constraints: { guards: [{ on: "a", check: noop, polcy: 1 }] },
+      },
+      '"polcy"',
+    ],
+    [
+      "an invariant",
+      {
+        ...base,
+        constraints: { invariants: [{ check: noop, polcy: "warn" }] },
+      },
+      '"polcy"',
+    ],
+    [
+      "a time bound",
+      {
+        ...base,
+        constraints: { temporal: [{ in: "a", within: 5, escalte: "a" }] },
+      },
+      '"escalte"',
+    ],
     ["its policy", { ...base, policy: { maxAttempt: 2 } }, '"maxAttempt"'],
     [
       "a state's policy",
