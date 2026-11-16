@@ -841,3 +841,32 @@ describe("store helpers", () => {
     expect(message).toContain("has no events");
   });
 });
+
+describe("values restored from a store", () => {
+  it("are as frozen as the ones a commit produced", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ekman-frozen-"));
+    const carts = defineEntity("carts", {
+      initial: "open",
+      states: {
+        open: (cart, trigger) => {
+          if (trigger.type === "tamper") {
+            (cart.values.nested as { n: number }).n = 5;
+          }
+          return stay({ nested: { n: 1 } });
+        },
+      },
+    });
+    const first = new Ekman({ entities: [carts], store: fileStore(dir) });
+    await first.entities.carts.send("a", { type: "fill" });
+    await first.close();
+
+    const second = new Ekman({ entities: [carts], store: fileStore(dir) });
+    const tampering = await second.entities.carts
+      .send("a", { type: "tamper" })
+      .catch((error: EkmanError) => error.code);
+
+    expect(tampering).toBe("HANDLER_FAILED");
+    await second.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+});

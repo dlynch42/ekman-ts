@@ -6,7 +6,6 @@ import type { EventCause } from "./events";
 import type { CommitToken } from "./fence";
 import { fenceReason } from "./fence";
 import type { InstanceRecord } from "./instance";
-import { sealValues } from "./instance";
 import type { ExecutionPolicy, ResolvedPolicy } from "./policy";
 import { backoffDelay, resolvePolicy } from "./policy";
 import type { HandlerResult, StayResult, TransitionToResult } from "./results";
@@ -21,6 +20,7 @@ import type {
   Trigger,
   Values,
 } from "./types";
+import { sealValues } from "./values";
 
 /** Everything a dispatch needs that is owned by the runtime rather than the instance. */
 export interface DispatchDeps {

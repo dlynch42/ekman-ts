@@ -1,3 +1,4 @@
+import { assertKnownKeys } from "./config";
 import { EkmanError } from "./errors";
 import type { Values } from "./types";
 
@@ -110,6 +111,9 @@ export function accountBytes(
   return encoder.encode(key).length + encoder.encode(state).length + valueBytes;
 }
 
+const MEMORY_KEYS = ["maxBytes", "sizeOf", "eviction"] as const;
+const EVICTION_KEYS = ["policy", "snapshotOnEvict", "allowDiscard"] as const;
+
 /**
  * Resolve the budget against what the stores can offer.
  *
@@ -122,6 +126,9 @@ export function resolveMemoryConfig(
   config: MemoryConfig | undefined,
   context: { hasStore: boolean }
 ): ResolvedMemoryConfig {
+  assertKnownKeys("memory", config, MEMORY_KEYS);
+  assertKnownKeys("memory eviction", config?.eviction, EVICTION_KEYS);
+
   const maxBytes = config?.maxBytes ?? Number.POSITIVE_INFINITY;
   const policy = config?.eviction?.policy ?? "lru";
 
@@ -153,6 +160,15 @@ export function resolveMemoryConfig(
       "INVALID_CONFIG",
       "memory maxBytes of 0 means every instance loads through a store, but no store is " +
         "configured, so there would be nothing to load from."
+    );
+  }
+
+  if (maxBytes === 0 && policy !== "lru") {
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      "memory maxBytes of 0 means no instance may stay resident, which only the " +
+        `"lru" eviction policy can honour by releasing each one as it goes idle. ` +
+        `Policy "${policy}" releases nothing. Use "lru", or raise maxBytes.`
     );
   }
 

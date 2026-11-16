@@ -13,6 +13,9 @@ import type { EntityDefinition } from "../src/types.js";
 // and the widening would look like a library bug rather than a test-helper bug.
 const UNDECLARED_ESCALATION = /"constraint\.temporal".*declared triggers/s;
 
+const INITIAL_VALUES = /initial values of entity "orders"/;
+const UNKNOWN_POLICY = /unknown policy "ignore"/;
+
 const noop = () => stay();
 
 const code = (fn: () => unknown) => {
@@ -393,5 +396,67 @@ describe("type inference", () => {
       });
 
     expectTypeOf(orders.initial).toEqualTypeOf<State>();
+  });
+});
+
+describe("initial values", () => {
+  it("freezes them all the way down, on a copy", () => {
+    const source = { nested: { n: 1 }, list: [{ id: 1 }] };
+    const definition = defineEntity("orders", {
+      initial: "a",
+      values: source,
+      states: { a: noop },
+    });
+
+    expect(Object.isFrozen(definition.initialValues.nested)).toBe(true);
+    expect(Object.isFrozen(definition.initialValues.list[0])).toBe(true);
+    expect(definition.initialValues.nested).not.toBe(source.nested);
+  });
+
+  it.each([
+    ["a function", { fn: () => 1 }],
+    ["a value JSON cannot represent", { big: 10n }],
+  ])("refuses %s at definition", (_what, values) => {
+    const define = () =>
+      defineEntity("orders", { initial: "a", values, states: { a: noop } });
+
+    expect(code(define)).toBe("INVALID_CONFIG");
+    expect(define).toThrow(INITIAL_VALUES);
+  });
+});
+
+describe("unrecognized configuration", () => {
+  const base = { initial: "a", states: { a: noop } } as const;
+
+  it("refuses an unknown policy other than reject", () => {
+    const define = () =>
+      defineEntity("orders", { ...base, unknown: "ignore" } as never);
+
+    expect(code(define)).toBe("INVALID_CONFIG");
+    expect(define).toThrow(UNKNOWN_POLICY);
+  });
+
+  it.each([
+    ["the entity", { ...base, intial: "a" }, '"intial"'],
+    ["its constraints", { ...base, constraints: { guard: [] } }, '"guard"'],
+    ["its policy", { ...base, policy: { maxAttempt: 2 } }, '"maxAttempt"'],
+    [
+      "a state's policy",
+      { initial: "a", states: { a: { handler: noop, timeout: 5 } } },
+      '"timeout"',
+    ],
+    [
+      "a backoff",
+      {
+        ...base,
+        policy: { backoff: { kind: "fixed", delayMs: 1, baseMs: 1 } },
+      },
+      '"baseMs"',
+    ],
+  ])("refuses a misspelled option on %s", (_where, config, naming) => {
+    const define = () => defineEntity("orders", config as never);
+
+    expect(code(define)).toBe("INVALID_CONFIG");
+    expect(define).toThrow(naming);
   });
 });

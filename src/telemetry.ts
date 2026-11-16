@@ -320,6 +320,39 @@ export type TelemetryEvent =
 export type TelemetryEventType = TelemetryEvent["type"];
 
 /**
+ * Every telemetry event name, as a value.
+ *
+ * Written as a record keyed by the union so that it cannot fall out of step with it: an
+ * event type added to `TelemetryEvent` and left out here is a compile error, and so is a
+ * name here that no event carries.
+ */
+const EVENT_TYPES: Readonly<Record<TelemetryEventType, true>> = {
+  "inbox.enqueued": true,
+  "inbox.rejected": true,
+  "inbox.dropped": true,
+  "handler.started": true,
+  "handler.settled": true,
+  "handler.retried": true,
+  "handler.timedOut": true,
+  "commit.fenced": true,
+  "commit.raced": true,
+  "constraint.violated": true,
+  "constraint.escalated": true,
+  "instance.evicted": true,
+  "instance.forgotten": true,
+  "instance.restored": true,
+  "memory.accounted": true,
+  "memory.refused": true,
+  "audit.failed": true,
+  "store.cacheFailed": true,
+  "storage.swept": true,
+};
+
+export const TELEMETRY_EVENT_TYPES = Object.freeze(
+  Object.keys(EVENT_TYPES)
+) as readonly TelemetryEventType[];
+
+/**
  * Where telemetry goes: a map from event name to handler, each one precisely typed, plus
  * `"*"` for everything no named handler claimed.
  *

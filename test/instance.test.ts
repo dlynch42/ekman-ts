@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { EkmanError } from "../src/errors";
 import { isTransitionEvent } from "../src/events";
-import { InstanceRecord, sealValues } from "../src/instance";
+import { InstanceRecord } from "../src/instance";
 import { States } from "../src/states";
 import { memoryStore } from "../src/stores/memory";
+import { freezeValues, sealValues } from "../src/values";
 import { testDeps } from "./deps";
 
 const deps = testDeps();
@@ -268,5 +269,65 @@ describe("sealValues", () => {
       expect((err as EkmanError).code).toBe("HANDLER_FAILED");
       expect((err as EkmanError).key).toBe("orders:1");
     }
+  });
+});
+
+describe("sealing values", () => {
+  it("freezes nested objects and arrays", () => {
+    const sealed = sealValues({ nested: { deep: [{ n: 1 }] } }, "orders:1");
+
+    expect(Object.isFrozen(sealed.nested)).toBe(true);
+    expect(Object.isFrozen(sealed.nested.deep)).toBe(true);
+    expect(Object.isFrozen(sealed.nested.deep[0])).toBe(true);
+  });
+
+  it("leaves binary data usable", () => {
+    const sealed = sealValues({ blob: new Uint8Array([1, 2, 3]) }, "orders:1");
+
+    expect(sealed.blob.byteLength).toBe(3);
+  });
+
+  it("copies a value that refers to itself", () => {
+    const loop: { self?: unknown } = {};
+    loop.self = loop;
+
+    const sealed = sealValues({ loop }, "orders:1");
+
+    expect(sealed.loop.self).toBe(sealed.loop);
+  });
+
+  it("freezes in place what a store handed back", () => {
+    const loaded = { nested: { n: 1 } };
+
+    expect(freezeValues(loaded)).toBe(loaded);
+    expect(Object.isFrozen(loaded.nested)).toBe(true);
+  });
+});
+
+describe("a commit whose values cannot be measured", () => {
+  it("is refused before anything is written or applied", async () => {
+    const store = memoryStore();
+    const record = new InstanceRecord({
+      key: "orders:1",
+      entity: "orders",
+      initial: "pending",
+      initialValues: {},
+      states: STATES,
+      at: 0,
+      cause: { type: "init", id: "t1" },
+      deps: testDeps({ store }),
+    });
+    await record.ready();
+
+    const refused = await commit(record, {
+      state: "pending",
+      values: { big: 10n },
+      at: 1,
+      cause: { type: "x", id: "t2" },
+    }).catch((error: EkmanError) => error);
+
+    expect(refused).toMatchObject({ code: "HANDLER_FAILED", key: "orders:1" });
+    expect(record.seq).toBe(0);
+    expect(await store.read("orders:1")).toHaveLength(1);
   });
 });

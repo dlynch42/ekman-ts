@@ -23,6 +23,14 @@ so a given instance is the same instance whichever door its trigger came through
 Every option is optional. `new Ekman()` is legal and gives you a memory-only runtime with no
 entities registered yet.
 
+Configuration is checked when the runtime is constructed, and again for each entity at
+`define()`. An option the runtime does not recognize, at any level, is refused with
+`INVALID_CONFIG` and the list of options that level does take, so a misspelling cannot leave a
+setting at its default unnoticed. An execution policy no attempt could run under is refused
+then too, rather than by the first trigger. Every setting that becomes a timer (`timeoutMs`,
+backoff delays, `sweepMs`) may be at most 2,147,483,647 ms, a little under 25 days, which is
+the longest delay a timer can hold.
+
 ## `new Ekman(config)`
 
 | Option | Type | Default | See |

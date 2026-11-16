@@ -43,9 +43,37 @@ export interface RuntimeDeps {
   readonly audit: (event: EkmanEvent) => void;
 }
 
+/**
+ * Refuse keys a config object does not have.
+ *
+ * A misspelled option is otherwise ignored, and the setting it was meant to change keeps
+ * its default with nothing to say so: `maxbytes` leaves the budget unlimited.
+ *
+ * @param where what is being configured, for the error
+ * @param value the object as the caller passed it
+ * @param known every key it may carry
+ */
+export function assertKnownKeys(
+  where: string,
+  value: object | undefined,
+  known: readonly string[]
+): void {
+  for (const key of Object.keys(value ?? {})) {
+    if (!known.includes(key)) {
+      throw new EkmanError(
+        "INVALID_CONFIG",
+        `${where} has an unrecognized option "${key}". Known options: ${known.join(", ")}.`
+      );
+    }
+  }
+}
+
+const INBOX_KEYS = ["capacity", "overflow", "recordOverflow"] as const;
+
 export function resolveInboxConfig(
   config: InboxConfig | undefined
 ): ResolvedInboxConfig {
+  assertKnownKeys("inbox", config, INBOX_KEYS);
   const capacity = config?.capacity ?? DEFAULT_CAPACITY;
   const overflow = config?.overflow ?? "reject";
 

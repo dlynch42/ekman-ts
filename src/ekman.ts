@@ -1,7 +1,7 @@
 import type { AuditSink } from "./audit";
 import { deliverTo } from "./audit";
 import type { RuntimeDeps } from "./config";
-import { resolveInboxConfig } from "./config";
+import { assertKnownKeys, resolveInboxConfig } from "./config";
 import type { CompiledTemporal } from "./constraints";
 import type { DispatchDeps } from "./dispatch";
 import { dispatch } from "./dispatch";
@@ -11,6 +11,7 @@ import { InstanceRecord } from "./instance";
 import { parseKey } from "./key";
 import type { ResolvedMemoryConfig } from "./memory";
 import { MemoryLedger, resolveMemoryConfig } from "./memory";
+import { assertPolicyKeys, MAX_TIMER_MS, resolvePolicy } from "./policy";
 import type {
   HistoryResult,
   Partiality,
@@ -24,7 +25,12 @@ import { assertCoordination, resolveStack } from "./stack";
 import type { StorageSweep, Store } from "./store";
 import { EMPTY_SEQ } from "./store";
 import type { TelemetryEvent } from "./telemetry";
-import { emit, telemetryNow } from "./telemetry";
+import {
+  emit,
+  TELEMETRY_EVENT_TYPES,
+  TELEMETRY_FALLBACK,
+  telemetryNow,
+} from "./telemetry";
 import type { EscalationOutcome } from "./temporal";
 import { refusalOutcome, TemporalIndex } from "./temporal";
 import type {
@@ -96,6 +102,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   #triggerSeq = 0;
 
   constructor(config: EkmanConfig<D> = {}) {
+    assertRuntimeConfig(config);
     this.#now = config.now ?? Date.now;
     this.#onUnhandled = config.onUnhandled ?? defaultOnUnhandled;
     this.#sweeping = false;
@@ -541,6 +548,14 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     return Object.freeze({ bytes, logs, maxBytes });
   }
 
+  /**
+   * Add a definition to the registry.
+   *
+   * Every state's execution policy is resolved against the runtime's default here, and the
+   * result discarded, so a policy no attempt could satisfy fails at construction or at
+   * `define()` rather than on the first trigger. Dispatch resolves again from the same
+   * inputs.
+   */
   #register(definition: AnyDefinition): EntityHandle {
     const existing = this.#definitions.get(definition.name);
 
@@ -548,6 +563,14 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       throw new EkmanError(
         "DUPLICATE_ENTITY",
         `entity "${definition.name}" is already registered with this runtime`
+      );
+    }
+
+    for (const [state, entry] of definition.handlers) {
+      resolvePolicy(
+        this.#deps.policy,
+        entry.policy,
+        `entity "${definition.name}" state "${state}"`
       );
     }
 
@@ -950,10 +973,10 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       return;
     }
 
-    if (!(Number.isFinite(sweepMs) && sweepMs > 0)) {
+    if (!(sweepMs > 0 && sweepMs <= MAX_TIMER_MS)) {
       throw new EkmanError(
         "INVALID_CONFIG",
-        `temporal sweepMs must be a positive number of milliseconds, received ${JSON.stringify(sweepMs)}. ` +
+        `temporal sweepMs must be a positive number of milliseconds, at most ${MAX_TIMER_MS}, received ${JSON.stringify(sweepMs)}. ` +
           "Omit it to sweep only when sweep() is called."
       );
     }
@@ -972,10 +995,10 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       return;
     }
 
-    if (!(Number.isFinite(sweepMs) && sweepMs > 0)) {
+    if (!(sweepMs > 0 && sweepMs <= MAX_TIMER_MS)) {
       throw new EkmanError(
         "INVALID_CONFIG",
-        `storage sweepMs must be a positive number of milliseconds, received ${JSON.stringify(sweepMs)}. ` +
+        `storage sweepMs must be a positive number of milliseconds, at most ${MAX_TIMER_MS}, received ${JSON.stringify(sweepMs)}. ` +
           "Omit it to reclaim only when sweepStorage() is called."
       );
     }
@@ -1405,6 +1428,44 @@ async function allSettledOrThrow(
   if (failed !== undefined) {
     throw failed.reason;
   }
+}
+
+const RUNTIME_KEYS = [
+  "entities",
+  "inbox",
+  "temporal",
+  "storage",
+  "coordination",
+  "store",
+  "memory",
+  "audit",
+  "execution",
+  "telemetry",
+  "now",
+  "onUnhandled",
+] as const;
+
+const SWEEP_KEYS = ["sweepMs"] as const;
+
+/**
+ * Refuse a runtime config the runtime could not honour, before anything is built from it.
+ *
+ * Unrecognized options first, at every level that takes named ones, so a misspelling is
+ * an error rather than a default nobody asked for. Then the runtime-wide execution policy,
+ * which would otherwise only be found unsatisfiable by the first trigger to arrive. Inbox
+ * and memory options are checked where they are resolved.
+ */
+function assertRuntimeConfig(config: EkmanConfig): void {
+  assertKnownKeys("the runtime config", config, RUNTIME_KEYS);
+  assertKnownKeys("temporal", config.temporal, SWEEP_KEYS);
+  assertKnownKeys("storage", config.storage, SWEEP_KEYS);
+  assertKnownKeys("telemetry", config.telemetry, [
+    ...TELEMETRY_EVENT_TYPES,
+    TELEMETRY_FALLBACK,
+  ]);
+
+  assertPolicyKeys(config.execution, "runtime execution policy");
+  resolvePolicy(config.execution, undefined, "runtime execution policy");
 }
 
 function noop(): void {

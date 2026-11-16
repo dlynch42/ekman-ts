@@ -12,6 +12,8 @@ const code = (run: () => unknown): string => {
   return "no-throw";
 };
 
+const ONLY_LRU = /only the "lru" eviction policy/;
+
 const resolve = (config: MemoryConfig | undefined, hasStore = true) =>
   resolveMemoryConfig(config, { hasStore });
 
@@ -190,5 +192,21 @@ describe("MemoryLedger", () => {
     expect(ledger.total).toBe(25);
     expect(ledger.release("orders:404")).toBe(0);
     expect(ledger.total).toBe(25);
+  });
+});
+
+describe("a budget of zero", () => {
+  it.each(["reject", "none"] as const)(
+    "is refused under the %s policy, which cannot release anything",
+    (policy) => {
+      const resolving = () => resolve({ maxBytes: 0, eviction: { policy } });
+
+      expect(code(resolving)).toBe("INVALID_CONFIG");
+      expect(resolving).toThrow(ONLY_LRU);
+    }
+  );
+
+  it("is accepted under lru", () => {
+    expect(resolve({ maxBytes: 0 }).policy).toBe("lru");
   });
 });

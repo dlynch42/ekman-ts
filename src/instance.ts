@@ -16,6 +16,7 @@ import type { NodeId, States } from "./states";
 import type { ReplayedState, Store, StoreSnapshot } from "./store";
 import { EMPTY_SEQ, replay } from "./store";
 import type { InstanceSnapshot, Values } from "./types";
+import { freezeValues } from "./values";
 
 /**
  * One resident instance: its committed state, values, sequence, event stream, and inbox.
@@ -410,6 +411,10 @@ export class InstanceRecord<
    *
    * The apply itself is one synchronous block with no await inside it, which is what makes
    * a commit atomic to any observer reading through the runtime.
+   *
+   * The new values are measured before anything is written, so values that cannot be
+   * serialized refuse the commit. Measured afterwards, they would be applied in memory and
+   * then throw on the way out, leaving a commit no sender, audit sink or ledger heard about.
    */
   async commit(
     next: {
@@ -421,6 +426,12 @@ export class InstanceRecord<
     token: CommitToken
   ): Promise<TransitionEvent<S, V>> {
     assertCommittable(token, { key: this.key, seq: this.#seq });
+    const bytes = measure(
+      this.key,
+      next.state,
+      next.values,
+      this.#deps.memory.sizeOf
+    );
     // From here the attempt owns the outcome: a timeout arriving mid-write must not leave
     // the store holding an event the runtime refused to apply.
     token.seal();
@@ -461,7 +472,7 @@ export class InstanceRecord<
       this.#rearmTemporal();
     }
 
-    this.#bytes = this.#measure();
+    this.#bytes = bytes;
     this.#deps.audit(event);
     return event;
   }
@@ -582,7 +593,7 @@ export class InstanceRecord<
     }
 
     this.#setState(current.state);
-    this.#values = current.values;
+    this.#values = freezeValues(current.values);
     this.#seq = current.seq;
     this.#enteredAt = current.enteredAt;
     this.#bytes = this.#measure();
@@ -631,7 +642,7 @@ export class InstanceRecord<
     }
 
     this.#setState(current.state);
-    this.#values = current.values;
+    this.#values = freezeValues(current.values);
     this.#seq = current.seq;
     this.#enteredAt = current.enteredAt;
     this.#bytes = this.#measure();
@@ -684,7 +695,7 @@ export class InstanceRecord<
   }
 
   #measure(): number {
-    return accountBytes(
+    return measure(
       this.key,
       this.#state,
       this.#values,
@@ -720,25 +731,26 @@ function noop(): void {
 }
 
 /**
- * Deep-copy and freeze values at the commit boundary.
+ * What an instance in this state with these values is accounted at.
  *
- * Copying means a handler that keeps a reference to what it returned cannot mutate
- * committed state afterwards. `structuredClone` also enforces the documented contract
- * that values are serializable, and fails loudly here rather than at the first attempt
- * to persist them.
+ * Wraps the measurement so that values it cannot serialize are refused with a code. A
+ * `BigInt` passes structured clone and fails here, and left bare that failure would reach
+ * the sender as a `TypeError` naming nothing.
  */
-export function sealValues<V extends Values>(
-  values: V,
-  key: string
-): Readonly<V> {
+function measure(
+  key: string,
+  state: string,
+  values: Values,
+  sizeOf: ((values: Values) => number) | undefined
+): number {
   try {
-    return Object.freeze(structuredClone(values) as V);
+    return accountBytes(key, state, values, sizeOf);
   } catch (cause) {
     // biome-ignore lint/style/useErrorCause: EkmanError takes `cause` in its options bag and forwards it to the Error constructor
     throw new EkmanError(
       "HANDLER_FAILED",
-      `values committed for ${key} are not serializable. Values must be a plain, ` +
-        "serializable map: no functions, class instances, or symbols.",
+      `values committed for ${key} cannot be serialized to JSON: ` +
+        `${(cause as Error).message}. Values must be plain JSON data.`,
       { key, cause }
     );
   }

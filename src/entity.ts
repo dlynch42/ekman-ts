@@ -1,8 +1,10 @@
+import { assertKnownKeys } from "./config";
 import type { CompiledTemporal } from "./constraints";
 import { compileConstraints } from "./constraints";
 import { EkmanError } from "./errors";
 import { buildKey } from "./key";
 import type { ExecutionPolicy } from "./policy";
+import { assertPolicyKeys, POLICY_KEYS } from "./policy";
 import { States } from "./states";
 import type {
   EntityConfig,
@@ -15,6 +17,7 @@ import type {
   Values,
 } from "./types";
 import { ERROR_FALLBACK } from "./types";
+import { sealInitialValues } from "./values";
 
 const WHITESPACE = /\s/;
 
@@ -40,6 +43,7 @@ export function defineEntity<
   T extends TriggerLike = Trigger,
 >(name: N, config: EntityConfig<S, V, T>): EntityDefinition<N, S, V, T> {
   assertEntityName(name);
+  assertEntityConfig(name, config);
 
   const handlers = new Map<string, StateEntry<S, V, T>>(
     (Object.entries(config.states) as [string, StateConfig<S, V, T>][]).map(
@@ -85,9 +89,7 @@ export function defineEntity<
     Object.entries(config.onError ?? {}) as [string, ErrorHandler<S, V>][]
   );
 
-  const initialValues = Object.freeze({
-    ...(config.values ?? {}),
-  }) as Readonly<V>;
+  const initialValues = sealInitialValues((config.values ?? {}) as V, name);
   const classify = config.classify ?? defaultClassify;
 
   const states = new States(handlers.keys());
@@ -238,4 +240,71 @@ function assertEscalationsRecognized(
       );
     }
   }
+}
+
+const ENTITY_KEYS = [
+  "initial",
+  "values",
+  "unknown",
+  "triggers",
+  "states",
+  "policy",
+  "onError",
+  "classify",
+  "constraints",
+] as const;
+
+const CONSTRAINT_KEYS = [
+  "transitions",
+  "guards",
+  "invariants",
+  "temporal",
+] as const;
+
+const STATE_KEYS = ["handler", ...POLICY_KEYS] as const;
+
+/**
+ * Refuse an entity config that says something the runtime would silently not do.
+ *
+ * Two kinds of thing. A key that does not exist, at any level that takes named options,
+ * is usually a misspelling of one that does. And `unknown` has exactly one value: plain
+ * JavaScript can pass another, which would otherwise be accepted and behave as `reject`,
+ * leaving the caller believing unrecognized triggers were handled some other way.
+ */
+function assertEntityConfig(
+  name: string,
+  config: {
+    readonly unknown?: unknown;
+    readonly policy?: ExecutionPolicy;
+    readonly constraints?: object;
+    readonly states?: Readonly<Record<string, unknown>>;
+  }
+): void {
+  const where = `entity "${name}"`;
+
+  assertKnownKeys(where, config, ENTITY_KEYS);
+  assertKnownKeys(`${where} constraints`, config.constraints, CONSTRAINT_KEYS);
+  assertPolicyKeys(config.policy, `${where} policy`);
+
+  for (const [state, declared] of Object.entries(config.states ?? {})) {
+    if (typeof declared === "object" && declared !== null) {
+      const label = `${where} state "${state}"`;
+      assertKnownKeys(label, declared, STATE_KEYS);
+      assertPolicyKeys(withoutHandler(declared), label);
+    }
+  }
+
+  if (config.unknown !== undefined && config.unknown !== "reject") {
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      `${where} declares unknown policy ${JSON.stringify(config.unknown)}. The only ` +
+        'policy is "reject": a trigger the entity does not recognize is refused and ' +
+        'the refusal is recorded. Omit the field, or set it to "reject".'
+    );
+  }
+}
+
+function withoutHandler(declared: object): ExecutionPolicy {
+  const { handler: _handler, ...policy } = declared as { handler?: unknown };
+  return policy;
 }

@@ -1859,3 +1859,121 @@ describe("history after compaction", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 });
+
+describe("refusing configuration at construction", () => {
+  it("refuses a runtime-wide execution policy no attempt could satisfy", () => {
+    expect(() => new Ekman({ execution: { maxAttempts: 0 } })).toThrow(
+      expect.objectContaining({ code: "INVALID_CONFIG" })
+    );
+  });
+
+  it("refuses an entity whose state policy no attempt could satisfy", () => {
+    const impatient = defineEntity("impatient", {
+      initial: "a",
+      states: { a: { handler: () => stay(), timeoutMs: -1 } },
+    });
+
+    expect(() => new Ekman({ entities: [impatient] })).toThrow(
+      expect.objectContaining({ code: "INVALID_CONFIG" })
+    );
+    expect(() => new Ekman().define(impatient)).toThrow(
+      expect.objectContaining({ code: "INVALID_CONFIG" })
+    );
+  });
+
+  it.each([
+    ["temporal", { temporal: { sweepMs: 2 ** 31 } }],
+    ["storage", { storage: { sweepMs: 2 ** 31 }, store: "memory" }],
+  ] as const)(
+    "refuses a %s sweep interval a timer cannot hold",
+    (_which, config) => {
+      expect(() => new Ekman(config)).toThrow(
+        expect.objectContaining({ code: "INVALID_CONFIG" })
+      );
+    }
+  );
+
+  it.each([
+    ["the runtime", { entites: [] }, '"entites"'],
+    ["inbox", { inbox: { capcity: 1 } }, '"capcity"'],
+    ["memory", { memory: { maxbytes: 10 } }, '"maxbytes"'],
+    ["eviction", { memory: { eviction: { polcy: "lru" } } }, '"polcy"'],
+    ["execution", { execution: { maxAttempt: 2 } }, '"maxAttempt"'],
+    ["temporal", { temporal: { sweepMS: 5 } }, '"sweepMS"'],
+    ["storage", { storage: { sweepMS: 5 } }, '"sweepMS"'],
+    [
+      "telemetry",
+      { telemetry: { "handler.setled": () => undefined } },
+      '"handler.setled"',
+    ],
+  ])("refuses a misspelled option on %s", (_where, config, naming) => {
+    const constructing = () => new Ekman(config as never);
+
+    expect(constructing).toThrow(
+      expect.objectContaining({ code: "INVALID_CONFIG" })
+    );
+    expect(constructing).toThrow(naming);
+  });
+
+  it("accepts every telemetry event name and the fallback", () => {
+    const ekman = new Ekman({
+      telemetry: { "*": () => undefined, "handler.settled": () => undefined },
+    });
+
+    expect(ekman.entityNames).toEqual([]);
+  });
+});
+
+describe("values a handler cannot corrupt or commit", () => {
+  it("keeps nested initial values out of a handler's reach", async () => {
+    const carts = defineEntity("carts", {
+      initial: "open",
+      values: { nested: { n: 1 } },
+      states: {
+        open: (cart, trigger) => {
+          if (trigger.type === "tamper") {
+            (cart.values.nested as { n: number }).n = 5;
+          }
+          return stay(cart.values);
+        },
+      },
+    });
+    const ekman = new Ekman({ entities: [carts] });
+
+    expect(await code(ekman.entities.carts.send("a", { type: "tamper" }))).toBe(
+      "HANDLER_FAILED"
+    );
+    const other = await ekman.entities.carts.send("b", { type: "read" });
+    expect(other.values).toEqual({ nested: { n: 1 } });
+    await ekman.close();
+  });
+
+  it("refuses a value JSON cannot represent, leaving the instance as it was", async () => {
+    const audited: string[] = [];
+    const sums = defineEntity("sums", {
+      initial: "open",
+      states: { open: () => stay({ big: 10n }) },
+    });
+    const ekman = new Ekman({
+      entities: [sums],
+      audit: [
+        {
+          name: "trail",
+          deliver: (event) => {
+            audited.push(`${event.type}@${event.seq}`);
+          },
+        },
+      ],
+    });
+
+    expect(await code(ekman.entities.sums.send("a", { type: "add" }))).toBe(
+      "HANDLER_FAILED"
+    );
+    expect(ekman.entities.sums.inspect("a")).toMatchObject({
+      seq: 0,
+      values: {},
+    });
+    expect(audited).toEqual(["transition@0"]);
+    await ekman.close();
+  });
+});
