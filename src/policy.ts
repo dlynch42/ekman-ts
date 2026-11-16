@@ -42,6 +42,10 @@ export interface ExecutionPolicy {
   /**
    * Whether a given failure is worth another attempt. Defaults to retrying anything
    * except a refusal, which would only be refused again.
+   *
+   * Receives the error the handler threw or failed with, never the `HANDLER_FAILED` error
+   * the sender is given. For a failure the runtime raised itself (a timeout, a store
+   * conflict, a constraint refusal) it receives that `EkmanError`.
    */
   readonly retryable?: (error: Error) => boolean;
 }

@@ -1977,3 +1977,84 @@ describe("values a handler cannot corrupt or commit", () => {
     await ekman.close();
   });
 });
+
+describe("deciding whether a failure is worth another attempt", () => {
+  class Flaky extends Error {
+    override name = "Flaky";
+  }
+
+  const flakyOnce = () => {
+    let calls = 0;
+    return defineEntity("jobs", {
+      initial: "open",
+      states: {
+        open: () => {
+          calls += 1;
+          if (calls === 1) {
+            throw new Flaky("carrier unavailable");
+          }
+          return stay({ calls });
+        },
+      },
+    });
+  };
+
+  const retrying = (retryable: (error: Error) => boolean) =>
+    new Ekman({
+      entities: [flakyOnce()],
+      execution: {
+        maxAttempts: 2,
+        backoff: { kind: "fixed", delayMs: 0 },
+        retryable,
+      },
+    });
+
+  it("hands the predicate the error the handler threw", async () => {
+    const ekman = retrying((error) => error instanceof Flaky);
+
+    const result = await ekman.entities.jobs.send("a", { type: "run" });
+
+    expect(result.values).toEqual({ calls: 2 });
+    await ekman.close();
+  });
+
+  it("still reports the failure to the sender as a handler failure", async () => {
+    const ekman = retrying((error) => error.name === "Other");
+
+    const refused = await ekman.entities.jobs
+      .send("a", { type: "run" })
+      .catch((error: EkmanError) => error);
+
+    expect(refused).toMatchObject({
+      code: "HANDLER_FAILED",
+      message: "carrier unavailable",
+    });
+    expect((refused as EkmanError).cause).toBeInstanceOf(Flaky);
+    await ekman.close();
+  });
+
+  it("retries a handler failure by default, whatever the handler threw", async () => {
+    let calls = 0;
+    const nested = defineEntity("nested", {
+      initial: "open",
+      states: {
+        open: () => {
+          calls += 1;
+          if (calls === 1) {
+            throw new EkmanError("INBOX_OVERFLOW", "another key was full");
+          }
+          return stay();
+        },
+      },
+    });
+    const ekman = new Ekman({
+      entities: [nested],
+      execution: { maxAttempts: 2, backoff: { kind: "fixed", delayMs: 0 } },
+    });
+
+    await ekman.entities.nested.send("a", { type: "run" });
+
+    expect(calls).toBe(2);
+    await ekman.close();
+  });
+});

@@ -115,24 +115,25 @@ describe("committing through a store", () => {
       telemetry: { "*": (event) => seen.push(event) },
     });
 
-    // The sender is told it timed out.
-    const outcome = await ekman.entities.orders
-      .send("1", { type: "close" })
-      .catch((error: EkmanError) => error.code);
-    expect(outcome).toBe("HANDLER_TIMEOUT");
+    const outcome = await ekman.entities.orders.send("1", { type: "close" });
 
-    // The write lands anyway, and the runtime says so rather than hiding it.
-    await vi.waitFor(() =>
-      expect(seen.map((e) => e.type)).toContain("commit.raced")
-    );
+    expect(outcome).toMatchObject({ state: "closed", seq: 1 });
     expect(seen.find((e) => e.type === "commit.raced")).toMatchObject({
       reason: "timeout",
       seq: 1,
     });
-    expect(ekman.entities.orders.inspect("1")).toMatchObject({
-      state: "closed",
-      seq: 1,
+    expect(seen.map((e) => e.type)).not.toContain("handler.timedOut");
+    expect(
+      seen.filter((e) => e.type === "handler.settled").at(-1)
+    ).toMatchObject({
+      outcome: "committed",
     });
+
+    const closed = await ekman.entities.orders.query({ state: "closed" });
+    expect(closed.instances.map((match) => match.key)).toEqual(["orders:1"]);
+    expect(ekman.memoryUsage.bytes).toBe(
+      accountBytes("orders:1", "closed", {}, undefined)
+    );
 
     await ekman.close();
   });
@@ -474,6 +475,65 @@ describe("a second writer", () => {
 
     const recovered = await b.entities.orders.send("1", { type: "poke" });
     expect(recovered.seq).toBe(2);
+    await a.close();
+    await b.close();
+  });
+
+  it("reloads before a retry, so the handler decides again on what the other writer left", async () => {
+    const shared = memoryStore();
+    const seen: number[] = [];
+    const restores: TelemetryEvent[] = [];
+    const counting = defineEntity("orders", {
+      initial: "open",
+      states: {
+        open: (order) => {
+          seen.push(order.seq);
+          return stay({ n: order.seq });
+        },
+      },
+    });
+    const a = new Ekman({
+      entities: [counting],
+      store: shared,
+      execution: { maxAttempts: 3, backoff: { kind: "fixed", delayMs: 0 } },
+      telemetry: { "instance.restored": (event) => restores.push(event) },
+    });
+    const b = new Ekman({ entities: [orders], store: shared });
+
+    await a.entities.orders.send("1", { type: "poke" });
+    await b.entities.orders.send("1", { type: "poke" });
+    seen.length = 0;
+
+    const recovered = await a.entities.orders.send("1", { type: "poke" });
+
+    expect(recovered.seq).toBe(3);
+    expect(seen).toEqual([1, 2]);
+    expect(restores).toHaveLength(1);
+    await a.close();
+    await b.close();
+  });
+
+  it("refuses a retry when the other writer left a state this runtime has no handler for", async () => {
+    const shared = memoryStore();
+    const narrow = defineEntity("orders", {
+      initial: "open",
+      states: { open: () => stay({ n: 1 }) },
+    });
+    const a = new Ekman({
+      entities: [narrow],
+      store: shared,
+      execution: { maxAttempts: 3, backoff: { kind: "fixed", delayMs: 0 } },
+    });
+    const b = new Ekman({ entities: [orders], store: shared });
+
+    await a.entities.orders.send("1", { type: "poke" });
+    await b.entities.orders.send("1", { type: "close" });
+
+    const refused = await a.entities.orders
+      .send("1", { type: "poke" })
+      .catch((error: EkmanError) => error.code);
+
+    expect(refused).toBe("UNKNOWN_STATE");
     await a.close();
     await b.close();
   });

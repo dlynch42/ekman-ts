@@ -473,6 +473,7 @@ export class InstanceRecord<
     }
 
     this.#bytes = bytes;
+    this.#deps.committed(this, moved);
     this.#deps.audit(event);
     return event;
   }

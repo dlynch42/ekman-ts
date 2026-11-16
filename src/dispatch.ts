@@ -7,7 +7,7 @@ import type { CommitToken } from "./fence";
 import { fenceReason } from "./fence";
 import type { InstanceRecord } from "./instance";
 import type { ExecutionPolicy, ResolvedPolicy } from "./policy";
-import { backoffDelay, resolvePolicy } from "./policy";
+import { backoffDelay, defaultRetryable, resolvePolicy } from "./policy";
 import type { HandlerResult, StayResult, TransitionToResult } from "./results";
 import { isHandlerResult, toError } from "./results";
 import type { TelemetryEvent } from "./telemetry";
@@ -28,6 +28,11 @@ export interface DispatchDeps {
   /** The runtime-wide execution policy, under every entity and state override. */
   policy: ExecutionPolicy | undefined;
   emit: (event: TelemetryEvent) => void;
+  /**
+   * Bring a record another writer has overtaken back in step with the store, through the
+   * runtime, so its indexes and the restore telemetry follow.
+   */
+  reconcile: (instance: InstanceRecord) => Promise<void>;
 }
 
 /**
@@ -135,6 +140,10 @@ interface AttemptContext<S extends string, V extends Values> {
  *
  * The last failure is what reaches the caller. An earlier attempt's error is reported
  * through telemetry as it happens and then superseded.
+ *
+ * Each attempt supersedes the one before it, whose token is invalidated so that its
+ * eventual result is harmless if it is still running. A retry that follows a store
+ * conflict reloads first: see `reconciled`.
  */
 async function attemptLoop<S extends string, V extends Values>(
   instance: InstanceRecord<S, V>,
@@ -150,25 +159,27 @@ async function attemptLoop<S extends string, V extends Values>(
   // attempt always throws. Saying that to the compiler is what keeps an unreachable
   // fallback from sitting after the loop pretending to be one.
   for (let attempt = 1; ; attempt += 1) {
-    // The attempt that came before this one is now superseded. Invalidating its token is
-    // what makes its eventual result harmless if it is still running.
     previous?.invalidate("superseded");
-    const token = instance.issueToken(attempt);
-    previous = token;
-
-    deps.emit({
-      type: "handler.started",
-      key: instance.key,
-      entity: instance.entity,
-      state: instance.state,
-      attempt,
-      depth: ctx.depth,
-      trigger: triggerRef(trigger),
-      at: telemetryNow(),
-    });
 
     try {
-      // biome-ignore lint/performance/noAwaitInLoops: attempts are sequential by definition, and the key stays occupied for all of them
+      if (instance.needsHydration) {
+        // biome-ignore lint/performance/noAwaitInLoops: a reload belongs to the attempt it precedes, and attempts are sequential
+        ctx.handler = await reconciled(instance, definition, deps, ctx);
+      }
+      const token = instance.issueToken(attempt);
+      previous = token;
+
+      deps.emit({
+        type: "handler.started",
+        key: instance.key,
+        entity: instance.entity,
+        state: instance.state,
+        attempt,
+        depth: ctx.depth,
+        trigger: triggerRef(trigger),
+        at: telemetryNow(),
+      });
+
       const committed = await runAttempt(
         instance,
         definition,
@@ -180,11 +191,11 @@ async function attemptLoop<S extends string, V extends Values>(
       ctx.settle("committed", attempt);
       return committed;
     } catch (error) {
-      const failure = toError(error);
+      const failure = toAttemptFailure(error);
 
-      if (attempt >= policy.maxAttempts || !policy.retryable(failure)) {
+      if (attempt >= policy.maxAttempts || !worthRetrying(policy, failure)) {
         ctx.settle("failed", attempt);
-        throw failure;
+        throw failure.reported;
       }
 
       const delayMs = backoffDelay(policy.backoff, attempt + 1);
@@ -196,7 +207,7 @@ async function attemptLoop<S extends string, V extends Values>(
         attempt,
         maxAttempts: policy.maxAttempts,
         delayMs,
-        error: failure.message,
+        error: failure.reported.message,
         trigger: triggerRef(trigger),
         at: telemetryNow(),
       });
@@ -204,6 +215,88 @@ async function attemptLoop<S extends string, V extends Values>(
       await wait(delayMs);
     }
   }
+}
+
+/**
+ * The handler an attempt should run, after reloading the record if it has fallen behind.
+ *
+ * A store conflict means another writer moved the key. Retrying against the values this
+ * runtime still holds would conflict again, every time, and repeat the handler's side
+ * effects each time. So the record is reloaded before the attempt's token is issued, which
+ * binds the token to the sequence the store now holds, and the handler is looked up again
+ * for the state the other writer left. The policy stays the one the trigger was dispatched
+ * under: a reload does not change which state's policy governs this trigger's attempts.
+ *
+ * Only awaited for a record that needs it. An attempt that has nothing to reload must
+ * reach its handler in the same turn, or telemetry interleaves differently with the sends
+ * around it.
+ */
+async function reconciled<S extends string, V extends Values>(
+  instance: InstanceRecord<S, V>,
+  definition: EntityDefinition<string, S, V, Trigger>,
+  deps: DispatchDeps,
+  ctx: AttemptContext<S, V>
+): Promise<Handler<S, V, Trigger>> {
+  await deps.reconcile(instance as unknown as InstanceRecord);
+
+  const entry = definition.handlers.get(instance.state);
+  if (entry === undefined) {
+    return refuse(
+      instance,
+      deps,
+      ctx.cause,
+      "UNKNOWN_STATE",
+      () =>
+        `entity "${definition.name}" has no handler for state "${instance.state}", ` +
+        "which is where a reload after a store conflict found the instance"
+    );
+  }
+  return entry.handler;
+}
+
+/**
+ * A handler's failure, carried out of an attempt in both of its forms.
+ *
+ * `original` is what the handler threw or failed with, which is what a `retryable`
+ * predicate is written against. `reported` is what the sender receives: the same failure
+ * under a stable code, with the original as its cause.
+ */
+class AttemptFailure extends Error {
+  readonly original: Error;
+  readonly reported: Error;
+
+  constructor(original: Error, reported: Error) {
+    super(reported.message);
+    this.original = original;
+    this.reported = reported;
+  }
+}
+
+/** Anything else an attempt can reject with is already the runtime's own error, in one form. */
+function toAttemptFailure(error: unknown): AttemptFailure {
+  if (error instanceof AttemptFailure) {
+    return error;
+  }
+  const failure = toError(error);
+  return new AttemptFailure(failure, failure);
+}
+
+/**
+ * Whether a failed attempt should be followed by another.
+ *
+ * A predicate the caller supplied judges the handler's own error, so
+ * `(e) => e instanceof NetworkError` means what it says. The default predicate judges what
+ * the sender would be told instead. Its rule is about the runtime refusing this trigger,
+ * and an error the handler threw is not that, even when it carries one of those codes
+ * because the handler got it from sending to another key.
+ */
+function worthRetrying(
+  policy: ResolvedPolicy,
+  failure: AttemptFailure
+): boolean {
+  return policy.retryable === defaultRetryable
+    ? defaultRetryable(failure.reported)
+    : policy.retryable(failure.original);
 }
 
 /**
@@ -303,6 +396,11 @@ async function runAttempt<S extends string, V extends Values>(
  * On timeout the token is invalidated first, so the abandoned attempt cannot commit even
  * if it finishes microseconds later. The signal is aborted second, as a courtesy to a
  * handler that watches it. Neither can stop the function; only the fence is guaranteed.
+ *
+ * An attempt whose token is already sealed is past the fence: its write is in flight and
+ * will land. There is nothing left to abandon, so the timer only records that it fired,
+ * which surfaces as `commit.raced`, and the attempt is left to finish and report its
+ * commit. Telling the sender it timed out would invite a retry of work that committed.
  */
 function underTimeout<S extends string, V extends Values>(
   settled: Promise<CommitResult<S, V>>,
@@ -318,6 +416,10 @@ function underTimeout<S extends string, V extends Values>(
   const expiry = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
       token.invalidate("timeout");
+      if (token.sealed) {
+        return;
+      }
+
       controller.abort(
         new EkmanError(
           "HANDLER_TIMEOUT",
@@ -408,7 +510,11 @@ async function handleFailure<S extends string, V extends Values>(
     } catch (thrown) {
       // An error handler that itself fails does not get another error handler. That
       // would be an unbounded chain, and the original failure is the one worth reporting.
-      throw failed(instance.key, error, toError(thrown));
+      // biome-ignore lint/style/useErrorCause: the failure being reported is the handler's, and `failed` carries it as the cause; what the error handler threw is folded into the message
+      throw new AttemptFailure(
+        error,
+        failed(instance.key, error, toError(thrown))
+      );
     }
 
     if (isHandlerResult(recovery)) {
@@ -425,11 +531,14 @@ async function handleFailure<S extends string, V extends Values>(
           token
         );
       }
-      throw failed(instance.key, error, recovery.error);
+      throw new AttemptFailure(
+        error,
+        failed(instance.key, error, recovery.error)
+      );
     }
   }
 
-  throw failed(instance.key, error);
+  throw new AttemptFailure(error, failed(instance.key, error));
 }
 
 function failed(key: string, error: Error, from?: Error): EkmanError {
@@ -523,6 +632,9 @@ function applyConstraints<S extends string, V extends Values>(
  *
  * Every committed result in the runtime passes through here, which is what makes the
  * fence a single gate rather than a check somebody can forget.
+ *
+ * A timeout that arrived while the write was in flight is reported as `commit.raced`. The
+ * commit stands and is returned to the sender; the event says the two crossed.
  */
 async function commit<S extends string, V extends Values>(
   instance: InstanceRecord<S, V>,
@@ -574,9 +686,6 @@ async function commit<S extends string, V extends Values>(
     token
   );
 
-  // The commit reached the authority, and then a timeout arrived. The event is durable, so
-  // it stays: the sender was already told the attempt failed, and the honest thing is to
-  // say the two crossed rather than to leave the store and memory disagreeing.
   if (token.racedBy !== undefined) {
     deps.emit({
       type: "commit.raced",

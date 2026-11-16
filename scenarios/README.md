@@ -617,8 +617,9 @@ only a `type` asserts no event of that type was emitted at all.
 `commit.raced` is the honest name for a narrow window. A commit that has reached the commit
 authority is durable, so it is applied even if the attempt's timeout fires mid-write:
 refusing it would leave the store holding an event the runtime never applied, and replay
-would then rebuild a state the live runtime never had. The sender is still told the attempt
-timed out. A sustained rate of this means timeouts are set close to how long the store
+would then rebuild a state the live runtime never had. The sender is told the commit landed,
+since that is what happened, and this event is what records that the attempt ran past its
+timeout on the way. A sustained rate of it means timeouts are set close to how long the store
 actually takes.
 
 `handler.settled.outcome` is `committed`, `failed`, or `refused`. `refused` means the

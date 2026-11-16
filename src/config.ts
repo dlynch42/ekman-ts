@@ -41,6 +41,24 @@ export interface RuntimeDeps {
    * Hand a committed event to the audit sinks. Never awaited, never able to fail a commit.
    */
   readonly audit: (event: EkmanEvent) => void;
+  /**
+   * Called once a commit has been applied to a record, every time.
+   *
+   * The runtime keeps its indexes in step from here rather than from what a dispatch
+   * returns, so a commit is indexed and accounted however the attempt that made it ended.
+   *
+   * @param record the record the commit was applied to
+   * @param moved whether the commit changed its state
+   */
+  readonly committed: (record: CommittedRecord, moved: boolean) => void;
+}
+
+/** What the runtime reads off a record that has just committed. */
+export interface CommittedRecord {
+  readonly key: string;
+  readonly entity: string;
+  readonly state: string;
+  readonly bytes: number;
 }
 
 /**

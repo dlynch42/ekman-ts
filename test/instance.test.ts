@@ -340,3 +340,39 @@ describe("a commit whose values cannot be measured", () => {
     expect(await store.read("orders:1")).toHaveLength(1);
   });
 });
+
+describe("telling the runtime about a commit", () => {
+  it("reports every applied commit, and whether it moved the instance", async () => {
+    const reported: [string, boolean][] = [];
+    const record = new InstanceRecord({
+      key: "orders:1",
+      entity: "orders",
+      initial: "pending",
+      initialValues: {},
+      states: STATES,
+      at: 0,
+      cause: { type: "init", id: "t1" },
+      deps: testDeps({
+        committed: (committed, moved) => reported.push([committed.key, moved]),
+      }),
+    });
+
+    await commit(record, {
+      state: "pending",
+      values: {},
+      at: 1,
+      cause: { type: "x", id: "t2" },
+    });
+    await commit(record as InstanceRecord<string, Record<string, unknown>>, {
+      state: "approved",
+      values: {},
+      at: 2,
+      cause: { type: "x", id: "t3" },
+    });
+
+    expect(reported).toEqual([
+      ["orders:1", false],
+      ["orders:1", true],
+    ]);
+  });
+});

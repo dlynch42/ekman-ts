@@ -1,6 +1,6 @@
 import type { AuditSink } from "./audit";
 import { deliverTo } from "./audit";
-import type { RuntimeDeps } from "./config";
+import type { CommittedRecord, RuntimeDeps } from "./config";
 import { assertKnownKeys, resolveInboxConfig } from "./config";
 import type { CompiledTemporal } from "./constraints";
 import type { DispatchDeps } from "./dispatch";
@@ -126,12 +126,14 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       stack: this.#stack,
       memory: this.#memory,
       audit: (event) => this.#fanOut(event),
+      committed: (record, moved) => this.#committed(record, moved),
     };
 
     this.#deps = {
       now: () => this.#now(),
       policy: config.execution,
       emit: (event) => this.#emit(event),
+      reconcile: (instance) => this.#hydrate(instance as AnyInstance),
     };
 
     const handles: Record<string, EntityHandle> = {};
@@ -763,14 +765,23 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       depth
     );
 
-    // Only a move re-indexes. A commit that changed values alone leaves the instance where
-    // it was, and its time in state keeps running.
-    if (result.event.from !== result.event.to) {
-      this.#temporal.enter(instance.key, instance.entity, result.state);
-    }
-
     this.#account(instance);
     return result;
+  }
+
+  /**
+   * Keep the indexes in step with a commit a record has just applied.
+   *
+   * Only a move re-indexes: a commit that changed values alone leaves the instance where it
+   * was, and its time in state keeps running. The record is always the one in the table:
+   * a commit is applied inside its key's turn, a busy key is never evicted or forgotten,
+   * and an attempt that outlived its turn is fenced before it can apply anything.
+   */
+  #committed(record: CommittedRecord, moved: boolean): void {
+    if (moved) {
+      this.#temporal.enter(record.key, record.entity, record.state);
+    }
+    this.#ledger.record(record.key, record.bytes);
   }
 
   /** Reconcile an instance with the store, reporting a reload when one happened. */
@@ -800,13 +811,12 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   }
 
   /**
-   * Record what an instance costs and act on the budget.
+   * Report what an instance costs against the budget, once its trigger has settled.
    *
-   * Runs after every commit, which is where the number changes and where the serialized
-   * values needed to measure it already exist.
+   * The ledger itself was updated when the commit was applied, in `#committed`. This is
+   * the telemetry for it, emitted after the dispatch so it follows `handler.settled`.
    */
   #account(instance: AnyInstance): void {
-    this.#ledger.record(instance.key, instance.bytes);
     const overBudget = this.#ledger.total > this.#memory.maxBytes;
 
     this.#emit({

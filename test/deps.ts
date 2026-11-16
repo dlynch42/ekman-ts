@@ -21,6 +21,7 @@ export function testDeps(
     telemetry?: TelemetrySink | undefined;
     onUnhandled?: ((error: unknown) => void) | undefined;
     audit?: ((event: EkmanEvent) => void) | undefined;
+    committed?: RuntimeDeps["committed"] | undefined;
     inbox?: InboxConfig | undefined;
     store?: Store | readonly Store[] | undefined;
     memory?: MemoryConfig | undefined;
@@ -33,6 +34,7 @@ export function testDeps(
     telemetry: options.telemetry,
     onUnhandled: options.onUnhandled ?? (() => undefined),
     audit: options.audit ?? (() => undefined),
+    committed: options.committed ?? (() => undefined),
     inbox: resolveInboxConfig(options.inbox),
     stack,
     memory: resolveMemoryConfig(options.memory, {
