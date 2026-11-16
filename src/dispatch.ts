@@ -193,6 +193,10 @@ async function attemptLoop<S extends string, V extends Values>(
     } catch (error) {
       const failure = toAttemptFailure(error);
 
+      if (failure.terminal) {
+        ctx.settle("refused", attempt);
+        throw failure.reported;
+      }
       if (attempt >= policy.maxAttempts || !worthRetrying(policy, failure)) {
         ctx.settle("failed", attempt);
         throw failure.reported;
@@ -227,6 +231,10 @@ async function attemptLoop<S extends string, V extends Values>(
  * for the state the other writer left. The policy stays the one the trigger was dispatched
  * under: a reload does not change which state's policy governs this trigger's attempts.
  *
+ * A state with no handler ends the dispatch, whatever the retry predicate says. The record
+ * has been reloaded by then, so a further attempt would skip the reload and run the old
+ * state's handler against a state it was never written for.
+ *
  * Only awaited for a record that needs it. An attempt that has nothing to reload must
  * reach its handler in the same turn, or telemetry interleaves differently with the sends
  * around it.
@@ -241,15 +249,19 @@ async function reconciled<S extends string, V extends Values>(
 
   const entry = definition.handlers.get(instance.state);
   if (entry === undefined) {
-    return refuse(
-      instance,
-      deps,
-      ctx.cause,
-      "UNKNOWN_STATE",
-      () =>
-        `entity "${definition.name}" has no handler for state "${instance.state}", ` +
-        "which is where a reload after a store conflict found the instance"
-    );
+    const reason =
+      `entity "${definition.name}" has no handler for state "${instance.state}", ` +
+      "which is where a reload after a store conflict found the instance";
+    instance.reject({
+      code: "UNKNOWN_STATE",
+      reason,
+      at: deps.now(),
+      cause: ctx.cause,
+    });
+    const refusal = new EkmanError("UNKNOWN_STATE", reason, {
+      key: instance.key,
+    });
+    throw new AttemptFailure(refusal, refusal, true);
   }
   return entry.handler;
 }
@@ -259,16 +271,19 @@ async function reconciled<S extends string, V extends Values>(
  *
  * `original` is what the handler threw or failed with, which is what a `retryable`
  * predicate is written against. `reported` is what the sender receives: the same failure
- * under a stable code, with the original as its cause.
+ * under a stable code, with the original as its cause. A `terminal` failure is a refusal
+ * no further attempt can change, and is never offered to the retry predicate.
  */
 class AttemptFailure extends Error {
   readonly original: Error;
   readonly reported: Error;
+  readonly terminal: boolean;
 
-  constructor(original: Error, reported: Error) {
+  constructor(original: Error, reported: Error, terminal = false) {
     super(reported.message);
     this.original = original;
     this.reported = reported;
+    this.terminal = terminal;
   }
 }
 

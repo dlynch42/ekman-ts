@@ -538,6 +538,44 @@ describe("a second writer", () => {
     await b.close();
   });
 
+  it("does not let a retry predicate run a handler for a state the reload moved past", async () => {
+    const shared = memoryStore();
+    let calls = 0;
+    const narrow = defineEntity("orders", {
+      initial: "open",
+      states: {
+        open: () => {
+          calls += 1;
+          return stay({ n: calls });
+        },
+      },
+    });
+    const a = new Ekman({
+      entities: [narrow],
+      store: shared,
+      execution: {
+        maxAttempts: 3,
+        backoff: { kind: "fixed", delayMs: 0 },
+        retryable: () => true,
+      },
+    });
+    const b = new Ekman({ entities: [orders], store: shared });
+
+    await a.entities.orders.send("1", { type: "poke" });
+    await b.entities.orders.send("1", { type: "close" });
+    calls = 0;
+
+    const refused = await a.entities.orders
+      .send("1", { type: "poke" })
+      .catch((error: EkmanError) => error.code);
+
+    expect(refused).toBe("UNKNOWN_STATE");
+    expect(calls).toBe(1);
+    expect((await shared.load("orders:1"))?.seq).toBe(2);
+    await a.close();
+    await b.close();
+  });
+
   it("surfaces the conflict rather than overwriting the other writer", async () => {
     const { a, b } = twoRuntimes();
     await a.entities.orders.send("1", { type: "poke" });
