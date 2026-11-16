@@ -1187,6 +1187,46 @@ describe("forgetting an instance", () => {
     await ekman.close();
   });
 
+  it("holds a send back until every layer has finished deleting, even when one fails", async () => {
+    const cache = memoryStore({ name: "cache" });
+    const truth = memoryStore({ name: "truth", authority: true });
+    const failing: Store = {
+      name: cache.name,
+      capabilities: cache.capabilities,
+      append: cache.append.bind(cache),
+      load: cache.load.bind(cache),
+      read: cache.read.bind(cache),
+      snapshot: cache.snapshot.bind(cache),
+      scan: cache.scan.bind(cache),
+      forget: () => Promise.reject(new Error("cache cannot delete right now")),
+    };
+    const slow: Store = {
+      name: truth.name,
+      capabilities: truth.capabilities,
+      authority: true,
+      append: truth.append.bind(truth),
+      load: truth.load.bind(truth),
+      read: truth.read.bind(truth),
+      snapshot: truth.snapshot.bind(truth),
+      scan: truth.scan.bind(truth),
+      forget: async (key) => {
+        await new Promise((done) => setTimeout(done, 30));
+        await truth.forget(key);
+      },
+    };
+    const ekman = new Ekman({ entities: [tickets], store: [failing, slow] });
+    await ekman.entities.tickets.send("t1", { type: "poke" });
+    await ekman.entities.tickets.send("t1", { type: "poke" });
+
+    const forgetting = ekman.entities.tickets.forget("t1");
+    const sent = ekman.entities.tickets.send("t1", { type: "poke" });
+
+    await expect(forgetting).rejects.toThrow("cache cannot delete right now");
+    expect(await sent).toMatchObject({ seq: 1 });
+    expect(await truth.read("tickets:t1")).toHaveLength(2);
+    await ekman.close();
+  });
+
   it("lets two forgets of one key overlap", async () => {
     const ekman = new Ekman({ entities: [tickets], store: "memory" });
     await ekman.entities.tickets.send("t1", { type: "poke" });

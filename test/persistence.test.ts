@@ -152,13 +152,14 @@ describe("loading an instance from the store", () => {
     });
     const ekman = new Ekman({ entities: [orders], store });
 
-    const first = await ekman.entities.orders
+    const first = ekman.entities.orders
       .send("1", { type: "close" })
       .catch((error: EkmanError) => error.code);
-    expect(first).toBe("STORE_UNAVAILABLE");
+    const queued = ekman.entities.orders.send("1", { type: "close" });
 
-    // A failed load is a failed attempt, not a verdict on the key.
-    const second = await ekman.entities.orders.send("1", { type: "close" });
+    expect(await first).toBe("STORE_UNAVAILABLE");
+    const second = await queued;
+    expect(loads).toBe(2);
     expect(second).toMatchObject({ state: "closed", seq: 1 });
     expect(ekman.entities.orders.inspect("1")).toMatchObject({
       state: "closed",

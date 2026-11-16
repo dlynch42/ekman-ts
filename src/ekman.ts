@@ -278,7 +278,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
         await instance?.flushed();
 
         // Every layer: a cache still holding the stream would serve it back.
-        await Promise.all(
+        await allSettledOrThrow(
           this.#stack.layers.map((layer) => layer.forget?.(parsed))
         );
       }
@@ -1342,6 +1342,24 @@ function partiality(
  */
 function byAgeThenKey(a: QueryMatch, b: QueryMatch): number {
   return b.ageMs - a.ageMs || a.key.localeCompare(b.key);
+}
+
+/**
+ * Wait for every one of these to finish, then fail with the first failure if there was one.
+ *
+ * `Promise.all` rejects as soon as one does, while the others are still running. For a
+ * delete across store layers that is too early: whatever waits on the deletion would be
+ * let through while a layer was still deleting, and could have a commit erased under it.
+ */
+async function allSettledOrThrow(
+  work: readonly (Promise<unknown> | undefined)[]
+): Promise<void> {
+  const failed = (await Promise.allSettled(work)).find(
+    (outcome) => outcome.status === "rejected"
+  );
+  if (failed !== undefined) {
+    throw failed.reason;
+  }
 }
 
 function noop(): void {
