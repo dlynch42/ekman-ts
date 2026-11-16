@@ -103,6 +103,8 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   readonly #closing = new AbortController();
   /** The one shutdown every `close()` call shares. */
   #closed: Promise<void> | undefined;
+  /** A storage sweep in progress, settled either way, for a shutdown to wait on. */
+  #storageSweep: Promise<void> | undefined;
   #triggerSeq = 0;
 
   constructor(config: EkmanConfig<D> = {}) {
@@ -274,6 +276,14 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * serve it back on the next load.
    */
   async forget(key: string): Promise<void> {
+    if (this.#closing.signal.aborted) {
+      throw new EkmanError(
+        "RUNTIME_CLOSED",
+        `the runtime is closed, so ${JSON.stringify(key)} cannot be forgotten`,
+        { key }
+      );
+    }
+
     const parsed = parseKey(key).key;
     const instance = this.#instances.get(parsed);
 
@@ -497,10 +507,13 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     }
 
     this.#sweepingStorage = true;
+    const sweeping = this.#sweepStorageOnce();
+    this.#storageSweep = sweeping.then(noop, noop);
     try {
-      return await this.#sweepStorageOnce();
+      return await sweeping;
     } finally {
       this.#sweepingStorage = false;
+      this.#storageSweep = undefined;
     }
   }
 
@@ -510,8 +523,13 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * From the moment this is called no new trigger is accepted (`send()` rejects with
    * `RUNTIME_CLOSED`), no sweep runs, and a retry waiting out its backoff is abandoned
    * rather than started. A handler already running is left to finish and commit, and
-   * refusals and violations still on their way to the store are allowed to land. Only then
-   * are the store layers closed, so a commit in flight never meets a closed connection.
+   * refusals and violations still on their way to the store are allowed to land. So are a
+   * `forget()` and a storage sweep that had already begun. Only then are the store layers
+   * closed, so none of that work meets a closed connection.
+   *
+   * Two kinds of store write are not waited for, by design: the snapshot an eviction
+   * leaves behind and an append to a cache layer. Both are optimizations whose loss costs
+   * replay time or a cache miss, never committed state.
    *
    * The wait is bounded. A handler that never settles would otherwise hold shutdown open
    * forever, so after `timeoutMs` the layers are closed regardless and `runtime.closed`
@@ -544,18 +562,22 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
 
     const instances = [...this.#instances.values()];
     const drained = await settledWithin(
-      Promise.all(
-        instances.map((instance) =>
+      Promise.all([
+        ...instances.map((instance) =>
           instance.inbox.whenIdle().then(() => instance.flushed())
-        )
-      ),
+        ),
+        ...this.#forgetting.values(),
+        this.#storageSweep,
+      ]),
       timeoutMs
     );
 
     this.#emit({
       type: "runtime.closed",
       drained,
-      pending: instances.filter((instance) => !instance.idle).length,
+      pending:
+        instances.filter((instance) => !instance.idle).length +
+        this.#forgetting.size,
       at: telemetryNow(),
     });
 

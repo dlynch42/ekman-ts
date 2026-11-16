@@ -2216,6 +2216,44 @@ describe("closing the runtime", () => {
     }
   );
 
+  it("waits for a deletion in flight before closing the stores under it", async () => {
+    const order: string[] = [];
+    const inner = memoryStore();
+    const store: Store = {
+      name: inner.name,
+      capabilities: inner.capabilities,
+      append: inner.append.bind(inner),
+      load: inner.load.bind(inner),
+      read: inner.read.bind(inner),
+      snapshot: inner.snapshot.bind(inner),
+      scan: inner.scan.bind(inner),
+      forget: async (key) => {
+        await new Promise((done) => setTimeout(done, 30));
+        await inner.forget(key);
+        order.push("forgotten");
+      },
+      close: () => {
+        order.push("closed");
+        return Promise.resolve();
+      },
+    };
+    const ekman = new Ekman({ entities: [orders], store });
+    await ekman.entities.orders.send("1", { type: "approve", actor: "amy" });
+
+    const forgetting = ekman.forget("orders:1");
+    await ekman.close();
+    await forgetting;
+
+    expect(order).toEqual(["forgotten", "closed"]);
+  });
+
+  it("refuses to delete once it has been closed", async () => {
+    const ekman = new Ekman({ entities: [orders], store: "memory" });
+    await ekman.close();
+
+    expect(await code(ekman.forget("orders:1"))).toBe("RUNTIME_CLOSED");
+  });
+
   it("starts no further attempt for a handler that fails while it is closing", async () => {
     let calls = 0;
     const failing = defineEntity("failing", {

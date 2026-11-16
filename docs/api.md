@@ -147,8 +147,9 @@ process.on("SIGTERM", async () => {
 
 1. It stops accepting triggers. From this point `send()` rejects with `RUNTIME_CLOSED`, `post()`
    reports the same error through `onUnhandled`, and no sweep runs.
-2. It waits for handlers that are already running to finish and commit, and for refusals and
-   violations still on their way to the store. A retry that is waiting out its backoff is not
+2. It waits for handlers that are already running to finish and commit, for refusals and
+   violations still on their way to the store, and for a `forget()` or a storage sweep that had
+   already begun. `forget()` called after this point rejects with `RUNTIME_CLOSED`. A retry that is waiting out its backoff is not
    started: its sender receives `RUNTIME_CLOSED`.
 3. It closes the store layers.
 
