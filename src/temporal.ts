@@ -94,7 +94,8 @@ export type EscalationOutcome =
 
 /**
  * Refusals that say nothing about the trigger itself: the inbox or the memory budget was
- * full, the attempt ran out of time, or the store could not take the write just then.
+ * full, the attempt ran out of time, the store could not take the write just then, or the
+ * runtime was closing. The last is owed to whichever runtime loads the instance next.
  */
 const TRANSIENT_REFUSALS: ReadonlySet<ErrorCode> = new Set<ErrorCode>([
   "INBOX_OVERFLOW",
@@ -104,6 +105,7 @@ const TRANSIENT_REFUSALS: ReadonlySet<ErrorCode> = new Set<ErrorCode>([
   "STORE_CONFLICT",
   "STORE_UNAVAILABLE",
   "STORE_FULL",
+  "RUNTIME_CLOSED",
 ]);
 
 /** Classify the error an escalation's `send()` rejected with. */

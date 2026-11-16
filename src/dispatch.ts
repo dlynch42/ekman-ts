@@ -33,6 +33,8 @@ export interface DispatchDeps {
    * runtime, so its indexes and the restore telemetry follow.
    */
   reconcile: (instance: InstanceRecord) => Promise<void>;
+  /** Aborted when the runtime begins closing, which ends any wait between attempts. */
+  closing: AbortSignal;
 }
 
 /**
@@ -144,6 +146,9 @@ interface AttemptContext<S extends string, V extends Values> {
  * Each attempt supersedes the one before it, whose token is invalidated so that its
  * eventual result is harmless if it is still running. A retry that follows a store
  * conflict reloads first: see `reconciled`.
+ *
+ * A wait between attempts that the runtime's closing cut short ends the dispatch as a
+ * failure, settled like any other, without consulting the retry policy again.
  */
 async function attemptLoop<S extends string, V extends Values>(
   instance: InstanceRecord<S, V>,
@@ -216,7 +221,12 @@ async function attemptLoop<S extends string, V extends Values>(
         at: telemetryNow(),
       });
 
-      await wait(delayMs);
+      try {
+        await wait(delayMs, deps.closing, instance.key);
+      } catch (closed) {
+        ctx.settle("failed", attempt);
+        throw closed;
+      }
     }
   }
 }
@@ -740,8 +750,40 @@ function ignoreFencedResult(): void {
   // Deliberately empty. See the call site: this exists to mark a promise as handled.
 }
 
-function wait(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * Wait out a backoff, unless the runtime starts closing first.
+ *
+ * A retry is new work, and a closing runtime starts none, so the wait ends at once with
+ * `RUNTIME_CLOSED` and the sender learns its trigger did not land.
+ *
+ * The timer deliberately keeps the process alive. A program whose only pending work is an
+ * awaited `send()` between attempts would otherwise exit, successfully and silently, with
+ * the send never settled. Closing the runtime is how a waiting retry is let go.
+ */
+function wait(ms: number, closing: AbortSignal, key: string): Promise<void> {
+  const closed = () =>
+    new EkmanError(
+      "RUNTIME_CLOSED",
+      `the runtime closed while ${key} was waiting to retry, so no further attempt was made`,
+      { key }
+    );
+
+  return new Promise((resolve, reject) => {
+    if (closing.aborted) {
+      reject(closed());
+      return;
+    }
+
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(closed());
+    };
+    const timer = setTimeout(() => {
+      closing.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    closing.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function describe(value: unknown): string {

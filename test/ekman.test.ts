@@ -1974,6 +1974,7 @@ describe("values a handler cannot corrupt or commit", () => {
       seq: 0,
       values: {},
     });
+    await new Promise((resolve) => setImmediate(resolve));
     expect(audited).toEqual(["transition@0"]);
     await ekman.close();
   });
@@ -2105,5 +2106,239 @@ describe("history held in memory", () => {
     expect(events).toHaveLength(RESIDENT_HISTORY_LIMIT + 11);
     expect(reasons).not.toContain("history-capped");
     await ekman.close();
+  });
+});
+
+describe("closing the runtime", () => {
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+  const slow = (ms: number) =>
+    defineEntity("slow", {
+      initial: "open",
+      states: {
+        open: async () => {
+          await new Promise((done) => setTimeout(done, ms));
+          return stay({ done: true });
+        },
+      },
+    });
+
+  it("refuses a trigger once it has been closed", async () => {
+    const ekman = new Ekman({ entities: [orders] });
+    await ekman.close();
+
+    expect(await code(ekman.send("orders:1", { type: "approve" }))).toBe(
+      "RUNTIME_CLOSED"
+    );
+    expect(await ekman.sweep()).toBe(0);
+    expect(await ekman.sweepStorage()).toMatchObject({ reclaimed: 0 });
+    await expect(ekman.close()).resolves.toBeUndefined();
+  });
+
+  it("reports a post made after closing rather than dropping it", async () => {
+    const unhandled: unknown[] = [];
+    const ekman = new Ekman({
+      entities: [orders],
+      onUnhandled: (error) => unhandled.push(error),
+    });
+    await ekman.close();
+
+    ekman.post("orders:1", { type: "approve" });
+    await tick();
+
+    expect(unhandled).toHaveLength(1);
+    expect(unhandled[0]).toMatchObject({ code: "RUNTIME_CLOSED" });
+  });
+
+  it("waits for a handler in flight, and its commit lands", async () => {
+    const closed: TelemetryEvent[] = [];
+    const ekman = new Ekman({
+      entities: [slow(30)],
+      store: "memory",
+      telemetry: { "runtime.closed": (event) => closed.push(event) },
+    });
+    const sent = ekman.entities.slow.send("a", { type: "go" });
+    let landed = false;
+    sent.then(() => {
+      landed = true;
+    });
+
+    await ekman.close();
+
+    expect(landed).toBe(true);
+    expect(await sent).toMatchObject({ seq: 1 });
+    expect(closed).toEqual([
+      expect.objectContaining({ drained: true, pending: 0 }),
+    ]);
+  });
+
+  it("gives up waiting at its deadline, and says what was left", async () => {
+    const closed: TelemetryEvent[] = [];
+    const stuck = defineEntity("stuck", {
+      initial: "open",
+      states: { open: () => new Promise<never>(() => undefined) },
+    });
+    const ekman = new Ekman({
+      entities: [stuck],
+      telemetry: { "runtime.closed": (event) => closed.push(event) },
+    });
+    ekman.entities.stuck.send("a", { type: "go" }).catch(() => undefined);
+
+    const started = performance.now();
+    await ekman.close({ timeoutMs: 20 });
+
+    expect(performance.now() - started).toBeLessThan(500);
+    expect(closed).toEqual([
+      expect.objectContaining({ drained: false, pending: 1 }),
+    ]);
+  });
+
+  it("shares one shutdown between callers that overlap", async () => {
+    const closed: TelemetryEvent[] = [];
+    const ekman = new Ekman({
+      entities: [slow(10)],
+      telemetry: { "runtime.closed": (event) => closed.push(event) },
+    });
+    ekman.entities.slow.send("a", { type: "go" });
+
+    await Promise.all([ekman.close(), ekman.close()]);
+
+    expect(closed).toHaveLength(1);
+  });
+
+  it.each([0, -1, Number.NaN, 2 ** 31])(
+    "refuses a deadline of %s",
+    async (timeoutMs) => {
+      const ekman = new Ekman({ entities: [orders] });
+
+      expect(await code(ekman.close({ timeoutMs }))).toBe("INVALID_CONFIG");
+      await ekman.close();
+    }
+  );
+
+  it("starts no further attempt for a handler that fails while it is closing", async () => {
+    let calls = 0;
+    const failing = defineEntity("failing", {
+      initial: "open",
+      states: {
+        open: async () => {
+          calls += 1;
+          await new Promise((done) => setTimeout(done, 20));
+          return fail(new Error("not yet"));
+        },
+      },
+    });
+    const ekman = new Ekman({
+      entities: [failing],
+      execution: { maxAttempts: 3, backoff: { kind: "fixed", delayMs: 0 } },
+    });
+    const sent = code(ekman.entities.failing.send("a", { type: "go" }));
+
+    await ekman.close();
+
+    expect(await sent).toBe("RUNTIME_CLOSED");
+    expect(calls).toBe(1);
+  });
+
+  it("abandons a retry that is waiting out its backoff", async () => {
+    let calls = 0;
+    const flaky = defineEntity("flaky", {
+      initial: "open",
+      states: {
+        open: () => {
+          calls += 1;
+          return fail(new Error("not yet"));
+        },
+      },
+    });
+    const settled: TelemetryEvent[] = [];
+    const ekman = new Ekman({
+      entities: [flaky],
+      execution: {
+        maxAttempts: 3,
+        backoff: { kind: "fixed", delayMs: 10_000 },
+      },
+      telemetry: { "handler.settled": (event) => settled.push(event) },
+    });
+    const sent = code(ekman.entities.flaky.send("a", { type: "go" }));
+    await tick();
+
+    const started = performance.now();
+    await ekman.close({ timeoutMs: 5000 });
+
+    expect(await sent).toBe("RUNTIME_CLOSED");
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(calls).toBe(1);
+    expect(settled).toEqual([expect.objectContaining({ outcome: "failed" })]);
+  });
+});
+
+describe("audit sinks and the commit path", () => {
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+  it("does not run a sink inside the commit it is told about", async () => {
+    const seen: string[] = [];
+    const ekman = new Ekman({
+      entities: [orders],
+      audit: [
+        {
+          name: "trail",
+          deliver: (event) => {
+            seen.push(`${event.type}@${event.seq}`);
+          },
+        },
+      ],
+    });
+
+    await ekman.entities.orders.send("1", { type: "approve", actor: "amy" });
+    expect(seen).toEqual([]);
+
+    await tick();
+    expect(seen).toEqual(["transition@0", "transition@1"]);
+    await ekman.close();
+  });
+
+  it("is not slowed by a sink that blocks", async () => {
+    let blocked = 0;
+    const ekman = new Ekman({
+      entities: [orders],
+      audit: [
+        {
+          name: "blocking",
+          deliver: () => {
+            const until = performance.now() + 25;
+            while (performance.now() < until) {
+              blocked += 1;
+            }
+          },
+        },
+      ],
+    });
+
+    const started = performance.now();
+    await ekman.entities.orders.send("1", { type: "approve", actor: "amy" });
+
+    expect(performance.now() - started).toBeLessThan(15);
+    expect(blocked).toBe(0);
+    await tick();
+    expect(blocked).toBeGreaterThan(0);
+    await ekman.close();
+  });
+
+  const delivering = (): void => undefined;
+
+  it.each<[string, unknown]>([
+    ["no name", { name: "", deliver: delivering }],
+    ["no way to deliver", { name: "x" }],
+    ["no attempts", { name: "x", deliver: delivering, maxAttempts: 0 }],
+    [
+      "a fractional attempt count",
+      { name: "x", deliver: delivering, maxAttempts: 1.5 },
+    ],
+    ["a misspelled option", { name: "x", deliver: delivering, maxAttempt: 2 }],
+  ])("refuses a sink with %s", (_what, sink) => {
+    expect(() => new Ekman({ audit: [sink as never] })).toThrow(
+      expect.objectContaining({ code: "INVALID_CONFIG" })
+    );
   });
 });

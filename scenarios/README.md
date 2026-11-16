@@ -611,6 +611,7 @@ only a `type` asserts no event of that type was emitted at all.
 | `instance.restored` | An instance was rebuilt from the store. | `state`, `seq`, `from`, `replayed` |
 | `audit.failed` | An audit sink could not be delivered to, after its retries. | `sink`, `error`, `seq` |
 | `store.cacheFailed` | A cache layer could not be written. The commit stands. | `store`, `error`, `seq` |
+| `runtime.closed` | The runtime finished closing. A `restart` step emits one. | `drained`, `pending` |
 
 `memory.accounted.maxBytes` is `null` when the budget is unlimited.
 

@@ -1,5 +1,5 @@
 import type { AuditSink } from "./audit";
-import { deliverTo } from "./audit";
+import { assertAuditSink, deliverTo } from "./audit";
 import type { CommittedRecord, RuntimeDeps } from "./config";
 import { assertKnownKeys, resolveInboxConfig } from "./config";
 import type { CompiledTemporal } from "./constraints";
@@ -99,6 +99,10 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   #sweeping: boolean;
   /** Same reasoning as `#sweeping`, for the storage pass. */
   #sweepingStorage: boolean;
+  /** Aborted when `close()` begins. From then on no trigger is accepted and no retry starts. */
+  readonly #closing = new AbortController();
+  /** The one shutdown every `close()` call shares. */
+  #closed: Promise<void> | undefined;
   #triggerSeq = 0;
 
   constructor(config: EkmanConfig<D> = {}) {
@@ -117,6 +121,9 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       hasStore: this.#stack.authority !== undefined,
     });
     this.#audit = config.audit ?? [];
+    for (const sink of this.#audit) {
+      assertAuditSink(sink);
+    }
 
     this.#runtime = {
       now: () => this.#now(),
@@ -134,6 +141,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       policy: config.execution,
       emit: (event) => this.#emit(event),
       reconcile: (instance) => this.#hydrate(instance as AnyInstance),
+      closing: this.#closing.signal,
     };
 
     const handles: Record<string, EntityHandle> = {};
@@ -173,12 +181,20 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    *
    * Resolves at commit with the committed state, values and sequence. Rejects with an
    * `EkmanError` if the key is malformed, the entity is unregistered, the trigger is
-   * refused, or the handler fails.
+   * refused, the handler fails, or the runtime has been closed.
    */
   async send<S extends string = string, V extends Values = Values>(
     key: string,
     trigger: Trigger
   ): Promise<CommitResult<S, V>> {
+    if (this.#closing.signal.aborted) {
+      throw new EkmanError(
+        "RUNTIME_CLOSED",
+        `the runtime is closed, so ${JSON.stringify(key)} cannot accept a trigger`,
+        { key }
+      );
+    }
+
     const parsed = parseKey(key);
     const definition = this.#definitions.get(parsed.entity);
 
@@ -445,7 +461,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * immediately rather than queueing behind it.
    */
   async sweep(): Promise<number> {
-    if (this.#sweeping) {
+    if (this.#sweeping || this.#closing.signal.aborted) {
       return 0;
     }
 
@@ -476,7 +492,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * result immediately rather than queueing behind it, exactly as `sweep()` does.
    */
   async sweepStorage(): Promise<StorageSweep> {
-    if (this.#sweepingStorage) {
+    if (this.#sweepingStorage || this.#closing.signal.aborted) {
       return EMPTY_SWEEP;
     }
 
@@ -489,21 +505,59 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   }
 
   /**
-   * Release what the runtime is holding: currently the two sweep intervals.
+   * Shut the runtime down, letting work it has already accepted finish first.
    *
-   * Safe to call more than once. A runtime that was never given either interval still has
-   * this, so shutdown code does not have to know how it was configured.
+   * From the moment this is called no new trigger is accepted (`send()` rejects with
+   * `RUNTIME_CLOSED`), no sweep runs, and a retry waiting out its backoff is abandoned
+   * rather than started. A handler already running is left to finish and commit, and
+   * refusals and violations still on their way to the store are allowed to land. Only then
+   * are the store layers closed, so a commit in flight never meets a closed connection.
+   *
+   * The wait is bounded. A handler that never settles would otherwise hold shutdown open
+   * forever, so after `timeoutMs` the layers are closed regardless and `runtime.closed`
+   * telemetry reports `drained: false` with how many keys were still busy.
+   *
+   * Safe to call more than once, and from several places at once: every call shares the
+   * same shutdown and the first call's deadline.
+   *
+   * @param options `timeoutMs` is how long to wait for in-flight work. Defaults to 30 seconds.
    */
-  async close(): Promise<void> {
-    if (this.#sweepTimer !== undefined) {
-      clearInterval(this.#sweepTimer);
-      this.#sweepTimer = undefined;
+  close(options: { readonly timeoutMs?: number } = {}): Promise<void> {
+    const timeoutMs = options.timeoutMs ?? DEFAULT_CLOSE_TIMEOUT_MS;
+    if (!(timeoutMs > 0 && timeoutMs <= MAX_TIMER_MS)) {
+      return Promise.reject(
+        new EkmanError(
+          "INVALID_CONFIG",
+          `close timeoutMs must be a positive number of milliseconds, at most ${MAX_TIMER_MS}, received ${String(timeoutMs)}`
+        )
+      );
     }
 
-    if (this.#storageSweepTimer !== undefined) {
-      clearInterval(this.#storageSweepTimer);
-      this.#storageSweepTimer = undefined;
-    }
+    this.#closed ??= this.#shutDown(timeoutMs);
+    return this.#closed;
+  }
+
+  async #shutDown(timeoutMs: number): Promise<void> {
+    this.#closing.abort();
+    clearInterval(this.#sweepTimer);
+    clearInterval(this.#storageSweepTimer);
+
+    const instances = [...this.#instances.values()];
+    const drained = await settledWithin(
+      Promise.all(
+        instances.map((instance) =>
+          instance.inbox.whenIdle().then(() => instance.flushed())
+        )
+      ),
+      timeoutMs
+    );
+
+    this.#emit({
+      type: "runtime.closed",
+      drained,
+      pending: instances.filter((instance) => !instance.idle).length,
+      at: telemetryNow(),
+    });
 
     await Promise.all(this.#stack.layers.map((layer) => layer.close?.()));
   }
@@ -932,27 +986,35 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    *
    * Never awaited and never able to fail anything: an audit outage must not become a write
    * outage. A sink that exhausts its attempts is reported and the commit stands.
+   *
+   * Each delivery starts on a later turn of the event loop, never inside the commit. A
+   * sink's `deliver` runs synchronously up to its first await, so started here it would
+   * make every commit wait for however long that takes.
    */
   #fanOut(event: EkmanEvent): void {
     for (const sink of this.#audit) {
-      deliverTo(sink, event)
-        .then((failure) => {
-          if (failure !== undefined) {
-            this.#emit({
-              type: "audit.failed",
-              key: event.key,
-              entity: parseKey(event.key).entity,
-              sink: sink.name,
-              error: failure.message,
-              seq: event.seq,
-              at: telemetryNow(),
-            });
-          }
-        })
-        .catch(this.#onUnhandled);
+      setImmediate(() => this.#deliver(sink, event));
     }
 
     this.#writeCaches(event);
+  }
+
+  #deliver(sink: AuditSink, event: EkmanEvent): void {
+    deliverTo(sink, event)
+      .then((failure) => {
+        if (failure !== undefined) {
+          this.#emit({
+            type: "audit.failed",
+            key: event.key,
+            entity: parseKey(event.key).entity,
+            sink: sink.name,
+            error: failure.message,
+            seq: event.seq,
+            at: telemetryNow(),
+          });
+        }
+      })
+      .catch(this.#onUnhandled);
   }
 
   /**
@@ -1442,6 +1504,26 @@ async function allSettledOrThrow(
   if (failed !== undefined) {
     throw failed.reason;
   }
+}
+
+/** How long `close()` waits for in-flight work unless told otherwise. */
+const DEFAULT_CLOSE_TIMEOUT_MS = 30_000;
+
+/**
+ * Whether `work` settled before `ms` passed.
+ *
+ * The timer keeps the process alive until one or the other happens. An awaited `close()`
+ * has code after it, and a process that exited while waiting on a handler that never
+ * settles would skip closing the store layers along with everything else.
+ */
+function settledWithin(work: Promise<unknown>, ms: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), ms);
+    work.finally(() => {
+      clearTimeout(timer);
+      resolve(true);
+    });
+  });
 }
 
 const RUNTIME_KEYS = [

@@ -92,3 +92,19 @@ describe("delivering to an audit sink", () => {
     expect(failure?.message).toBe("just a string");
   });
 });
+
+describe("delivering once", () => {
+  it("makes a single attempt when that is all the sink is given", async () => {
+    const deliver = vi.fn(() => {
+      throw new Error("down");
+    });
+
+    const failure = await deliverTo(
+      { name: "x", deliver, maxAttempts: 1 },
+      event
+    );
+
+    expect(failure?.message).toBe("down");
+    expect(deliver).toHaveBeenCalledTimes(1);
+  });
+});

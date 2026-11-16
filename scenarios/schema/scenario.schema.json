@@ -60,7 +60,8 @@
             "instance.restored",
             "audit.failed",
             "store.cacheFailed",
-            "storage.swept"
+            "storage.swept",
+            "runtime.closed"
           ]
         }
       }
@@ -837,7 +838,8 @@
         "MISSING_INITIAL_STATE",
         "INITIAL_STATE_NOT_IN_STATES",
         "INVALID_CONFIG",
-        "NOT_IMPLEMENTED"
+        "NOT_IMPLEMENTED",
+        "RUNTIME_CLOSED"
       ]
     },
     "policy": {

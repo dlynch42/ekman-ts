@@ -296,6 +296,21 @@ export interface StorageSweptEvent {
   readonly withinBudget: boolean;
 }
 
+/**
+ * The runtime finished closing.
+ *
+ * Like `storage.swept`, this happens to the runtime rather than to an instance, so it
+ * carries no key.
+ */
+export interface RuntimeClosedEvent {
+  readonly type: "runtime.closed";
+  readonly at: number;
+  /** Whether every key went idle before the deadline. */
+  readonly drained: boolean;
+  /** How many keys still had a handler running or a trigger waiting when it gave up. */
+  readonly pending: number;
+}
+
 export type TelemetryEvent =
   | InboxEnqueuedEvent
   | InboxRejectedEvent
@@ -315,7 +330,8 @@ export type TelemetryEvent =
   | MemoryRefusedEvent
   | AuditFailedEvent
   | StoreCacheFailedEvent
-  | StorageSweptEvent;
+  | StorageSweptEvent
+  | RuntimeClosedEvent;
 
 export type TelemetryEventType = TelemetryEvent["type"];
 
@@ -346,6 +362,7 @@ const EVENT_TYPES: Readonly<Record<TelemetryEventType, true>> = {
   "audit.failed": true,
   "store.cacheFailed": true,
   "storage.swept": true,
+  "runtime.closed": true,
 };
 
 export const TELEMETRY_EVENT_TYPES = Object.freeze(
@@ -376,6 +393,9 @@ export const TELEMETRY_EVENT_TYPES = Object.freeze(
  *   "*":               console.log,
  * }
  * ```
+ *
+ * A handler may be async. The return type stays `void` so that a handler returning
+ * anything at all, `(event) => seen.push(event)` included, keeps being accepted.
  */
 export type TelemetrySink = {
   readonly [K in TelemetryEventType]?: (
@@ -391,6 +411,9 @@ export type TelemetrySink = {
  * A sink that throws must not be able to break the dispatch that emitted the event, so
  * its failure is routed out the same way a `post()` failure is. Telemetry observes the
  * runtime; it never gates it.
+ *
+ * A handler may be async. Its promise is never awaited, and a rejection is routed out the
+ * same way: left alone it would be an unhandled rejection, which ends the process.
  */
 export function emit(
   sink: TelemetrySink | undefined,
@@ -407,10 +430,21 @@ export function emit(
   }
 
   try {
-    (handler as (delivered: TelemetryEvent) => void)(event);
+    const returned = (handler as (delivered: TelemetryEvent) => unknown)(event);
+    if (isThenable(returned)) {
+      returned.then(undefined, onUnhandled);
+    }
   } catch (error) {
     onUnhandled(error);
   }
+}
+
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { then?: unknown }).then === "function"
+  );
 }
 
 /**

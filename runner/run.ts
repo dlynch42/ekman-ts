@@ -180,6 +180,7 @@ async function execute(scenario: Scenario, failures: string[]): Promise<void> {
       buildRuntime(scenario, telemetry, clock, storage, audit)
     );
 
+    await auditSettled();
     assertSends(scenario.then?.sends, outcomes.sends, failures);
     assertForgets(scenario.then?.forgets, outcomes.forgets, failures);
     await assertEvents(scenario, active.ekman, failures);
@@ -320,6 +321,17 @@ async function deliver(
 
   await Promise.all(inFlight);
   return { sends: outcomes, forgets };
+}
+
+/**
+ * Let audit deliveries that the steps set in motion finish before anything is asserted.
+ *
+ * A sink is never called inside a commit, so a delivery is still pending when the send that
+ * caused it resolves. One turn of the event loop is enough for the sinks a scenario can
+ * declare, which deliver or refuse without waiting on anything.
+ */
+function auditSettled(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 /** Delete a key, recording whether it was allowed rather than letting a refusal throw. */

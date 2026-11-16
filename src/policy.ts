@@ -107,6 +107,7 @@ const NOT_RETRYABLE = new Set([
   "CONSTRAINT_VIOLATED",
   "INVALID_CONFIG",
   "NOT_IMPLEMENTED",
+  "RUNTIME_CLOSED",
 ]);
 
 export function defaultRetryable(error: Error): boolean {

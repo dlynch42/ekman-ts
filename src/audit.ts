@@ -1,3 +1,5 @@
+import { assertKnownKeys } from "./config";
+import { EkmanError } from "./errors";
 import type { EkmanEvent } from "./events";
 
 /**
@@ -25,6 +27,44 @@ export interface AuditSink {
 }
 
 export const DEFAULT_AUDIT_ATTEMPTS = 3;
+
+const SINK_KEYS = ["name", "deliver", "maxAttempts"] as const;
+
+/**
+ * Refuse an audit sink that could never deliver anything.
+ *
+ * A sink given zero attempts drops every event without a word, which is the silent failure
+ * an audit trail exists to rule out, so it is refused when the runtime is built.
+ */
+export function assertAuditSink(sink: AuditSink): void {
+  const where = `audit sink ${JSON.stringify(sink.name)}`;
+  assertKnownKeys(where, sink, SINK_KEYS);
+
+  if (typeof sink.name !== "string" || sink.name.length === 0) {
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      "an audit sink needs a non-empty `name`, which is how a failed delivery is reported"
+    );
+  }
+  if (typeof sink.deliver !== "function") {
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      `${where} has no \`deliver\` function, so it could never receive an event`
+    );
+  }
+
+  const { maxAttempts } = sink;
+  if (
+    maxAttempts !== undefined &&
+    !(Number.isInteger(maxAttempts) && maxAttempts >= 1)
+  ) {
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      `${where}: maxAttempts must be an integer of at least 1, received ` +
+        `${JSON.stringify(maxAttempts)}. Fewer than one attempt delivers nothing.`
+    );
+  }
+}
 
 /**
  * Deliver one event to one sink, retrying a bounded number of times.
