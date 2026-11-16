@@ -245,6 +245,13 @@ export interface Then {
    * asserted, so "started before settled" is provable.
    */
   readonly telemetry?: readonly Record<string, unknown>[];
+  /**
+   * Telemetry matchers that must match nothing that was emitted.
+   *
+   * The subsequence above can only say an event happened. This is how a scenario says one
+   * did not, which is the whole claim when the behaviour under test is a refusal to act.
+   */
+  readonly telemetryAbsent?: readonly Record<string, unknown>[];
   readonly state?: Readonly<Record<string, StateExpectation | null>>;
   readonly buildError?: { readonly code: string };
   /**
@@ -312,6 +319,12 @@ export function isSendStep(
   step: Step
 ): step is Extract<Step, { send: unknown }> {
   return "send" in step;
+}
+
+export function isDrainStep(
+  step: Step
+): step is Extract<Step, { drain: true }> {
+  return "drain" in step && step.drain === true;
 }
 
 export function isWaitStep(

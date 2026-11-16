@@ -515,6 +515,11 @@ The per-key ordered event stream, keyed by instance key. The assertion is a full
 list: an extra or missing event is a failure. Each event is matched as a subset, so a
 scenario asserts only the fields it cares about.
 
+An empty object is the one exception to subset matching, here and everywhere else a
+scenario expects an object: `{}` means exactly empty. Read as a subset it would name no
+fields and match anything, so `"values": {}` would not assert that an instance starts with
+none.
+
 ```json
 {
   "orders:1": [
@@ -573,6 +578,19 @@ events in between are ignored. Telemetry is a firehose, and a scenario about one
 trigger should not have to enumerate every enqueue around it.
 
 Each matcher is a subset match, like an event assertion.
+
+### `then.telemetryAbsent`
+
+Matchers that must match nothing that was emitted. The subsequence above can say an event
+happened and never that one did not, which is the whole claim when the behaviour under test
+is that the runtime declined to do something.
+
+```json
+[{ "type": "commit.fenced" }]
+```
+
+Each matcher is a subset match against every emitted event, in any position. One that names
+only a `type` asserts no event of that type was emitted at all.
 
 | Event | Emitted when | Notable fields |
 |---|---|---|
@@ -636,6 +654,11 @@ Current committed state per key, after all steps settle.
 ```
 
 Use `null` as the value for a key to assert that no instance exists for it.
+
+A key that is not in memory is read back through the store when the runtime has one, so
+`null` asserts the instance does not exist anywhere, not merely that it is not resident.
+Residency is `then.resident`'s question. Without a store there is nowhere else to look, and
+`null` means no resident instance.
 
 ### `then.forgets`
 

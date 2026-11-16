@@ -35,6 +35,36 @@
     }
   },
   "$defs": {
+    "telemetryMatcher": {
+      "description": "A subset match against one telemetry event.",
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "enum": [
+            "inbox.enqueued",
+            "inbox.rejected",
+            "inbox.dropped",
+            "handler.started",
+            "handler.settled",
+            "handler.retried",
+            "handler.timedOut",
+            "commit.fenced",
+            "constraint.violated",
+            "constraint.escalated",
+            "commit.raced",
+            "memory.accounted",
+            "memory.refused",
+            "instance.evicted",
+            "instance.forgotten",
+            "instance.restored",
+            "audit.failed",
+            "store.cacheFailed",
+            "storage.swept"
+          ]
+        }
+      }
+    },
     "given": {
       "type": "object",
       "required": ["entities"],
@@ -635,33 +665,12 @@
         "telemetry": {
           "description": "Telemetry matchers, asserted as an ordered subsequence of what was emitted rather than an exact list.",
           "type": "array",
-          "items": {
-            "type": "object",
-            "required": ["type"],
-            "properties": {
-              "type": {
-                "enum": [
-                  "inbox.enqueued",
-                  "inbox.rejected",
-                  "inbox.dropped",
-                  "handler.started",
-                  "handler.settled",
-                  "handler.retried",
-                  "handler.timedOut",
-                  "commit.fenced",
-                  "constraint.violated",
-                  "constraint.escalated",
-                  "commit.raced",
-                  "memory.accounted",
-                  "memory.refused",
-                  "instance.evicted",
-                  "instance.restored",
-                  "audit.failed",
-                  "store.cacheFailed"
-                ]
-              }
-            }
-          }
+          "items": { "$ref": "#/$defs/telemetryMatcher" }
+        },
+        "telemetryAbsent": {
+          "description": "Telemetry matchers that must match nothing that was emitted.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/telemetryMatcher" }
         },
         "state": {
           "type": "object",
