@@ -1015,6 +1015,47 @@ describe("sweeping for temporal constraints", () => {
     await ekman.close();
   });
 
+  it("does not count a bound as fired for an entry the escalation was not raised for", async () => {
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const roaming = defineEntity("roaming", {
+      initial: "waiting",
+      states: {
+        waiting: async (_instance, trigger) => {
+          if (trigger.type === "hold") {
+            await held;
+          }
+          return trigger.type === "leave" ? transitionTo("away") : stay();
+        },
+        away: () => transitionTo("waiting"),
+      },
+      constraints: {
+        temporal: [{ name: "waited", in: "waiting", within: 10 }],
+      },
+    });
+
+    const clock = frozenClock();
+    const ekman = new Ekman({ entities: [roaming], now: clock.now });
+    await ekman.entities.roaming.send("a", { type: "start" });
+    const queued = [
+      ekman.entities.roaming.send("a", { type: "hold" }),
+      ekman.entities.roaming.send("a", { type: "leave" }),
+      ekman.entities.roaming.send("a", { type: "return" }),
+    ];
+    clock.advance(50);
+
+    const sweeping = ekman.sweep();
+    release();
+    await Promise.all(queued);
+    expect(await sweeping).toBe(1);
+
+    clock.advance(50);
+    expect(await ekman.sweep()).toBe(1);
+    await ekman.close();
+  });
+
   it("stops evaluating an instance once an escalation has moved it", async () => {
     const twice = defineEntity("twice", {
       initial: "waiting",

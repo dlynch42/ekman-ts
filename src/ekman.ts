@@ -1091,7 +1091,8 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * Constraints run in declaration order. One is marked fired only once its escalation has
    * been delivered or refused for good, so an escalation turned away by a full inbox is
    * raised again by the next sweep. The pass ends as soon as the instance has left the
-   * state: the remaining constraints watch somewhere it no longer is.
+   * state: the remaining constraints watch somewhere it no longer is. An outcome is only
+   * recorded against the entry into the state that the escalation was raised for.
    *
    * @returns how many escalations were raised, delivered or not
    */
@@ -1115,10 +1116,11 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       }
 
       fired += 1;
+      const entry = instance.stateEntry;
       // biome-ignore lint/performance/noAwaitInLoops: two constraints on one state fire in declaration order, and the second runs only if the first left the instance where it was
       const outcome = await this.#escalate(instance, constraint, elapsedMs, at);
       if (outcome !== "refused-transiently") {
-        instance.markFired(constraint.name);
+        instance.markFired(constraint.name, entry);
       }
     }
 
@@ -1259,6 +1261,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     elapsedMs: number,
     at: number
   ): Promise<EscalationOutcome> {
+    const entry = instance.stateEntry;
     const owed = instance.undelivered(constraint.name);
     const id = owed ?? this.#nextTriggerId();
     const cause = { type: constraint.trigger, id };
@@ -1289,7 +1292,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     }
 
     if (outcome === "refused-transiently") {
-      instance.markUndelivered(constraint.name, id);
+      instance.markUndelivered(constraint.name, id, entry);
     }
 
     this.#emit({

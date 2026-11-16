@@ -66,6 +66,7 @@ export class InstanceRecord<
    * carries the cause the violation named. Cleared with `#firedTemporal`.
    */
   readonly #undeliveredTemporal = new Map<string, string>();
+  #stateEntry = 0;
 
   /**
    * Whether this record still has to be reconciled with the store.
@@ -226,7 +227,24 @@ export class InstanceRecord<
     return this.#firedTemporal.has(constraint);
   }
 
-  markFired(constraint: string): void {
+  /**
+   * Which entry into its state this record is on. Advances every time the state changes.
+   *
+   * An escalation is raised for one entry and answered some time later, behind whatever
+   * was already queued. If the instance left the state and came back in between, the
+   * answer belongs to an entry that is over, and recording it against the current one
+   * would silence that entry's own bound. Callers read this before raising an escalation
+   * and hand it back when recording the outcome.
+   */
+  get stateEntry(): number {
+    return this.#stateEntry;
+  }
+
+  /** Record that a constraint fired, unless the entry it fired for is no longer current. */
+  markFired(constraint: string, entry: number): void {
+    if (entry !== this.#stateEntry) {
+      return;
+    }
     this.#firedTemporal.add(constraint);
     this.#undeliveredTemporal.delete(constraint);
   }
@@ -236,11 +254,15 @@ export class InstanceRecord<
     return this.#undeliveredTemporal.get(constraint);
   }
 
-  markUndelivered(constraint: string, triggerId: string): void {
-    this.#undeliveredTemporal.set(constraint, triggerId);
+  /** Record an escalation as owed, unless the entry it was raised for is no longer current. */
+  markUndelivered(constraint: string, triggerId: string, entry: number): void {
+    if (entry === this.#stateEntry) {
+      this.#undeliveredTemporal.set(constraint, triggerId);
+    }
   }
 
   #rearmTemporal(): void {
+    this.#stateEntry += 1;
     this.#firedTemporal.clear();
     this.#undeliveredTemporal.clear();
   }
