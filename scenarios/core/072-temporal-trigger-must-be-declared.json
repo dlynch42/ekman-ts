@@ -1,0 +1,43 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/072-temporal-trigger-must-be-declared",
+  "name": "a temporal constraint whose escalation trigger is missing from the entity's declared triggers is refused at definition",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "deployments",
+        "initial": "deploying",
+        "triggers": ["start"],
+        "states": [
+          {
+            "state": "deploying",
+            "else": {
+              "result": "stay"
+            }
+          },
+          {
+            "state": "stalled",
+            "else": {
+              "result": "stay"
+            }
+          }
+        ],
+        "constraints": {
+          "temporal": [
+            {
+              "in": "deploying",
+              "within": 1000,
+              "escalateTo": "stalled"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "then": {
+    "buildError": {
+      "code": "INVALID_CONFIG"
+    }
+  }
+}

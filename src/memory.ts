@@ -1,3 +1,4 @@
+import { assertKnownKeys } from "./config";
 import { EkmanError } from "./errors";
 import type { Values } from "./types";
 
@@ -83,8 +84,6 @@ export interface ResolvedMemoryConfig {
   readonly bounded: boolean;
 }
 
-const encoder = new TextEncoder();
-
 /**
  * The accounting basis, stated once so it can be relied on.
  *
@@ -102,13 +101,40 @@ export function accountBytes(
   values: Values,
   sizeOf: ((values: Values) => number) | undefined
 ): number {
-  const valueBytes =
-    sizeOf === undefined
-      ? encoder.encode(JSON.stringify(values)).length
-      : sizeOf(values);
-
-  return encoder.encode(key).length + encoder.encode(state).length + valueBytes;
+  return (
+    byteLength(key) + byteLength(state) + accountValueBytes(values, sizeOf)
+  );
 }
+
+/**
+ * The values' share of the accounting basis: their serialized UTF-8 length, or whatever
+ * the caller's `sizeOf` says.
+ *
+ * Separate from `accountBytes` because it is the only part that changes on every commit.
+ * A record holds its key's length for life and its state's until it moves, so the commit
+ * path measures this alone.
+ */
+export function accountValueBytes(
+  values: Values,
+  sizeOf: ((values: Values) => number) | undefined
+): number {
+  return sizeOf === undefined
+    ? byteLength(JSON.stringify(values))
+    : sizeOf(values);
+}
+
+/**
+ * UTF-8 byte length of a string, without encoding it.
+ *
+ * Counts what an encoder would produce, including three bytes for a lone surrogate, but
+ * allocates nothing, where encoding to measure allocates a buffer per string per commit.
+ */
+export function byteLength(text: string): number {
+  return Buffer.byteLength(text, "utf8");
+}
+
+const MEMORY_KEYS = ["maxBytes", "sizeOf", "eviction"] as const;
+const EVICTION_KEYS = ["policy", "snapshotOnEvict", "allowDiscard"] as const;
 
 /**
  * Resolve the budget against what the stores can offer.
@@ -122,6 +148,9 @@ export function resolveMemoryConfig(
   config: MemoryConfig | undefined,
   context: { hasStore: boolean }
 ): ResolvedMemoryConfig {
+  assertKnownKeys("memory", config, MEMORY_KEYS);
+  assertKnownKeys("memory eviction", config?.eviction, EVICTION_KEYS);
+
   const maxBytes = config?.maxBytes ?? Number.POSITIVE_INFINITY;
   const policy = config?.eviction?.policy ?? "lru";
 
@@ -153,6 +182,15 @@ export function resolveMemoryConfig(
       "INVALID_CONFIG",
       "memory maxBytes of 0 means every instance loads through a store, but no store is " +
         "configured, so there would be nothing to load from."
+    );
+  }
+
+  if (maxBytes === 0 && policy !== "lru") {
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      "memory maxBytes of 0 means no instance may stay resident, which only the " +
+        `"lru" eviction policy can honour by releasing each one as it goes idle. ` +
+        `Policy "${policy}" releases nothing. Use "lru", or raise maxBytes.`
     );
   }
 
@@ -209,9 +247,15 @@ export class MemoryLedger {
     return this.#bytes.size;
   }
 
-  /** Keys from least to most recently used. */
-  get lru(): readonly string[] {
-    return [...this.#bytes.keys()];
+  /**
+   * Keys from least to most recently used, without copying them.
+   *
+   * Safe to release from while walking: a `Map` iterator tolerates entries being deleted
+   * under it. Eviction usually stops after one key, so a copy of every resident key per
+   * idle transition was the whole cost of evicting.
+   */
+  lruKeys(): IterableIterator<string> {
+    return this.#bytes.keys();
   }
 
   has(key: string): boolean {

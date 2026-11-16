@@ -99,6 +99,9 @@ jobs:
       # pass/fail per scenario per level, visible without opening a log, which
       # is what keeps the conformance claim checkable rather than assertable.
       - name: Conformance
+        # Named explicitly so the step runs with pipefail. The default shell does not set
+        # it, and `tee` would then hide a failing report behind its own exit status.
+        shell: bash
         run: |
           {
             echo '## Conformance'

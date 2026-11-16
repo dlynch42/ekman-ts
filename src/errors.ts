@@ -57,6 +57,8 @@ export const ERROR_CODES = [
   "INVALID_CONFIG",
   /** Configuration is recognized but not implemented yet. Never silently ignored. */
   "NOT_IMPLEMENTED",
+  /** The runtime has been closed, so no new trigger can be accepted. */
+  "RUNTIME_CLOSED",
 ] as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[number];

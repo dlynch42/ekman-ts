@@ -1,0 +1,48 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "durable/012-a-refused-first-trigger-still-loads-the-instance",
+  "name": "after a restart, a trigger that is refused before reaching a handler still leaves the instance loaded at its stored state for the trigger behind it",
+  "level": "durable",
+  "given": {
+    "runtime": { "store": [{ "kind": "file" }] },
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "pending",
+        "triggers": ["pay"],
+        "states": [
+          {
+            "state": "pending",
+            "else": { "result": "transitionTo", "to": "paid" }
+          },
+          { "state": "paid", "else": { "result": "stay" } }
+        ]
+      }
+    ]
+  },
+  "when": [
+    { "send": { "key": "orders:1", "trigger": { "type": "pay" } } },
+    { "restart": true },
+    { "send": { "key": "orders:1", "trigger": { "type": "bogus" } } },
+    { "send": { "key": "orders:1", "trigger": { "type": "pay" } } }
+  ],
+  "then": {
+    "sends": [
+      { "outcome": "committed", "state": "paid", "seq": 1 },
+      { "outcome": "rejected", "code": "UNKNOWN_TRIGGER" },
+      { "outcome": "committed", "state": "paid", "seq": 2 }
+    ],
+    "state": { "orders:1": { "state": "paid", "seq": 2 } },
+    "history": {
+      "orders:1": {
+        "events": [
+          "transition@0",
+          "transition@1",
+          "rejected@1",
+          "restored@1",
+          "transition@2"
+        ]
+      }
+    }
+  }
+}

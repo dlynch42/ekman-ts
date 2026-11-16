@@ -29,7 +29,7 @@ to bring instances of it to life.
 |---|---|---|---|
 | `initial` | a key of `states` | yes | The state a new instance starts in. Checked against `states`, so a typo is a compile error. |
 | `states` | map of state name to handler or `{ handler, ...policy }` | yes | The state machine. Its keys are the only source of the state union. |
-| `values` | object | no | The starting values for a new instance, and the type of `instance.values` everywhere. |
+| `values` | object | no | The starting values for a new instance, and the type of `instance.values` everywhere. Must be plain JSON data. They are copied and frozen at every depth, as committed values are, so a handler cannot change them in place. |
 | `triggers` | `string[]` | no | The contract with producers. Any trigger type not in this list is refused and recorded rather than ignored. |
 | `unknown` | `"reject"` | no | What happens when the current state has no handler or the trigger type is unrecognized. `"reject"` is the only value, and also the default: there is deliberately no silent-discard setting. |
 | `policy` | `ExecutionPolicy` | no | Retries, timeout and backoff for every state in this entity. Overrides the runtime's. See [Execution](./execution.md). |

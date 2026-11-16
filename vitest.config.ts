@@ -6,8 +6,9 @@ export default defineConfig({
     environment: "node",
     coverage: {
       provider: "v8",
-      include: ["src/**/*.ts"],
-      exclude: ["src/index.ts"],
+      include: ["src/**/*.ts", "runner/**/*.ts"],
+      // The runner's entry point and its report formatter only run from `npm run conformance`.
+      exclude: ["src/index.ts", "runner/cli.ts", "runner/report.ts"],
       thresholds: {
         statements: 90,
         branches: 90,

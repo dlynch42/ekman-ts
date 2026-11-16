@@ -22,7 +22,7 @@ written to be read by a person and will change.
 
 ## The codes
 
-There are 21, and they fall into four groups.
+There are 22, and they fall into four groups.
 
 ### A trigger was refused
 
@@ -58,6 +58,7 @@ Try again later. These are the codes that mean backpressure.
 | `STORE_UNAVAILABLE` | The commit authority could not be reached, so the commit did not happen. | 503 |
 | `STORE_CONFLICT` | A conditional append found the key at a different sequence. Nothing was written. | 409 |
 | `KEY_BUSY` | An operation needed the key idle and it was not. Only `forget` raises this. | 409 |
+| `RUNTIME_CLOSED` | The runtime has been closed, so the trigger was not accepted, or a retry that was waiting was abandoned. Not retried by the runtime; a replacement process is usually starting. | 503 |
 
 ### Configuration was wrong
 

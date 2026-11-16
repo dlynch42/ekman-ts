@@ -56,6 +56,7 @@ export class Inbox {
   #running: boolean;
 
   readonly #onIdle: () => void;
+  readonly #idleWaiters: (() => void)[] = [];
 
   constructor(args: {
     key: string;
@@ -90,6 +91,19 @@ export class Inbox {
   /** Nothing running and nothing waiting. What eviction is allowed to touch. */
   get idle(): boolean {
     return !(this.#running || this.#queue.length > 0);
+  }
+
+  /**
+   * Resolves the next time nothing is running and nothing is waiting, or at once if that
+   * is already so. What a shutdown waits on, so work that was accepted is allowed to land.
+   */
+  whenIdle(): Promise<void> {
+    if (this.idle) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      this.#idleWaiters.push(resolve);
+    });
   }
 
   /**
@@ -254,6 +268,9 @@ export class Inbox {
     }
 
     this.#running = false;
+    for (const resolve of this.#idleWaiters.splice(0)) {
+      resolve();
+    }
     // The key is idle only now. Eviction is allowed to touch it from here and not before,
     // which is why the budget acts here rather than at the commit that blew it.
     this.#onIdle();

@@ -33,8 +33,11 @@ telemetry: {
 },
 ```
 
-Every event carries `key`, `entity` and `at`. `storage.swept` is the exception: it happens to a
-store rather than to an instance.
+Every event carries `key`, `entity` and `at`. `storage.swept` and `runtime.closed` are the
+exceptions: they happen to a store and to the runtime rather than to an instance.
+
+A handler may be `async`. It is never awaited, so it cannot slow the runtime down, and if it
+rejects the error goes to `onUnhandled` rather than becoming an unhandled rejection.
 
 ## The events
 
@@ -59,6 +62,7 @@ store rather than to an instance.
 | `store.cacheFailed` | A cache layer could not be written. The commit was unaffected. |
 | `audit.failed` | An audit sink could not be delivered to, after its retries. |
 | `storage.swept` | A store's retention pass ran. |
+| `runtime.closed` | `close()` finished waiting for in-flight work. Carries `drained` and `pending`. |
 
 Two of these are worth understanding rather than just counting.
 
@@ -87,6 +91,14 @@ An audit sink receives a copy of every committed event, out of band.
 no veto. A sink that throws, hangs forever, or is merely slow cannot delay or fail a commit, and
 a sink that cannot be reached after its retries is reported as `audit.failed` and nothing else.
 That is the whole of what a failed audit delivery does.
+
+Delivery starts on a later turn of the event loop than the commit, never inside it, so even a
+sink that does synchronous work costs the commit nothing. The corollary is that a sink has not
+been called yet at the moment `send()` resolves. Events reach a sink in the order they were
+committed; a sink that needs a stronger ordering guarantee across retries should order by `seq`.
+
+A sink's `maxAttempts` must be at least 1, and a sink with no `name` or no `deliver` is refused
+when the runtime is constructed.
 
 ```
 npm run demo:audit   # one sink that throws, one that hangs, one that is slow. Every commit lands.

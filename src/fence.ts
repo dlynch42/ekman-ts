@@ -46,8 +46,8 @@ export class CommitToken {
   /**
    * What tried to invalidate this token after it was already sealed.
    *
-   * Purely observational: the commit went ahead. Recorded rather than dropped because the
-   * sender was told the attempt failed while the work actually landed, and an operator
+   * Purely observational: the commit went ahead, and its sender is told so. Recorded
+   * rather than dropped because the attempt still ran past its timeout, and an operator
    * seeing a rate of this needs to know their timeouts are set close to how long their
    * store takes.
    */

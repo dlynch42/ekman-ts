@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { EkmanError } from "../src/errors";
 import { isTransitionEvent } from "../src/events";
-import { InstanceRecord, sealValues } from "../src/instance";
+import { InstanceRecord, RESIDENT_HISTORY_LIMIT } from "../src/instance";
 import { States } from "../src/states";
 import { memoryStore } from "../src/stores/memory";
+import { freezeValues, sealValues } from "../src/values";
 import { testDeps } from "./deps";
 
 const deps = testDeps();
@@ -82,7 +83,8 @@ describe("InstanceRecord", () => {
     // or every caller would need to know which of the two states the record is in.
     expect(instance.needsHydration).toBe(false);
     await instance.ready();
-    expect(instance.events).toHaveLength(1);
+    expect(instance.seq).toBe(0);
+    expect(instance.events).toEqual([]);
   });
 
   it("exposes a frozen snapshot", () => {
@@ -268,5 +270,262 @@ describe("sealValues", () => {
       expect((err as EkmanError).code).toBe("HANDLER_FAILED");
       expect((err as EkmanError).key).toBe("orders:1");
     }
+  });
+});
+
+describe("sealing values", () => {
+  it("freezes nested objects and arrays", () => {
+    const sealed = sealValues({ nested: { deep: [{ n: 1 }] } }, "orders:1");
+
+    expect(Object.isFrozen(sealed.nested)).toBe(true);
+    expect(Object.isFrozen(sealed.nested.deep)).toBe(true);
+    expect(Object.isFrozen(sealed.nested.deep[0])).toBe(true);
+  });
+
+  it("leaves binary data usable", () => {
+    const sealed = sealValues({ blob: new Uint8Array([1, 2, 3]) }, "orders:1");
+
+    expect(sealed.blob.byteLength).toBe(3);
+  });
+
+  it("copies a value that refers to itself", () => {
+    const loop: { self?: unknown } = {};
+    loop.self = loop;
+
+    const sealed = sealValues({ loop }, "orders:1");
+
+    expect(sealed.loop.self).toBe(sealed.loop);
+  });
+
+  it("freezes below an object that was already frozen at the top", () => {
+    const loaded = Object.freeze({ nested: { deeper: { n: 1 } } });
+
+    freezeValues(loaded);
+
+    expect(Object.isFrozen(loaded.nested)).toBe(true);
+    expect(Object.isFrozen(loaded.nested.deeper)).toBe(true);
+  });
+
+  it("freezes in place what a store handed back", () => {
+    const loaded = { nested: { n: 1 } };
+
+    expect(freezeValues(loaded)).toBe(loaded);
+    expect(Object.isFrozen(loaded.nested)).toBe(true);
+  });
+});
+
+describe("a commit whose values cannot be measured", () => {
+  it("is refused before anything is written or applied", async () => {
+    const store = memoryStore();
+    const record = new InstanceRecord({
+      key: "orders:1",
+      entity: "orders",
+      initial: "pending",
+      initialValues: {},
+      states: STATES,
+      at: 0,
+      cause: { type: "init", id: "t1" },
+      deps: testDeps({ store }),
+    });
+    await record.ready();
+
+    const refused = await commit(record, {
+      state: "pending",
+      values: { big: 10n },
+      at: 1,
+      cause: { type: "x", id: "t2" },
+    }).catch((error: EkmanError) => error);
+
+    expect(refused).toMatchObject({ code: "HANDLER_FAILED", key: "orders:1" });
+    expect(record.seq).toBe(0);
+    expect(await store.read("orders:1")).toHaveLength(1);
+  });
+});
+
+describe("telling the runtime about a commit", () => {
+  it("reports every applied commit, and whether it moved the instance", async () => {
+    const reported: [string, boolean][] = [];
+    const record = new InstanceRecord({
+      key: "orders:1",
+      entity: "orders",
+      initial: "pending",
+      initialValues: {},
+      states: STATES,
+      at: 0,
+      cause: { type: "init", id: "t1" },
+      deps: testDeps({
+        committed: (committed, moved) => reported.push([committed.key, moved]),
+      }),
+    });
+
+    await commit(record, {
+      state: "pending",
+      values: {},
+      at: 1,
+      cause: { type: "x", id: "t2" },
+    });
+    await commit(record as InstanceRecord<string, Record<string, unknown>>, {
+      state: "approved",
+      values: {},
+      at: 2,
+      cause: { type: "x", id: "t3" },
+    });
+
+    expect(reported).toEqual([
+      ["orders:1", false],
+      ["orders:1", true],
+    ]);
+  });
+});
+
+describe("what a record retains of its own history", () => {
+  const record = (store?: ReturnType<typeof memoryStore>) =>
+    new InstanceRecord<string, Record<string, unknown>>({
+      key: "orders:1",
+      entity: "orders",
+      initial: "pending",
+      initialValues: Object.freeze({}),
+      states: STATES,
+      at: 0,
+      cause: { type: "init", id: "t1" },
+      deps: testDeps(store === undefined ? {} : { store }),
+    });
+
+  const commits = async (
+    instance: InstanceRecord<string, Record<string, unknown>>,
+    count: number
+  ) => {
+    for (let n = 1; n <= count; n += 1) {
+      // biome-ignore lint/performance/noAwaitInLoops: commits to one key are sequential
+      await commit(instance, {
+        state: "pending",
+        values: { n },
+        at: n,
+        cause: { type: "x", id: `c${n}` },
+      });
+    }
+  };
+
+  it("keeps the whole stream when nothing else holds it", async () => {
+    const instance = record();
+    await commits(instance, 3);
+    instance.reject({
+      code: "UNKNOWN_TRIGGER",
+      reason: "no",
+      at: 4,
+      cause: { type: "y", id: "c4" },
+    });
+
+    expect(instance.events.map((event) => event.type)).toEqual([
+      "transition",
+      "transition",
+      "transition",
+      "transition",
+      "rejected",
+    ]);
+    expect(instance.historyTrimmed).toBe(false);
+  });
+
+  it("keeps nothing the store already holds", async () => {
+    const store = memoryStore();
+    const instance = record(store);
+    await instance.ready();
+    await commits(instance, 3);
+
+    expect(instance.events).toEqual([]);
+    expect(await store.read("orders:1")).toHaveLength(4);
+  });
+
+  it("keeps the restores a store cannot hold, and knows the latest", async () => {
+    const store = memoryStore();
+    const first = record(store);
+    await first.ready();
+    await commits(first, 2);
+    expect(first.lastRestored).toBeUndefined();
+
+    const second = record(store);
+    await second.ready();
+    await commits(second, 1);
+
+    expect(second.events.map((event) => event.type)).toEqual(["restored"]);
+    expect(second.lastRestored).toBe(second.events[0]);
+  });
+
+  it("keeps only the most recent events once there are too many", async () => {
+    const instance = record();
+    await commits(instance, RESIDENT_HISTORY_LIMIT + 5);
+
+    expect(instance.events).toHaveLength(RESIDENT_HISTORY_LIMIT);
+    expect(instance.events.at(-1)).toMatchObject({
+      seq: RESIDENT_HISTORY_LIMIT + 5,
+    });
+    expect(instance.events[0]).toMatchObject({ seq: 6 });
+    expect(instance.historyTrimmed).toBe(true);
+  });
+
+  it("holds a bounded number however long the key lives", async () => {
+    const instance = record();
+    await commits(instance, RESIDENT_HISTORY_LIMIT * 3);
+
+    expect(instance.events).toHaveLength(RESIDENT_HISTORY_LIMIT);
+    expect(instance.events.at(-1)).toMatchObject({
+      seq: RESIDENT_HISTORY_LIMIT * 3,
+    });
+  });
+});
+
+describe("sealing plain data without a structured clone", () => {
+  it("copies and freezes plain objects and arrays", () => {
+    const source = {
+      list: [1, { deep: true }],
+      empty: undefined,
+      nan: Number.NaN,
+    };
+    const sealed = sealValues(source, "orders:1");
+
+    expect(sealed).toEqual(source);
+    expect(sealed).not.toBe(source);
+    expect(sealed.list).not.toBe(source.list);
+    expect(Object.isFrozen(sealed.list[1])).toBe(true);
+    expect("empty" in sealed).toBe(true);
+  });
+
+  it("keeps the holes in a sparse array", () => {
+    const sparse: unknown[] = [];
+    sparse[2] = "x";
+    const sealed = sealValues({ sparse }, "orders:1");
+
+    expect(sealed.sparse).toHaveLength(3);
+    expect(0 in sealed.sparse).toBe(false);
+  });
+
+  it("still copies what plain copying cannot express", () => {
+    const when = new Date(0);
+    const sealed = sealValues(
+      { when, tags: new Map([["a", 1]]), nested: { when } },
+      "orders:1"
+    );
+
+    expect(sealed.when).toEqual(when);
+    expect(sealed.when).not.toBe(when);
+    expect(sealed.tags.get("a")).toBe(1);
+    expect(sealed.nested.when).toBeInstanceOf(Date);
+  });
+
+  it("does not let a key named __proto__ replace the prototype", () => {
+    const source = JSON.parse('{"__proto__": {"polluted": true}}');
+    const sealed = sealValues(source, "orders:1") as Record<string, unknown>;
+
+    expect(Object.getPrototypeOf(sealed)).toBe(Object.prototype);
+    expect(Object.keys(sealed)).toEqual(["__proto__"]);
+  });
+
+  it("copies data nested deeper than it is willing to walk", () => {
+    let deep: Record<string, unknown> = { leaf: true };
+    for (let depth = 0; depth < 200; depth += 1) {
+      deep = { deep };
+    }
+
+    expect(sealValues({ deep }, "orders:1")).toEqual({ deep });
   });
 });

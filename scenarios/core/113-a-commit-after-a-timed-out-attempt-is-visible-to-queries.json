@@ -1,0 +1,128 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/113-a-commit-after-a-timed-out-attempt-is-visible-to-queries",
+  "name": "the commit a retry makes after an attempt timed out is where queries and reads find the instance, and the abandoned attempt changes nothing",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "pending",
+        "states": [
+          {
+            "state": "pending",
+            "policy": {
+              "timeoutMs": 10,
+              "maxAttempts": 2,
+              "backoff": {
+                "kind": "fixed",
+                "delayMs": 0
+              }
+            },
+            "cases": [
+              {
+                "when": {
+                  "attempt": 1
+                },
+                "do": {
+                  "result": "transitionTo",
+                  "to": "lost",
+                  "delayMs": 60
+                }
+              }
+            ],
+            "else": {
+              "result": "transitionTo",
+              "to": "shipped"
+            }
+          },
+          {
+            "state": "shipped",
+            "else": {
+              "result": "stay"
+            }
+          },
+          {
+            "state": "lost",
+            "else": {
+              "result": "stay"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "orders:1",
+        "trigger": {
+          "type": "ship"
+        }
+      }
+    },
+    {
+      "wait": 90
+    }
+  ],
+  "then": {
+    "sends": [
+      {
+        "outcome": "committed",
+        "state": "shipped",
+        "seq": 1
+      }
+    ],
+    "telemetry": [
+      {
+        "type": "handler.timedOut",
+        "key": "orders:1",
+        "attempt": 1
+      },
+      {
+        "type": "handler.retried",
+        "key": "orders:1",
+        "attempt": 1
+      },
+      {
+        "type": "handler.settled",
+        "key": "orders:1",
+        "outcome": "committed",
+        "attempt": 2
+      },
+      {
+        "type": "commit.fenced",
+        "key": "orders:1",
+        "attempt": 1
+      }
+    ],
+    "telemetryAbsent": [
+      {
+        "type": "commit.raced"
+      }
+    ],
+    "queries": [
+      {
+        "entity": "orders",
+        "state": "shipped",
+        "keys": ["orders:1"]
+      },
+      {
+        "entity": "orders",
+        "state": "pending",
+        "keys": []
+      },
+      {
+        "entity": "orders",
+        "state": "lost",
+        "keys": []
+      }
+    ],
+    "state": {
+      "orders:1": {
+        "state": "shipped",
+        "seq": 1
+      }
+    }
+  }
+}

@@ -129,7 +129,10 @@ export interface InvariantConstraint<
  * it again.
  */
 export interface TemporalConstraint<S extends string = string> {
-  /** Defaults to `temporal:<in>`. */
+  /**
+   * Defaults to `temporal:<in>:<within>`. Names must be distinct within an entity, because
+   * "already fired" is tracked by name.
+   */
   readonly name?: string;
   /** The state being watched. */
   readonly in: S;
@@ -432,7 +435,8 @@ function compileTemporal<S extends string>(
     if (policy !== "off") {
       compiled.push(
         Object.freeze({
-          name: constraint.name ?? `temporal:${constraint.in}`,
+          name:
+            constraint.name ?? `temporal:${constraint.in}:${constraint.within}`,
           in: constraint.in,
           within: constraint.within,
           escalateTo: constraint.escalateTo,
@@ -443,7 +447,33 @@ function compileTemporal<S extends string>(
     }
   }
 
+  assertDistinctNames(entity, compiled);
   return compiled;
+}
+
+/**
+ * Refuse two temporal constraints with one name.
+ *
+ * A constraint fires once per entry into its state, and which ones have fired is tracked
+ * by name. Two sharing a name would share that record, so the second would never fire.
+ */
+function assertDistinctNames(
+  entity: string,
+  compiled: readonly CompiledTemporal[]
+): void {
+  const names = new Set<string>();
+
+  for (const bound of compiled) {
+    if (names.has(bound.name)) {
+      throw invalid(
+        entity,
+        `two temporal constraints share the name "${bound.name}". Each is tracked by ` +
+          "name so that it fires once per entry into its state, so names must be " +
+          "distinct. Give one of them a `name`."
+      );
+    }
+    names.add(bound.name);
+  }
 }
 
 /**
