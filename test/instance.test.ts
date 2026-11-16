@@ -529,3 +529,85 @@ describe("sealing plain data without a structured clone", () => {
     expect(sealValues({ deep }, "orders:1")).toEqual({ deep });
   });
 });
+
+describe("sealing values that share structure", () => {
+  it("does not copy a shared object once for every path that reaches it", () => {
+    let node: Record<string, unknown> = { leaf: 1 };
+    for (let depth = 0; depth < 24; depth += 1) {
+      node = { left: node, right: node };
+    }
+
+    const started = performance.now();
+    const sealed = sealValues({ node }, "orders:1");
+
+    expect(performance.now() - started).toBeLessThan(250);
+    expect(Object.isFrozen(sealed.node)).toBe(true);
+    expect((sealed.node.left as { left: unknown }).left).toBeDefined();
+  });
+});
+
+describe("reloading after another writer moved the key", () => {
+  const record = (store: ReturnType<typeof memoryStore>) =>
+    new InstanceRecord<string, Record<string, unknown>>({
+      key: "orders:1",
+      entity: "orders",
+      initial: "pending",
+      initialValues: Object.freeze({}),
+      states: STATES,
+      at: 0,
+      cause: { type: "init", id: "t1" },
+      deps: testDeps({ store }),
+    });
+
+  const move = (
+    instance: InstanceRecord<string, Record<string, unknown>>,
+    state: string,
+    at: number
+  ) =>
+    commit(instance, {
+      state,
+      values: {},
+      at,
+      cause: { type: "x", id: `c${at}` },
+    });
+
+  const overtaken = async (
+    others: (
+      other: InstanceRecord<string, Record<string, unknown>>
+    ) => Promise<unknown>
+  ) => {
+    const store = memoryStore();
+    const mine = record(store);
+    await mine.ready();
+    mine.markFired("too-slow", mine.stateEntry);
+    const entry = mine.stateEntry;
+
+    const theirs = record(store);
+    await theirs.ready();
+    await others(theirs);
+
+    await move(mine, "pending", 99).catch(() => undefined);
+    await mine.ready();
+    return { mine, entry };
+  };
+
+  it("re-arms its bounds when the reload finds a new entry into the state", async () => {
+    const { mine, entry } = await overtaken(async (theirs) => {
+      await move(theirs, "approved", 5);
+      await move(theirs, "pending", 6);
+    });
+
+    expect(mine.state).toBe("pending");
+    expect(mine.stateEntry).not.toBe(entry);
+    expect(mine.hasFired("too-slow")).toBe(false);
+  });
+
+  it("keeps them when the other writer only changed values", async () => {
+    const { mine, entry } = await overtaken((theirs) =>
+      move(theirs, "pending", 5)
+    );
+
+    expect(mine.stateEntry).toBe(entry);
+    expect(mine.hasFired("too-slow")).toBe(true);
+  });
+});

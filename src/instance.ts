@@ -626,6 +626,12 @@ export class InstanceRecord<
    * committed. The handler for the next trigger gets the winner's state, which is the same
    * thing that would have happened had the two arrived in the other order.
    *
+   * If the other writer moved the instance, what the store holds is a different entry into
+   * a state than the one this record was tracking, even when the state name is the same
+   * because it left and came back. Temporal constraints are re-armed then, so nothing that
+   * fired or was owed for the old entry carries over. A change to values alone keeps the
+   * entry, and keeps them.
+   *
    * A key another writer deleted comes back as gone rather than as its old self, so it
    * re-initializes on the next trigger like any other key nothing holds. That is a new
    * life: it enters the initial state now, and no temporal constraint that fired in the
@@ -664,6 +670,13 @@ export class InstanceRecord<
       this.#hydration = this.#hydrating(pending, authority);
       await this.#hydration;
       return;
+    }
+
+    if (
+      current.state !== this.#state ||
+      current.enteredAt !== this.#enteredAt
+    ) {
+      this.#rearmTemporal();
     }
 
     this.#setState(current.state);

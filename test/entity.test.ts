@@ -427,6 +427,8 @@ describe("initial values", () => {
     ["binary data", { blob: new Uint8Array(2) }],
     ["a class instance", { list: [new (class Point {})()] }],
     ["a value that contains itself", selfReferring()],
+    ["a number JSON would turn into null", { amount: Number.NaN }],
+    ["an infinite number", { nested: { limit: Number.POSITIVE_INFINITY } }],
   ])("refuses %s at definition", (_what, values) => {
     const define = () =>
       defineEntity("orders", { initial: "a", values, states: { a: noop } });
@@ -498,5 +500,17 @@ describe("unrecognized configuration", () => {
 
     expect(code(define)).toBe("INVALID_CONFIG");
     expect(define).toThrow(naming);
+  });
+});
+
+describe("initial values a store would bring back unchanged", () => {
+  it("accepts an absent optional value", () => {
+    const definition = defineEntity("orders", {
+      initial: "a",
+      values: { receipt: undefined as string | undefined, total: 0 },
+      states: { a: noop },
+    });
+
+    expect(definition.initialValues.receipt).toBeUndefined();
   });
 });

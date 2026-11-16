@@ -112,6 +112,9 @@ function freezeWithin(value: unknown, visited: WeakSet<object>): void {
  *
  * `ancestors` is the chain of objects currently being walked, so a value that contains
  * itself is reported instead of followed.
+ *
+ * A number that is not finite is refused because a store would bring it back as `null`.
+ * `undefined` is allowed: a store drops the key, and reading it gives `undefined` again.
  */
 function assertPlainJson(
   value: unknown,
@@ -121,6 +124,11 @@ function assertPlainJson(
   const kind = typeof value;
   if (kind === "function" || kind === "symbol" || kind === "bigint") {
     throw new TypeError(`${path} is a ${kind}`);
+  }
+  if (kind === "number" && !Number.isFinite(value)) {
+    throw new TypeError(
+      `${path} is ${String(value)}, which JSON stores as null`
+    );
   }
   if (kind !== "object" || value === null) {
     return;
@@ -143,6 +151,16 @@ function assertPlainJson(
 /** How deep the plain walk goes before leaving the rest to structured clone. */
 const MAX_PLAIN_DEPTH = 32;
 
+/**
+ * How many objects the plain walk copies before leaving the rest to structured clone.
+ *
+ * The walk does not remember what it has copied, so an object reachable by several paths
+ * is copied once per path, and a small value that shares structure heavily can expand
+ * into millions of copies. Structured clone copies each object once. Counting is cheaper
+ * than remembering, and a value this large is not one the fast path was for.
+ */
+const MAX_PLAIN_NODES = 10_000;
+
 /** Returned by the plain walk when it meets something it cannot copy faithfully. */
 const NOT_PLAIN = Symbol("not plain data");
 
@@ -151,7 +169,7 @@ const NOT_PLAIN = Symbol("not plain data");
  * when they do not.
  */
 function copyFrozen<V>(values: V): Readonly<V> {
-  const copied = copyPlain(values, 0);
+  const copied = copyPlain(values, 0, { left: MAX_PLAIN_NODES });
   return copied === NOT_PLAIN
     ? freezeValues(structuredClone(values))
     : (copied as Readonly<V>);
@@ -164,17 +182,23 @@ function copyFrozen<V>(values: V): Readonly<V> {
  * function or symbol (which it refuses), a built-in or class instance (which it copies by
  * kind), and a key named `__proto__` (which assignment would turn into a prototype). It
  * also gives up past a fixed depth, which is what keeps a value that refers to itself from
- * being walked forever; structured clone copies such a value correctly.
+ * being walked forever, and once `budget` is spent; structured clone copies such values
+ * correctly.
  */
-function copyPlain(value: unknown, depth: number): unknown {
+function copyPlain(
+  value: unknown,
+  depth: number,
+  budget: { left: number }
+): unknown {
   if (typeof value !== "object" || value === null) {
     return typeof value === "function" || typeof value === "symbol"
       ? NOT_PLAIN
       : value;
   }
-  if (depth > MAX_PLAIN_DEPTH || !isPlain(value)) {
+  if (depth > MAX_PLAIN_DEPTH || budget.left <= 0 || !isPlain(value)) {
     return NOT_PLAIN;
   }
+  budget.left -= 1;
 
   const source = value as Record<string, unknown>;
   const copy: Record<string, unknown> | unknown[] = Array.isArray(value)
@@ -182,7 +206,7 @@ function copyPlain(value: unknown, depth: number): unknown {
     : {};
 
   for (const key of Object.keys(source)) {
-    const nested = copyPlain(source[key], depth + 1);
+    const nested = copyPlain(source[key], depth + 1, budget);
     if (nested === NOT_PLAIN || key === "__proto__") {
       return NOT_PLAIN;
     }
