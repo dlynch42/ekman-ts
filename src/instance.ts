@@ -257,8 +257,21 @@ export class InstanceRecord<
       return Promise.resolve();
     }
 
-    this.#hydration ??= this.#hydrate(pending, authority);
+    this.#hydration ??= this.#hydrating(pending, authority);
     return this.#hydration;
+  }
+
+  /**
+   * Start a hydration whose failure is forgotten rather than cached.
+   *
+   * A failed load is a failed attempt, not a verdict on the key. Kept, the rejection would
+   * be handed to every later trigger for the life of the record.
+   */
+  #hydrating(pending: PendingInit<S, V>, authority: Store): Promise<void> {
+    return this.#hydrate(pending, authority).catch((error: unknown) => {
+      this.#hydration = undefined;
+      throw error;
+    });
   }
 
   /**
@@ -274,6 +287,16 @@ export class InstanceRecord<
    */
   get needsHydration(): boolean {
     return this.#pending !== undefined || this.#stale;
+  }
+
+  /**
+   * Whether this record has never been reconciled with the store at all.
+   *
+   * Narrower than `needsHydration`: a record another writer overtook is a real instance
+   * that is behind, while one that never loaded holds only the entity's initial state.
+   */
+  get unloaded(): boolean {
+    return this.#pending !== undefined;
   }
 
   /**
@@ -494,6 +517,10 @@ export class InstanceRecord<
       this.#seq = 0;
       this.#bytes = this.#measure();
 
+      // A new life: entered now, with no bound from the deleted one counted as fired.
+      this.#enteredAt = this.#deps.now();
+      this.#firedTemporal.clear();
+
       const pending: PendingInit<S, V> = {
         initial: this.#initial,
         initialValues: this.#initialValues,
@@ -501,7 +528,7 @@ export class InstanceRecord<
         cause: RELOAD_CAUSE,
       };
       this.#pending = pending;
-      this.#hydration = this.#hydrate(pending, authority);
+      this.#hydration = this.#hydrating(pending, authority);
       await this.#hydration;
       return;
     }
@@ -540,7 +567,15 @@ export class InstanceRecord<
       // Genuinely new. Initialization is a commit at sequence 0, and it has to be durable
       // before anything is dispatched against it.
       const event = this.#initEvent(pending.at, pending.cause);
-      await this.#persist(event, EMPTY_SEQ);
+      try {
+        await this.#persist(event, EMPTY_SEQ);
+      } catch (error) {
+        if (isEkmanError(error) && error.code === "STORE_CONFLICT") {
+          this.#stale = true;
+          this.#pending = undefined;
+        }
+        throw error;
+      }
       this.#events.push(event);
       this.#deps.audit(event);
       this.#pending = undefined;

@@ -106,6 +106,10 @@ ekman.entities.orders.inspect("a-1");        // same, typed, addressed by id
 resident. It does not touch the store and it does not reload. Use `history` or `query` when you
 need an answer that covers instances this process has not loaded.
 
+`inspect` also returns `undefined` for an instance that is still being loaded from the store,
+or that another writer has moved since it was loaded, so a caller never reads a state the
+store has already moved past. The next trigger for the key reconciles it.
+
 The cheapest read of all is the one `send` already gives you: it resolves to the committed
 `{ key, state, values, seq, event }`.
 

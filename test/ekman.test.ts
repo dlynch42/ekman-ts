@@ -7,6 +7,8 @@ import { defineEntity } from "../src/entity";
 import { EkmanError } from "../src/errors";
 import type { EkmanEvent, TransitionEvent } from "../src/events";
 import { fail, stay, transitionTo } from "../src/results";
+import type { Store } from "../src/store";
+import { memoryStore } from "../src/stores/memory";
 import type { TelemetryEvent } from "../src/telemetry";
 
 const NON_NEGATIVE_INTEGER = /non-negative integer/;
@@ -1140,6 +1142,64 @@ describe("forgetting an instance", () => {
     // And once it is idle the same call goes through.
     await ekman.entities.slow.forget("s1");
     expect(ekman.entities.slow.inspect("s1")).toBeUndefined();
+    await ekman.close();
+  });
+
+  it("makes a send that arrives mid-forget start a fresh instance", async () => {
+    const inner = memoryStore();
+    // A refusal is written unawaited, so a slow one is still in flight when forget runs.
+    const store: Store = {
+      name: inner.name,
+      capabilities: inner.capabilities,
+      append: async (key, event, expectedSeq) => {
+        if (event.type === "rejected") {
+          await new Promise((done) => setTimeout(done, 30));
+        }
+        return inner.append(key, event, expectedSeq);
+      },
+      load: inner.load.bind(inner),
+      read: inner.read.bind(inner),
+      snapshot: inner.snapshot.bind(inner),
+      scan: inner.scan.bind(inner),
+      forget: inner.forget.bind(inner),
+    };
+    const gated = defineEntity("gated", {
+      initial: "open",
+      triggers: ["poke"],
+      states: { open: () => stay() },
+    });
+    const ekman = new Ekman({ entities: [gated], store });
+
+    await ekman.entities.gated.send("g1", { type: "poke" });
+    await ekman.entities.gated.send("g1", { type: "bogus" }).catch(() => 0);
+
+    const forgetting = ekman.entities.gated.forget("g1");
+    const sent = ekman.entities.gated.send("g1", { type: "poke" });
+    await forgetting;
+
+    // Loading before the delete would have restored the old stream and committed onto it.
+    expect(await sent).toMatchObject({ seq: 1 });
+    const { events } = await ekman.entities.gated.history("g1");
+    expect(events.map((event) => `${event.type}@${event.seq}`)).toEqual([
+      "transition@0",
+      "transition@1",
+    ]);
+    await ekman.close();
+  });
+
+  it("lets two forgets of one key overlap", async () => {
+    const ekman = new Ekman({ entities: [tickets], store: "memory" });
+    await ekman.entities.tickets.send("t1", { type: "poke" });
+
+    await Promise.all([
+      ekman.entities.tickets.forget("t1"),
+      ekman.entities.tickets.forget("t1"),
+    ]);
+
+    const revived = await ekman.entities.tickets.send("t1", { type: "poke" });
+    expect(revived.seq).toBe(1);
+    const { events } = await ekman.entities.tickets.history("t1");
+    expect(events).toHaveLength(2);
     await ekman.close();
   });
 

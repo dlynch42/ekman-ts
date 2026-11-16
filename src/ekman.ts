@@ -79,6 +79,8 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   readonly #audit: readonly AuditSink[];
   /** What is resident and what it costs, in least-recently-used order. */
   readonly #ledger = new MemoryLedger();
+  /** Deletions still in progress, by key. A new record for the key waits on its entry before loading. */
+  readonly #forgetting = new Map<string, Promise<void>>();
   #sweepTimer: ReturnType<typeof setInterval> | undefined;
   #storageSweepTimer: ReturnType<typeof setInterval> | undefined;
   /**
@@ -204,7 +206,10 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     key: string
   ): InstanceSnapshot<S, V> | undefined {
     const instance = this.#instances.get(parseKey(key).key);
-    return instance?.snapshot() as InstanceSnapshot<S, V> | undefined;
+    if (instance === undefined || instance.needsHydration) {
+      return;
+    }
+    return instance.snapshot() as InstanceSnapshot<S, V>;
   }
 
   /**
@@ -229,6 +234,10 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    *
    * Forgetting a key that was never here is not an error, so a sweep that dies halfway
    * behaves the same way when it is run again.
+   *
+   * The record leaves the table before the delete is awaited, and a record created for the
+   * same key meanwhile waits for the delete before it loads. Otherwise it would restore the
+   * stream being removed and commit on top of it, and that commit would then be deleted.
    */
   async forget(key: string): Promise<void> {
     const parsed = parseKey(key).key;
@@ -247,32 +256,44 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       }
     }
 
-    if (instance !== undefined) {
-      // A non-empty queue implies a running drain, because the inbox starts draining
-      // synchronously when it accepts. So an idle instance has nothing queued and nothing
-      // in flight, and there is no attempt left to fence.
-      if (!instance.idle) {
-        throw new EkmanError(
-          "KEY_BUSY",
-          `${JSON.stringify(parsed)} has a handler in flight, so it was not forgotten. ` +
-            "Deleting it now would leave that attempt committing into a key that no " +
-            "longer exists. Retry once it is idle.",
-          { key: parsed }
-        );
-      }
-
-      // Rejections and violations are written without being awaited. Deleting before they
-      // land would let one arrive afterwards and recreate the stream.
-      await instance.flushed();
+    // A non-empty queue implies a running drain, because the inbox starts draining
+    // synchronously when it accepts. So an idle instance has nothing queued and nothing
+    // in flight, and there is no attempt left to fence.
+    if (instance !== undefined && !instance.idle) {
+      throw new EkmanError(
+        "KEY_BUSY",
+        `${JSON.stringify(parsed)} has a handler in flight, so it was not forgotten. ` +
+          "Deleting it now would leave that attempt committing into a key that no " +
+          "longer exists. Retry once it is idle.",
+        { key: parsed }
+      );
     }
 
+    // Out of the table before anything is awaited, so a send that arrives now starts afresh.
     const bytes = instance === undefined ? 0 : this.#release(instance);
 
-    // Every layer, not just the authority: a cache still holding the stream would serve it
-    // back on the next load, which is the opposite of forgotten.
-    await Promise.all(
-      this.#stack.layers.map((layer) => layer.forget?.(parsed))
+    const deleting = (this.#forgetting.get(parsed) ?? Promise.resolve()).then(
+      async () => {
+        // An unawaited refusal landing after the delete would recreate the stream.
+        await instance?.flushed();
+
+        // Every layer: a cache still holding the stream would serve it back.
+        await Promise.all(
+          this.#stack.layers.map((layer) => layer.forget?.(parsed))
+        );
+      }
     );
+
+    // What a new record waits on never rejects; a failed delete is this caller's to hear.
+    const settled = deleting.then(noop, noop);
+    this.#forgetting.set(parsed, settled);
+    try {
+      await deleting;
+    } finally {
+      if (this.#forgetting.get(parsed) === settled) {
+        this.#forgetting.delete(parsed);
+      }
+    }
 
     this.#emit({
       type: "instance.forgotten",
@@ -635,14 +656,15 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       at: this.#now(),
       cause: { type: "init", id: trigger.id as string },
       deps: this.#runtime,
-      onIdle: () => this.#onIdle(),
+      onIdle: () => this.#onIdle(instance),
     });
 
     this.#instances.set(key, instance);
     this.#ledger.record(key, instance.bytes);
-    // Initialization is an entry into the initial state, so the clock on time-in-state
-    // starts here rather than at the first transition.
-    this.#temporal.enter(key, definition.name, definition.initial);
+
+    if (!instance.needsHydration) {
+      this.#temporal.enter(key, definition.name, definition.initial);
+    }
     return instance;
   }
 
@@ -691,7 +713,13 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       return this.#dispatch(instance, definition, trigger, depth);
     }
 
-    return this.#hydrate(instance).then(() =>
+    const forgetting = this.#forgetting.get(instance.key);
+    const hydrated =
+      forgetting === undefined
+        ? this.#hydrate(instance)
+        : forgetting.then(() => this.#hydrate(instance));
+
+    return hydrated.then(() =>
       this.#dispatch(instance, definition, trigger, depth)
     );
   }
@@ -725,12 +753,14 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     const before = instance.events.length;
     await instance.ready();
 
+    this.#ledger.record(instance.key, instance.bytes);
+    this.#temporal.enter(instance.key, instance.entity, instance.state);
+
     const restored = instance.events
       .slice(before)
       .find((event) => event.type === "restored");
 
     if (restored !== undefined && restored.type === "restored") {
-      this.#temporal.enter(instance.key, instance.entity, instance.state);
       this.#emit({
         type: "instance.restored",
         key: instance.key,
@@ -774,7 +804,11 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * definition busy, so an instance could never evict itself however cold and however far
    * over budget the runtime was. `maxBytes: 0` would have quietly meant "keep everything".
    */
-  #onIdle(): void {
+  #onIdle(instance: AnyInstance): void {
+    if (instance.unloaded && this.#instances.get(instance.key) === instance) {
+      this.#release(instance);
+    }
+
     if (
       this.#memory.policy === "lru" &&
       this.#ledger.total > this.#memory.maxBytes
@@ -823,7 +857,11 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     const { authority } = this.#stack;
     // Gated on a store existing, not on it being durable. Snapshotting into an ephemeral
     // store is worth doing: it is exactly what the next in-process reload reads.
-    const snapshotted = this.#memory.snapshotOnEvict && authority !== undefined;
+    // Skipped for a record another writer overtook, whose view is known to be behind.
+    const snapshotted =
+      this.#memory.snapshotOnEvict &&
+      authority !== undefined &&
+      !instance.needsHydration;
 
     if (snapshotted) {
       // Not awaited: the snapshot is an optimization for the next load, and the events it
@@ -1085,7 +1123,11 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     at: number
   ): { instance: AnyInstance; elapsedMs: number } | undefined {
     const instance = this.#instances.get(key);
-    if (instance === undefined || instance.state !== state) {
+    if (
+      instance === undefined ||
+      instance.state !== state ||
+      instance.needsHydration
+    ) {
       return;
     }
     return { instance, elapsedMs: at - instance.enteredAt };
@@ -1300,6 +1342,10 @@ function partiality(
  */
 function byAgeThenKey(a: QueryMatch, b: QueryMatch): number {
   return b.ageMs - a.ageMs || a.key.localeCompare(b.key);
+}
+
+function noop(): void {
+  // Deliberately empty: settles a promise whose outcome is somebody else's to report.
 }
 
 function defaultOnUnhandled(error: unknown): void {
