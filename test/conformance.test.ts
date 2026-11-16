@@ -133,6 +133,18 @@ describe("detecting a broken expectation", () => {
     );
   });
 
+  it("counts a value named like an ignored event field as a value", async () => {
+    const result = await runScenario(
+      corrupt("core/010-initialization", (scenario) => {
+        scenario.given.entities[0].values = { at: 1 };
+      })
+    );
+
+    expect(result.failures).toContain(
+      'events["orders:1"][0].values: expected an empty object, got keys at'
+    );
+  });
+
   it("notices a forget that should have been refused", async () => {
     const result = await runScenario(
       corrupt("durable/060-forget-removes-the-stream", (scenario) => {
@@ -381,13 +393,36 @@ describe("refusing a malformed scenario", () => {
     );
   });
 
-  it("refuses a step that names its kind and sets it to something else", async () => {
+  it.each([
+    ["a flag set to false", { drain: false }],
+    ["a sweep set to false", { sweep: false }],
+    ["a restart set to false", { restart: false }],
+    ["two kinds at once", { drain: true, restart: true }],
+    ["a wait that is not a number", { wait: "soon" }],
+    ["a send with no trigger", { send: { key: "orders:1" } }],
+    ["a forget with no key", { forget: {} }],
+    ["await on something other than a send", { drain: true, await: false }],
+  ])("refuses a step with %s", async (_what, step) => {
     await expect(
       runScenario(
         corrupt("core/010-initialization", (scenario) => {
-          scenario.when.push({ drain: false });
+          scenario.when.push(step);
         })
       )
     ).rejects.toThrow("unknown step");
+  });
+
+  it.each([
+    ["telemetry", "inbox.enquued"],
+    ["telemetryAbsent", "inbox.enquued"],
+    ["telemetryAbsent", undefined],
+  ])("refuses a %s matcher whose type is %s", async (where, type) => {
+    await expect(
+      runScenario(
+        corrupt("core/060-per-key-fifo", (scenario) => {
+          scenario.then[where] = [{ type }];
+        })
+      )
+    ).rejects.toThrow(`then.${where}[0] names no known telemetry event`);
   });
 });

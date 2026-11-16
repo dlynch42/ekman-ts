@@ -23,6 +23,8 @@ import {
   isSendStep,
   isSweepStep,
   isWaitStep,
+  isWellFormedStep,
+  telemetryTypes,
 } from "./scenario";
 
 export interface ScenarioResult {
@@ -77,15 +79,7 @@ const THEN_KEYS: ReadonlySet<string> = new Set([
   "buildError",
 ]);
 
-const STEP_KINDS = [
-  isSendStep,
-  isDrainStep,
-  isWaitStep,
-  isAdvanceStep,
-  isSweepStep,
-  isRestartStep,
-  isForgetStep,
-] as const;
+const TELEMETRY_TYPES = telemetryTypes();
 
 /**
  * Refuse a scenario the runner would otherwise misread.
@@ -102,12 +96,23 @@ function assertWellFormed(scenario: Scenario): void {
   }
 
   for (const step of scenario.when ?? []) {
-    if (!STEP_KINDS.some((matches) => matches(step))) {
+    if (!isWellFormedStep(step)) {
       throw new Error(
         `scenario ${scenario.id}: unknown step ${JSON.stringify(step)}, ` +
-          "expected send, drain, wait, advance, sweep, restart or forget"
+          "expected exactly one of send, drain, wait, advance, sweep, restart or forget"
       );
     }
+  }
+
+  for (const where of ["telemetry", "telemetryAbsent"] as const) {
+    (scenario.then?.[where] ?? []).forEach((matcher, i) => {
+      if (!TELEMETRY_TYPES.has(matcher.type as string)) {
+        throw new Error(
+          `scenario ${scenario.id}: then.${where}[${i}] names no known telemetry event ` +
+            `(type ${JSON.stringify(matcher.type)})`
+        );
+      }
+    });
   }
 }
 
@@ -180,7 +185,7 @@ async function execute(scenario: Scenario, failures: string[]): Promise<void> {
     await assertEvents(scenario, active.ekman, failures);
     assertTelemetry(scenario.then?.telemetry, telemetry, failures);
     assertTelemetryAbsent(scenario.then?.telemetryAbsent, telemetry, failures);
-    await assertState(scenario, active.ekman, failures);
+    await assertState(scenario, storage, active.ekman, failures);
     assertResident(scenario.then?.resident, active.ekman, failures);
     assertMemory(scenario.then?.memory, active.ekman, failures);
     assertAudit(scenario.then?.audit, audit, failures);
@@ -523,8 +528,7 @@ function describeMatcher(want: Record<string, unknown>): string {
 interface CommittedState {
   readonly state: string;
   readonly seq: number;
-  /** Absent when the key is not in memory and its store no longer holds a commit to read them from. */
-  readonly values?: Readonly<Record<string, unknown>>;
+  readonly values: Readonly<Record<string, unknown>>;
 }
 
 /**
@@ -534,41 +538,20 @@ interface CommittedState {
  * Without the second half, `null` would only ever mean "not in memory", and a key that
  * survived a restart would be indistinguishable from one that was deleted.
  */
-async function committedState(
-  scenario: Scenario,
+function committedState(
+  storage: ScenarioStorage,
   ekman: Ekman,
   key: string
 ): Promise<CommittedState | undefined> {
   const resident = ekman.inspect(key);
-  if (resident !== undefined) {
-    return resident;
-  }
-  if (scenario.given.runtime?.store === undefined) {
-    return;
-  }
-
-  // The query is what says whether the key exists: it reads a snapshot as readily as a
-  // log, where a stream folded into a snapshot has no transition left to find.
-  const entity = key.slice(0, key.indexOf(":"));
-  const { instances } = await ekman.query({ entity });
-  const stored = instances.find((instance) => instance.key === key);
-  if (stored === undefined) {
-    return;
-  }
-
-  const { events } = await ekman.history(key);
-  const last = events.filter((event) => event.type === "transition").at(-1);
-  return {
-    state: stored.state,
-    seq: stored.seq,
-    ...(last !== undefined && last.seq === stored.seq
-      ? { values: last.values }
-      : {}),
-  };
+  return resident === undefined
+    ? storage.committed(key)
+    : Promise.resolve(resident);
 }
 
 async function assertState(
   scenario: Scenario,
+  storage: ScenarioStorage,
   ekman: Ekman,
   failures: string[]
 ): Promise<void> {
@@ -579,7 +562,7 @@ async function assertState(
 
   for (const [key, want] of Object.entries(expected)) {
     // biome-ignore lint/performance/noAwaitInLoops: one key at a time keeps failures in scenario order
-    const got = await committedState(scenario, ekman, key);
+    const got = await committedState(storage, ekman, key);
 
     if (want === null) {
       if (got !== undefined) {
@@ -815,7 +798,7 @@ function diff(
   }
 
   if (Object.keys(want).length === 0) {
-    const extra = Object.keys(got).filter((field) => !ignore.has(field));
+    const extra = Object.keys(got);
     return extra.length === 0
       ? []
       : [`${path}: expected an empty object, got keys ${extra.join(", ")}`];

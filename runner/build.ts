@@ -21,6 +21,9 @@ import {
   stay,
   transitionTo,
 } from "../src/index";
+import { resolveStack } from "../src/stack";
+import type { ReplayedState } from "../src/store";
+import { replay } from "../src/store";
 import { fileStore } from "../src/stores/file";
 import type { MemoryStore } from "../src/stores/memory";
 import { memoryStore } from "../src/stores/memory";
@@ -217,6 +220,20 @@ export class ScenarioStorage {
 
       return fileStore(this.#dir(index), options);
     });
+  }
+
+  /**
+   * What the commit authority holds for a key, without making it resident.
+   *
+   * Read the way a reload reads it, snapshot included, so a stream whose transitions were
+   * folded into a snapshot still yields its state, sequence and values.
+   */
+  async committed(key: string): Promise<ReplayedState | undefined> {
+    if (!this.configured) {
+      return;
+    }
+    const loaded = await resolveStack(this.build()).authority?.load(key);
+    return loaded === undefined ? undefined : replay(loaded);
   }
 
   cleanup(): void {
