@@ -245,3 +245,34 @@ describe("Inbox", () => {
     ).resolves.toMatchObject({ seq: 2 });
   });
 });
+
+describe("waiting for an inbox to go idle", () => {
+  it("resolves at once when nothing is running", async () => {
+    const { inbox } = make();
+    await expect(inbox.whenIdle()).resolves.toBeUndefined();
+  });
+
+  it("resolves once the queue has drained, for everyone waiting", async () => {
+    const { inbox } = make();
+    const held = gate();
+    const first = inbox.enqueue(trigger("t1"), held.run);
+    const second = inbox.enqueue(trigger("t2"), () =>
+      Promise.resolve(committed(2))
+    );
+
+    let idle = 0;
+    const waiting = [inbox.whenIdle(), inbox.whenIdle()].map((wait) =>
+      wait.then(() => {
+        idle += 1;
+      })
+    );
+    await Promise.resolve();
+    expect(idle).toBe(0);
+
+    held.release(1);
+    await Promise.all([first, second, ...waiting]);
+
+    expect(idle).toBe(2);
+    expect(inbox.idle).toBe(true);
+  });
+});

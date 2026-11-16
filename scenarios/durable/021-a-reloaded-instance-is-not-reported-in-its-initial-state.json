@@ -1,0 +1,49 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "durable/021-a-reloaded-instance-is-not-reported-in-its-initial-state",
+  "name": "an instance reloaded after a restart is reported once, in the state the store holds, and never in the entity's initial state",
+  "level": "durable",
+  "given": {
+    "runtime": { "store": [{ "kind": "file" }] },
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "pending",
+        "states": [
+          {
+            "state": "pending",
+            "else": { "result": "transitionTo", "to": "paid" }
+          },
+          { "state": "paid", "else": { "result": "stay" } }
+        ]
+      }
+    ]
+  },
+  "when": [
+    { "send": { "key": "orders:1", "trigger": { "type": "pay" } } },
+    { "restart": true },
+    {
+      "send": { "key": "orders:1", "trigger": { "type": "touch" } },
+      "await": false
+    },
+    { "drain": true }
+  ],
+  "then": {
+    "sends": [
+      { "outcome": "committed", "state": "paid", "seq": 1 },
+      { "outcome": "committed", "state": "paid", "seq": 2 }
+    ],
+    "queries": [
+      {
+        "entity": "orders",
+        "state": "pending",
+        "keys": [],
+        "complete": true,
+        "reasons": []
+      },
+      { "entity": "orders", "state": "paid", "keys": ["orders:1"] },
+      { "entity": "orders", "keys": ["orders:1"] }
+    ],
+    "resident": ["orders:1"]
+  }
+}

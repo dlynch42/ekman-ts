@@ -48,7 +48,11 @@
     "forgets": [{ "outcome": "ok" }],
     "state": {
       "deployments:gone": null,
-      "deployments:kept": null
+      "deployments:kept": {
+        "state": "deploying",
+        "seq": 1,
+        "values": { "region": "eu-west-1" }
+      }
     },
     "queries": [
       {

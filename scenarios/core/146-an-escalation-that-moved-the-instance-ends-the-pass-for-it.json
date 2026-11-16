@@ -1,0 +1,114 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/146-an-escalation-that-moved-the-instance-ends-the-pass-for-it",
+  "name": "once an escalation has moved an instance, the other constraints on the state it left do not fire against it",
+  "level": "core",
+  "given": {
+    "runtime": {
+      "clock": {
+        "start": 0,
+        "stepMs": 0
+      }
+    },
+    "entities": [
+      {
+        "name": "deployments",
+        "initial": "deploying",
+        "constraints": {
+          "temporal": [
+            {
+              "name": "first",
+              "in": "deploying",
+              "within": 1000,
+              "escalateTo": "stalled"
+            },
+            {
+              "name": "second",
+              "in": "deploying",
+              "within": 2000,
+              "escalateTo": "stalled"
+            }
+          ]
+        },
+        "states": [
+          {
+            "state": "deploying",
+            "cases": [
+              {
+                "when": {
+                  "trigger": "constraint.temporal"
+                },
+                "do": {
+                  "result": "transitionTo",
+                  "to": {
+                    "$trigger": "escalateTo"
+                  }
+                }
+              }
+            ],
+            "else": {
+              "result": "stay"
+            }
+          },
+          {
+            "state": "stalled",
+            "else": {
+              "result": "stay"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "deployments:a",
+        "trigger": {
+          "type": "start"
+        }
+      }
+    },
+    {
+      "advance": 5000
+    },
+    {
+      "sweep": true
+    }
+  ],
+  "then": {
+    "telemetry": [
+      {
+        "type": "constraint.escalated",
+        "constraint": "first",
+        "delivered": true
+      }
+    ],
+    "telemetryAbsent": [
+      {
+        "type": "constraint.violated",
+        "constraint": "second"
+      },
+      {
+        "type": "constraint.escalated",
+        "constraint": "second"
+      }
+    ],
+    "history": {
+      "deployments:a": {
+        "events": [
+          "transition@0",
+          "transition@1",
+          "violation@1",
+          "transition@2"
+        ]
+      }
+    },
+    "state": {
+      "deployments:a": {
+        "state": "stalled",
+        "seq": 2
+      }
+    }
+  }
+}

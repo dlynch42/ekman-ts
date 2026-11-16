@@ -261,7 +261,7 @@ Full surface in [docs/api.md](./docs/api.md). The parts you need first:
 | `forget(key)` | `Promise<void>` | Delete an instance from memory and every store layer. |
 | `sweep()` | `Promise<number>` | Evaluate time-in-state constraints now. |
 | `sweepStorage()` | `Promise<StorageSweep>` | Run the store's retention pass. |
-| `close()` | `Promise<void>` | Stop sweep timers. |
+| `close(options?)` | `Promise<void>` | Refuse new triggers, let in-flight work land up to `timeoutMs`, then close the stores. |
 | `entities.<name>` | `EntityHandle` | Typed handle: `send`, `post`, `inspect`, `history`, `query`, `forget`, `key`, all by id. |
 | `memoryUsage` / `storageUsage` | `{ bytes, ... }` | Resident bytes, and bytes on disk. |
 

@@ -515,6 +515,11 @@ The per-key ordered event stream, keyed by instance key. The assertion is a full
 list: an extra or missing event is a failure. Each event is matched as a subset, so a
 scenario asserts only the fields it cares about.
 
+An empty object is the one exception to subset matching, here and everywhere else a
+scenario expects an object: `{}` means exactly empty. Read as a subset it would name no
+fields and match anything, so `"values": {}` would not assert that an instance starts with
+none.
+
 ```json
 {
   "orders:1": [
@@ -574,6 +579,19 @@ trigger should not have to enumerate every enqueue around it.
 
 Each matcher is a subset match, like an event assertion.
 
+### `then.telemetryAbsent`
+
+Matchers that must match nothing that was emitted. The subsequence above can say an event
+happened and never that one did not, which is the whole claim when the behaviour under test
+is that the runtime declined to do something.
+
+```json
+[{ "type": "commit.fenced" }]
+```
+
+Each matcher is a subset match against every emitted event, in any position. One that names
+only a `type` asserts no event of that type was emitted at all.
+
 | Event | Emitted when | Notable fields |
 |---|---|---|
 | `inbox.enqueued` | A trigger is accepted into an inbox. | `depth`, `capacity`, `trigger` |
@@ -593,14 +611,16 @@ Each matcher is a subset match, like an event assertion.
 | `instance.restored` | An instance was rebuilt from the store. | `state`, `seq`, `from`, `replayed` |
 | `audit.failed` | An audit sink could not be delivered to, after its retries. | `sink`, `error`, `seq` |
 | `store.cacheFailed` | A cache layer could not be written. The commit stands. | `store`, `error`, `seq` |
+| `runtime.closed` | The runtime finished closing. A `restart` step emits one. | `drained`, `pending` |
 
 `memory.accounted.maxBytes` is `null` when the budget is unlimited.
 
 `commit.raced` is the honest name for a narrow window. A commit that has reached the commit
 authority is durable, so it is applied even if the attempt's timeout fires mid-write:
 refusing it would leave the store holding an event the runtime never applied, and replay
-would then rebuild a state the live runtime never had. The sender is still told the attempt
-timed out. A sustained rate of this means timeouts are set close to how long the store
+would then rebuild a state the live runtime never had. The sender is told the commit landed,
+since that is what happened, and this event is what records that the attempt ran past its
+timeout on the way. A sustained rate of it means timeouts are set close to how long the store
 actually takes.
 
 `handler.settled.outcome` is `committed`, `failed`, or `refused`. `refused` means the
@@ -636,6 +656,11 @@ Current committed state per key, after all steps settle.
 ```
 
 Use `null` as the value for a key to assert that no instance exists for it.
+
+A key that is not in memory is read back through the store when the runtime has one, so
+`null` asserts the instance does not exist anywhere, not merely that it is not resident.
+Residency is `then.resident`'s question. Without a store there is nowhere else to look, and
+`null` means no resident instance.
 
 ### `then.forgets`
 
@@ -711,6 +736,8 @@ Partiality reasons:
 | `no-durable-store` | The answer covers only what the runtime and any ephemeral store retain. |
 | `unsupported-criteria` | A store could not evaluate a filter, so the runtime applied it afterwards. |
 | `limit-reached` | The answer was truncated. |
+| `compacted` | A store folded part of the stream into a snapshot, so a history is missing its middle. |
+| `history-capped` | No store holds the stream and the runtime keeps a bounded number of events per key in memory, so a history is missing its oldest events. |
 
 A result is `complete` exactly when there are no reasons. A memory-only runtime is never
 complete, even when it happens to hold everything, because it cannot know that it does.

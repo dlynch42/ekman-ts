@@ -1,0 +1,38 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/075-no-residency-needs-a-policy-that-releases",
+  "name": "a memory budget of zero is refused under an eviction policy that releases nothing, since every instance would be refused or the budget ignored",
+  "level": "core",
+  "given": {
+    "runtime": {
+      "store": {
+        "kind": "memory"
+      },
+      "memory": {
+        "maxBytes": 0,
+        "eviction": {
+          "policy": "reject"
+        }
+      }
+    },
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "open",
+        "states": [
+          {
+            "state": "open",
+            "else": {
+              "result": "stay"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "then": {
+    "buildError": {
+      "code": "INVALID_CONFIG"
+    }
+  }
+}

@@ -98,3 +98,34 @@ describe("triggerRef", () => {
     ).toEqual({ type: "approve", id: "t7" });
   });
 });
+
+describe("a telemetry handler that is async", () => {
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+  it("has its rejection reported rather than left unhandled", async () => {
+    const onUnhandled = vi.fn();
+    const unhandledRejection = vi.fn();
+    process.once("unhandledRejection", unhandledRejection);
+    const failure = new Error("exporter is down");
+
+    emit(
+      { "inbox.dropped": () => Promise.reject(failure) },
+      dropped,
+      onUnhandled
+    );
+    await tick();
+    process.off("unhandledRejection", unhandledRejection);
+
+    expect(onUnhandled).toHaveBeenCalledWith(failure);
+    expect(unhandledRejection).not.toHaveBeenCalled();
+  });
+
+  it("is left alone when it resolves", async () => {
+    const onUnhandled = vi.fn();
+
+    emit({ "*": () => Promise.resolve() }, dropped, onUnhandled);
+    await tick();
+
+    expect(onUnhandled).not.toHaveBeenCalled();
+  });
+});

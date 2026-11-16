@@ -6,7 +6,10 @@ import { Ekman } from "../src/ekman";
 import { defineEntity } from "../src/entity";
 import { EkmanError } from "../src/errors";
 import type { EkmanEvent, TransitionEvent } from "../src/events";
+import { RESIDENT_HISTORY_LIMIT } from "../src/instance";
 import { fail, stay, transitionTo } from "../src/results";
+import type { Store } from "../src/store";
+import { memoryStore } from "../src/stores/memory";
 import type { TelemetryEvent } from "../src/telemetry";
 
 const NON_NEGATIVE_INTEGER = /non-negative integer/;
@@ -918,11 +921,12 @@ describe("sweeping for temporal constraints", () => {
   it("reports an escalation that could not be delivered rather than swallowing it", async () => {
     const stuck = defineEntity("stuck", {
       initial: "waiting",
-      states: { waiting: () => stay(), other: () => stay() },
-      // The entity recognizes only this one trigger type, so its own escalation is
-      // refused on arrival. Contrived, but it is the same shape as the realistic case:
-      // an instance stranded in a state whose handler was removed.
-      triggers: ["begin"],
+      states: {
+        waiting: (_instance, trigger) =>
+          trigger.type === "constraint.temporal"
+            ? fail(new Error("cannot move"))
+            : stay(),
+      },
       constraints: {
         temporal: [{ name: "waited", in: "waiting", within: 10 }],
       },
@@ -942,10 +946,149 @@ describe("sweeping for temporal constraints", () => {
     clock.advance(50);
     expect(await ekman.sweep()).toBe(1);
 
-    expect((unhandled[0] as EkmanError).code).toBe("UNKNOWN_TRIGGER");
+    expect((unhandled[0] as EkmanError).code).toBe("HANDLER_FAILED");
     expect(events.find((e) => e.type === "constraint.escalated")).toMatchObject(
       { delivered: false, constraint: "waited" }
     );
+    expect(await ekman.sweep()).toBe(0);
+    await ekman.close();
+  });
+
+  it("tries a refused escalation again on the next sweep, recording one violation", async () => {
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const busy = defineEntity("busy", {
+      initial: "waiting",
+      states: {
+        waiting: async (_instance, trigger) => {
+          if (trigger.type === "hold") {
+            await held;
+          }
+          return trigger.type === "constraint.temporal"
+            ? transitionTo("late")
+            : stay();
+        },
+        late: () => stay(),
+      },
+      constraints: {
+        temporal: [{ name: "waited", in: "waiting", within: 10 }],
+      },
+    });
+
+    const clock = frozenClock();
+    const unhandled: unknown[] = [];
+    const escalated: boolean[] = [];
+    const ekman = new Ekman({
+      entities: [busy],
+      now: clock.now,
+      inbox: { capacity: 0 },
+      onUnhandled: (error) => unhandled.push(error),
+      telemetry: {
+        "constraint.escalated": (event) => escalated.push(event.delivered),
+      },
+    });
+
+    await ekman.entities.busy.send("a", { type: "start" });
+    const holding = ekman.entities.busy.send("a", { type: "hold" });
+    clock.advance(50);
+
+    expect(await ekman.sweep()).toBe(1);
+    expect((unhandled[0] as EkmanError).code).toBe("INBOX_OVERFLOW");
+
+    release();
+    await holding;
+    expect(await ekman.sweep()).toBe(1);
+    expect(await ekman.sweep()).toBe(0);
+
+    expect(ekman.entities.busy.inspect("a")).toMatchObject({ state: "late" });
+    expect(escalated).toEqual([false, true]);
+
+    const { events } = await ekman.entities.busy.history("a");
+    const violations = events.filter((event) => event.type === "violation");
+    expect(violations).toHaveLength(1);
+    expect(events.at(-1)).toMatchObject({
+      type: "transition",
+      to: "late",
+      cause: violations[0]?.cause,
+    });
+    await ekman.close();
+  });
+
+  it("does not count a bound as fired for an entry the escalation was not raised for", async () => {
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const roaming = defineEntity("roaming", {
+      initial: "waiting",
+      states: {
+        waiting: async (_instance, trigger) => {
+          if (trigger.type === "hold") {
+            await held;
+          }
+          return trigger.type === "leave" ? transitionTo("away") : stay();
+        },
+        away: () => transitionTo("waiting"),
+      },
+      constraints: {
+        temporal: [{ name: "waited", in: "waiting", within: 10 }],
+      },
+    });
+
+    const clock = frozenClock();
+    const ekman = new Ekman({ entities: [roaming], now: clock.now });
+    await ekman.entities.roaming.send("a", { type: "start" });
+    const queued = [
+      ekman.entities.roaming.send("a", { type: "hold" }),
+      ekman.entities.roaming.send("a", { type: "leave" }),
+      ekman.entities.roaming.send("a", { type: "return" }),
+    ];
+    clock.advance(50);
+
+    const sweeping = ekman.sweep();
+    release();
+    await Promise.all(queued);
+    expect(await sweeping).toBe(1);
+
+    clock.advance(50);
+    expect(await ekman.sweep()).toBe(1);
+    await ekman.close();
+  });
+
+  it("stops evaluating an instance once an escalation has moved it", async () => {
+    const twice = defineEntity("twice", {
+      initial: "waiting",
+      states: {
+        waiting: (_instance, trigger) =>
+          trigger.type === "constraint.temporal"
+            ? transitionTo("late")
+            : stay(),
+        late: () => stay(),
+      },
+      constraints: {
+        temporal: [
+          { name: "first", in: "waiting", within: 10 },
+          { name: "second", in: "waiting", within: 20 },
+        ],
+      },
+    });
+
+    const clock = frozenClock();
+    const ekman = new Ekman({ entities: [twice], now: clock.now });
+    await ekman.entities.twice.send("a", { type: "start" });
+    clock.advance(50);
+
+    expect(await ekman.sweep()).toBe(1);
+
+    const { events } = await ekman.entities.twice.history("a");
+    expect(events.map((event) => `${event.type}@${event.seq}`)).toEqual([
+      "transition@0",
+      "transition@1",
+      "violation@1",
+      "transition@2",
+    ]);
     await ekman.close();
   });
 
@@ -1140,6 +1283,102 @@ describe("forgetting an instance", () => {
     // And once it is idle the same call goes through.
     await ekman.entities.slow.forget("s1");
     expect(ekman.entities.slow.inspect("s1")).toBeUndefined();
+    await ekman.close();
+  });
+
+  it("makes a send that arrives mid-forget start a fresh instance", async () => {
+    const inner = memoryStore();
+    const store: Store = {
+      name: inner.name,
+      capabilities: inner.capabilities,
+      append: async (key, event, expectedSeq) => {
+        if (event.type === "rejected") {
+          await new Promise((done) => setTimeout(done, 30));
+        }
+        return inner.append(key, event, expectedSeq);
+      },
+      load: inner.load.bind(inner),
+      read: inner.read.bind(inner),
+      snapshot: inner.snapshot.bind(inner),
+      scan: inner.scan.bind(inner),
+      forget: inner.forget.bind(inner),
+    };
+    const gated = defineEntity("gated", {
+      initial: "open",
+      triggers: ["poke"],
+      states: { open: () => stay() },
+    });
+    const ekman = new Ekman({ entities: [gated], store });
+
+    await ekman.entities.gated.send("g1", { type: "poke" });
+    await ekman.entities.gated.send("g1", { type: "bogus" }).catch(() => 0);
+
+    const forgetting = ekman.entities.gated.forget("g1");
+    const sent = ekman.entities.gated.send("g1", { type: "poke" });
+    await forgetting;
+
+    expect(await sent).toMatchObject({ seq: 1 });
+    const { events } = await ekman.entities.gated.history("g1");
+    expect(events.map((event) => `${event.type}@${event.seq}`)).toEqual([
+      "transition@0",
+      "transition@1",
+    ]);
+    await ekman.close();
+  });
+
+  it("holds a send back until every layer has finished deleting, even when one fails", async () => {
+    const cache = memoryStore({ name: "cache" });
+    const truth = memoryStore({ name: "truth", authority: true });
+    const failing: Store = {
+      name: cache.name,
+      capabilities: cache.capabilities,
+      append: cache.append.bind(cache),
+      load: cache.load.bind(cache),
+      read: cache.read.bind(cache),
+      snapshot: cache.snapshot.bind(cache),
+      scan: cache.scan.bind(cache),
+      forget: () => Promise.reject(new Error("cache cannot delete right now")),
+    };
+    const slow: Store = {
+      name: truth.name,
+      capabilities: truth.capabilities,
+      authority: true,
+      append: truth.append.bind(truth),
+      load: truth.load.bind(truth),
+      read: truth.read.bind(truth),
+      snapshot: truth.snapshot.bind(truth),
+      scan: truth.scan.bind(truth),
+      forget: async (key) => {
+        await new Promise((done) => setTimeout(done, 30));
+        await truth.forget(key);
+      },
+    };
+    const ekman = new Ekman({ entities: [tickets], store: [failing, slow] });
+    await ekman.entities.tickets.send("t1", { type: "poke" });
+    await ekman.entities.tickets.send("t1", { type: "poke" });
+
+    const forgetting = ekman.entities.tickets.forget("t1");
+    const sent = ekman.entities.tickets.send("t1", { type: "poke" });
+
+    await expect(forgetting).rejects.toThrow("cache cannot delete right now");
+    expect(await sent).toMatchObject({ seq: 1 });
+    expect(await truth.read("tickets:t1")).toHaveLength(2);
+    await ekman.close();
+  });
+
+  it("lets two forgets of one key overlap", async () => {
+    const ekman = new Ekman({ entities: [tickets], store: "memory" });
+    await ekman.entities.tickets.send("t1", { type: "poke" });
+
+    await Promise.all([
+      ekman.entities.tickets.forget("t1"),
+      ekman.entities.tickets.forget("t1"),
+    ]);
+
+    const revived = await ekman.entities.tickets.send("t1", { type: "poke" });
+    expect(revived.seq).toBe(1);
+    const { events } = await ekman.entities.tickets.history("t1");
+    expect(events).toHaveLength(2);
     await ekman.close();
   });
 
@@ -1619,5 +1858,525 @@ describe("history after compaction", () => {
 
     await ekman.close();
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("refusing configuration at construction", () => {
+  it("refuses a runtime-wide execution policy no attempt could satisfy", () => {
+    expect(() => new Ekman({ execution: { maxAttempts: 0 } })).toThrow(
+      expect.objectContaining({ code: "INVALID_CONFIG" })
+    );
+  });
+
+  it("refuses an entity whose state policy no attempt could satisfy", () => {
+    const impatient = defineEntity("impatient", {
+      initial: "a",
+      states: { a: { handler: () => stay(), timeoutMs: -1 } },
+    });
+
+    expect(() => new Ekman({ entities: [impatient] })).toThrow(
+      expect.objectContaining({ code: "INVALID_CONFIG" })
+    );
+    expect(() => new Ekman().define(impatient)).toThrow(
+      expect.objectContaining({ code: "INVALID_CONFIG" })
+    );
+  });
+
+  it.each([
+    ["temporal", { temporal: { sweepMs: 2 ** 31 } }],
+    ["storage", { storage: { sweepMs: 2 ** 31 }, store: "memory" }],
+  ] as const)(
+    "refuses a %s sweep interval a timer cannot hold",
+    (_which, config) => {
+      expect(() => new Ekman(config)).toThrow(
+        expect.objectContaining({ code: "INVALID_CONFIG" })
+      );
+    }
+  );
+
+  it.each([
+    ["the runtime", { entites: [] }, '"entites"'],
+    ["inbox", { inbox: { capcity: 1 } }, '"capcity"'],
+    ["memory", { memory: { maxbytes: 10 } }, '"maxbytes"'],
+    ["eviction", { memory: { eviction: { polcy: "lru" } } }, '"polcy"'],
+    ["execution", { execution: { maxAttempt: 2 } }, '"maxAttempt"'],
+    ["temporal", { temporal: { sweepMS: 5 } }, '"sweepMS"'],
+    ["storage", { storage: { sweepMS: 5 } }, '"sweepMS"'],
+    [
+      "telemetry",
+      { telemetry: { "handler.setled": () => undefined } },
+      '"handler.setled"',
+    ],
+  ])("refuses a misspelled option on %s", (_where, config, naming) => {
+    const constructing = () => new Ekman(config as never);
+
+    expect(constructing).toThrow(
+      expect.objectContaining({ code: "INVALID_CONFIG" })
+    );
+    expect(constructing).toThrow(naming);
+  });
+
+  it("accepts every telemetry event name and the fallback", () => {
+    const ekman = new Ekman({
+      telemetry: { "*": () => undefined, "handler.settled": () => undefined },
+    });
+
+    expect(ekman.entityNames).toEqual([]);
+  });
+});
+
+describe("values a handler cannot corrupt or commit", () => {
+  it("keeps nested initial values out of a handler's reach", async () => {
+    const carts = defineEntity("carts", {
+      initial: "open",
+      values: { nested: { n: 1 } },
+      states: {
+        open: (cart, trigger) => {
+          if (trigger.type === "tamper") {
+            (cart.values.nested as { n: number }).n = 5;
+          }
+          return stay(cart.values);
+        },
+      },
+    });
+    const ekman = new Ekman({ entities: [carts] });
+
+    expect(await code(ekman.entities.carts.send("a", { type: "tamper" }))).toBe(
+      "HANDLER_FAILED"
+    );
+    const other = await ekman.entities.carts.send("b", { type: "read" });
+    expect(other.values).toEqual({ nested: { n: 1 } });
+    await ekman.close();
+  });
+
+  it("refuses a value JSON cannot represent, leaving the instance as it was", async () => {
+    const audited: string[] = [];
+    const sums = defineEntity("sums", {
+      initial: "open",
+      states: { open: () => stay({ big: 10n }) },
+    });
+    const ekman = new Ekman({
+      entities: [sums],
+      audit: [
+        {
+          name: "trail",
+          deliver: (event) => {
+            audited.push(`${event.type}@${event.seq}`);
+          },
+        },
+      ],
+    });
+
+    expect(await code(ekman.entities.sums.send("a", { type: "add" }))).toBe(
+      "HANDLER_FAILED"
+    );
+    expect(ekman.entities.sums.inspect("a")).toMatchObject({
+      seq: 0,
+      values: {},
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(audited).toEqual(["transition@0"]);
+    await ekman.close();
+  });
+});
+
+describe("deciding whether a failure is worth another attempt", () => {
+  class Flaky extends Error {
+    override name = "Flaky";
+  }
+
+  const flakyOnce = () => {
+    let calls = 0;
+    return defineEntity("jobs", {
+      initial: "open",
+      states: {
+        open: () => {
+          calls += 1;
+          if (calls === 1) {
+            throw new Flaky("carrier unavailable");
+          }
+          return stay({ calls });
+        },
+      },
+    });
+  };
+
+  const retrying = (retryable: (error: Error) => boolean) =>
+    new Ekman({
+      entities: [flakyOnce()],
+      execution: {
+        maxAttempts: 2,
+        backoff: { kind: "fixed", delayMs: 0 },
+        retryable,
+      },
+    });
+
+  it("hands the predicate the error the handler threw", async () => {
+    const ekman = retrying((error) => error instanceof Flaky);
+
+    const result = await ekman.entities.jobs.send("a", { type: "run" });
+
+    expect(result.values).toEqual({ calls: 2 });
+    await ekman.close();
+  });
+
+  it("still reports the failure to the sender as a handler failure", async () => {
+    const ekman = retrying((error) => error.name === "Other");
+
+    const refused = await ekman.entities.jobs
+      .send("a", { type: "run" })
+      .catch((error: EkmanError) => error);
+
+    expect(refused).toMatchObject({
+      code: "HANDLER_FAILED",
+      message: "carrier unavailable",
+    });
+    expect((refused as EkmanError).cause).toBeInstanceOf(Flaky);
+    await ekman.close();
+  });
+
+  it("retries a handler failure by default, whatever the handler threw", async () => {
+    let calls = 0;
+    const nested = defineEntity("nested", {
+      initial: "open",
+      states: {
+        open: () => {
+          calls += 1;
+          if (calls === 1) {
+            throw new EkmanError("INBOX_OVERFLOW", "another key was full");
+          }
+          return stay();
+        },
+      },
+    });
+    const ekman = new Ekman({
+      entities: [nested],
+      execution: { maxAttempts: 2, backoff: { kind: "fixed", delayMs: 0 } },
+    });
+
+    await ekman.entities.nested.send("a", { type: "run" });
+
+    expect(calls).toBe(2);
+    await ekman.close();
+  });
+});
+
+describe("history held in memory", () => {
+  const counting = defineEntity("counting", {
+    initial: "open",
+    values: { n: 0 },
+    states: { open: (instance) => stay({ n: instance.values.n + 1 }) },
+  });
+
+  it("is capped per key, and says so once the cap has been reached", async () => {
+    const ekman = new Ekman({ entities: [counting] });
+    const send = () => ekman.entities.counting.send("a", { type: "tick" });
+
+    await send();
+    const early = await ekman.entities.counting.history("a");
+    expect(early.reasons).toEqual(["no-durable-store"]);
+
+    for (let n = 0; n < RESIDENT_HISTORY_LIMIT; n += 1) {
+      // biome-ignore lint/performance/noAwaitInLoops: one key is fully serialized
+      await send();
+    }
+
+    const late = await ekman.entities.counting.history("a");
+    expect(late.events).toHaveLength(RESIDENT_HISTORY_LIMIT);
+    expect(late.events.at(-1)).toMatchObject({
+      seq: RESIDENT_HISTORY_LIMIT + 1,
+    });
+    expect(late.complete).toBe(false);
+    expect(late.reasons).toEqual(["no-durable-store", "history-capped"]);
+    expect(ekman.entities.counting.inspect("a")?.values).toEqual({
+      n: RESIDENT_HISTORY_LIMIT + 1,
+    });
+    await ekman.close();
+  });
+
+  it("is not capped when a store holds the stream", async () => {
+    const ekman = new Ekman({ entities: [counting], store: "memory" });
+
+    for (let n = 0; n < RESIDENT_HISTORY_LIMIT + 10; n += 1) {
+      // biome-ignore lint/performance/noAwaitInLoops: one key is fully serialized
+      await ekman.entities.counting.send("a", { type: "tick" });
+    }
+
+    const { events, reasons } = await ekman.entities.counting.history("a");
+    expect(events).toHaveLength(RESIDENT_HISTORY_LIMIT + 11);
+    expect(reasons).not.toContain("history-capped");
+    await ekman.close();
+  });
+});
+
+describe("closing the runtime", () => {
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+  const slow = (ms: number) =>
+    defineEntity("slow", {
+      initial: "open",
+      states: {
+        open: async () => {
+          await new Promise((done) => setTimeout(done, ms));
+          return stay({ done: true });
+        },
+      },
+    });
+
+  it("refuses a trigger once it has been closed", async () => {
+    const ekman = new Ekman({ entities: [orders] });
+    await ekman.close();
+
+    expect(await code(ekman.send("orders:1", { type: "approve" }))).toBe(
+      "RUNTIME_CLOSED"
+    );
+    expect(await ekman.sweep()).toBe(0);
+    expect(await ekman.sweepStorage()).toMatchObject({ reclaimed: 0 });
+    await expect(ekman.close()).resolves.toBeUndefined();
+  });
+
+  it("reports a post made after closing rather than dropping it", async () => {
+    const unhandled: unknown[] = [];
+    const ekman = new Ekman({
+      entities: [orders],
+      onUnhandled: (error) => unhandled.push(error),
+    });
+    await ekman.close();
+
+    ekman.post("orders:1", { type: "approve" });
+    await tick();
+
+    expect(unhandled).toHaveLength(1);
+    expect(unhandled[0]).toMatchObject({ code: "RUNTIME_CLOSED" });
+  });
+
+  it("waits for a handler in flight, and its commit lands", async () => {
+    const closed: TelemetryEvent[] = [];
+    const ekman = new Ekman({
+      entities: [slow(30)],
+      store: "memory",
+      telemetry: { "runtime.closed": (event) => closed.push(event) },
+    });
+    const sent = ekman.entities.slow.send("a", { type: "go" });
+    let landed = false;
+    sent.then(() => {
+      landed = true;
+    });
+
+    await ekman.close();
+
+    expect(landed).toBe(true);
+    expect(await sent).toMatchObject({ seq: 1 });
+    expect(closed).toEqual([
+      expect.objectContaining({ drained: true, pending: 0 }),
+    ]);
+  });
+
+  it("gives up waiting at its deadline, and says what was left", async () => {
+    const closed: TelemetryEvent[] = [];
+    const stuck = defineEntity("stuck", {
+      initial: "open",
+      states: { open: () => new Promise<never>(() => undefined) },
+    });
+    const ekman = new Ekman({
+      entities: [stuck],
+      telemetry: { "runtime.closed": (event) => closed.push(event) },
+    });
+    ekman.entities.stuck.send("a", { type: "go" }).catch(() => undefined);
+
+    const started = performance.now();
+    await ekman.close({ timeoutMs: 20 });
+
+    expect(performance.now() - started).toBeLessThan(500);
+    expect(closed).toEqual([
+      expect.objectContaining({ drained: false, pending: 1 }),
+    ]);
+  });
+
+  it("shares one shutdown between callers that overlap", async () => {
+    const closed: TelemetryEvent[] = [];
+    const ekman = new Ekman({
+      entities: [slow(10)],
+      telemetry: { "runtime.closed": (event) => closed.push(event) },
+    });
+    ekman.entities.slow.send("a", { type: "go" });
+
+    await Promise.all([ekman.close(), ekman.close()]);
+
+    expect(closed).toHaveLength(1);
+  });
+
+  it.each([0, -1, Number.NaN, 2 ** 31])(
+    "refuses a deadline of %s",
+    async (timeoutMs) => {
+      const ekman = new Ekman({ entities: [orders] });
+
+      expect(await code(ekman.close({ timeoutMs }))).toBe("INVALID_CONFIG");
+      await ekman.close();
+    }
+  );
+
+  it("waits for a deletion in flight before closing the stores under it", async () => {
+    const order: string[] = [];
+    const inner = memoryStore();
+    const store: Store = {
+      name: inner.name,
+      capabilities: inner.capabilities,
+      append: inner.append.bind(inner),
+      load: inner.load.bind(inner),
+      read: inner.read.bind(inner),
+      snapshot: inner.snapshot.bind(inner),
+      scan: inner.scan.bind(inner),
+      forget: async (key) => {
+        await new Promise((done) => setTimeout(done, 30));
+        await inner.forget(key);
+        order.push("forgotten");
+      },
+      close: () => {
+        order.push("closed");
+        return Promise.resolve();
+      },
+    };
+    const ekman = new Ekman({ entities: [orders], store });
+    await ekman.entities.orders.send("1", { type: "approve", actor: "amy" });
+
+    const forgetting = ekman.forget("orders:1");
+    await ekman.close();
+    await forgetting;
+
+    expect(order).toEqual(["forgotten", "closed"]);
+  });
+
+  it("refuses to delete once it has been closed", async () => {
+    const ekman = new Ekman({ entities: [orders], store: "memory" });
+    await ekman.close();
+
+    expect(await code(ekman.forget("orders:1"))).toBe("RUNTIME_CLOSED");
+  });
+
+  it("starts no further attempt for a handler that fails while it is closing", async () => {
+    let calls = 0;
+    const failing = defineEntity("failing", {
+      initial: "open",
+      states: {
+        open: async () => {
+          calls += 1;
+          await new Promise((done) => setTimeout(done, 20));
+          return fail(new Error("not yet"));
+        },
+      },
+    });
+    const ekman = new Ekman({
+      entities: [failing],
+      execution: { maxAttempts: 3, backoff: { kind: "fixed", delayMs: 0 } },
+    });
+    const sent = code(ekman.entities.failing.send("a", { type: "go" }));
+
+    await ekman.close();
+
+    expect(await sent).toBe("RUNTIME_CLOSED");
+    expect(calls).toBe(1);
+  });
+
+  it("abandons a retry that is waiting out its backoff", async () => {
+    let calls = 0;
+    const flaky = defineEntity("flaky", {
+      initial: "open",
+      states: {
+        open: () => {
+          calls += 1;
+          return fail(new Error("not yet"));
+        },
+      },
+    });
+    const settled: TelemetryEvent[] = [];
+    const ekman = new Ekman({
+      entities: [flaky],
+      execution: {
+        maxAttempts: 3,
+        backoff: { kind: "fixed", delayMs: 10_000 },
+      },
+      telemetry: { "handler.settled": (event) => settled.push(event) },
+    });
+    const sent = code(ekman.entities.flaky.send("a", { type: "go" }));
+    await tick();
+
+    const started = performance.now();
+    await ekman.close({ timeoutMs: 5000 });
+
+    expect(await sent).toBe("RUNTIME_CLOSED");
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(calls).toBe(1);
+    expect(settled).toEqual([expect.objectContaining({ outcome: "failed" })]);
+  });
+});
+
+describe("audit sinks and the commit path", () => {
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+  it("does not run a sink inside the commit it is told about", async () => {
+    const seen: string[] = [];
+    const ekman = new Ekman({
+      entities: [orders],
+      audit: [
+        {
+          name: "trail",
+          deliver: (event) => {
+            seen.push(`${event.type}@${event.seq}`);
+          },
+        },
+      ],
+    });
+
+    await ekman.entities.orders.send("1", { type: "approve", actor: "amy" });
+    expect(seen).toEqual([]);
+
+    await tick();
+    expect(seen).toEqual(["transition@0", "transition@1"]);
+    await ekman.close();
+  });
+
+  it("is not slowed by a sink that blocks", async () => {
+    let blocked = 0;
+    const ekman = new Ekman({
+      entities: [orders],
+      audit: [
+        {
+          name: "blocking",
+          deliver: () => {
+            const until = performance.now() + 25;
+            while (performance.now() < until) {
+              blocked += 1;
+            }
+          },
+        },
+      ],
+    });
+
+    const started = performance.now();
+    await ekman.entities.orders.send("1", { type: "approve", actor: "amy" });
+
+    expect(performance.now() - started).toBeLessThan(15);
+    expect(blocked).toBe(0);
+    await tick();
+    expect(blocked).toBeGreaterThan(0);
+    await ekman.close();
+  });
+
+  const delivering = (): void => undefined;
+
+  it.each<[string, unknown]>([
+    ["no name", { name: "", deliver: delivering }],
+    ["no way to deliver", { name: "x" }],
+    ["no attempts", { name: "x", deliver: delivering, maxAttempts: 0 }],
+    [
+      "a fractional attempt count",
+      { name: "x", deliver: delivering, maxAttempts: 1.5 },
+    ],
+    ["a misspelled option", { name: "x", deliver: delivering, maxAttempt: 2 }],
+  ])("refuses a sink with %s", (_what, sink) => {
+    expect(() => new Ekman({ audit: [sink as never] })).toThrow(
+      expect.objectContaining({ code: "INVALID_CONFIG" })
+    );
   });
 });

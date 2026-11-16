@@ -23,6 +23,14 @@ so a given instance is the same instance whichever door its trigger came through
 Every option is optional. `new Ekman()` is legal and gives you a memory-only runtime with no
 entities registered yet.
 
+Configuration is checked when the runtime is constructed, and again for each entity at
+`define()`. An option the runtime does not recognize, at any level, is refused with
+`INVALID_CONFIG` and the list of options that level does take, so a misspelling cannot leave a
+setting at its default unnoticed. An execution policy no attempt could run under is refused
+then too, rather than by the first trigger. Every setting that becomes a timer (`timeoutMs`,
+backoff delays, `sweepMs`) may be at most 2,147,483,647 ms, a little under 25 days, which is
+the longest delay a timer can hold.
+
 ## `new Ekman(config)`
 
 | Option | Type | Default | See |
@@ -135,5 +143,20 @@ process.on("SIGTERM", async () => {
 });
 ```
 
-`close()` stops the sweep timers. Without it a process with `temporal: { sweepMs }` configured
-will not exit on its own.
+`close()` shuts the runtime down in order, so work it has already accepted lands:
+
+1. It stops accepting triggers. From this point `send()` rejects with `RUNTIME_CLOSED`, `post()`
+   reports the same error through `onUnhandled`, and no sweep runs.
+2. It waits for handlers that are already running to finish and commit, for refusals and
+   violations still on their way to the store, and for a `forget()` or a storage sweep that had
+   already begun. `forget()` called after this point rejects with `RUNTIME_CLOSED`. A retry that is waiting out its backoff is not
+   started: its sender receives `RUNTIME_CLOSED`.
+3. It closes the store layers.
+
+The wait in step 2 is bounded by `close({ timeoutMs })`, 30 seconds by default. A handler that
+never settles cannot hold shutdown open: at the deadline the layers are closed anyway, and the
+`runtime.closed` [telemetry](./telemetry.md) event reports `drained: false` and how many keys
+were still busy. Calling `close()` again, or from two places at once, joins the same shutdown.
+
+Call it on `SIGTERM`. The sweep timers do not keep a process alive on their own, but without
+`close()` a commit in flight when the process exits has no chance to land.

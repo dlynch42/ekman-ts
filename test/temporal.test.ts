@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { TemporalIndex } from "../src/temporal";
+import { EkmanError } from "../src/errors";
+import { refusalOutcome, TemporalIndex } from "../src/temporal";
 
 describe("TemporalIndex", () => {
   let index: TemporalIndex;
@@ -72,5 +73,20 @@ describe("TemporalIndex", () => {
   it("ignores removal of a key it never held", () => {
     expect(() => index.remove("orders:404")).not.toThrow();
     expect(index.size).toBe(0);
+  });
+});
+
+describe("classifying a refused escalation", () => {
+  it("owes another try to one a closing runtime turned away", () => {
+    expect(refusalOutcome(new EkmanError("RUNTIME_CLOSED", "closing"))).toBe(
+      "refused-transiently"
+    );
+  });
+
+  it("does not retry one the handler refused", () => {
+    expect(refusalOutcome(new EkmanError("HANDLER_FAILED", "no"))).toBe(
+      "refused"
+    );
+    expect(refusalOutcome(new Error("not ours"))).toBe("refused");
   });
 });

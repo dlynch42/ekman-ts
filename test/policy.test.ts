@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { EkmanError } from "../src/errors";
 import {
+  assertPolicyKeys,
   backoffDelay,
   DEFAULT_POLICY,
   defaultRetryable,
+  MAX_TIMER_MS,
   resolvePolicy,
 } from "../src/policy";
 
@@ -139,4 +141,59 @@ describe("defaultRetryable", () => {
       expect(defaultRetryable(new EkmanError(code, "refused"))).toBe(false);
     }
   );
+});
+
+describe("timer-backed settings", () => {
+  it("accepts the longest delay a timer can hold", () => {
+    expect(resolve({ timeoutMs: MAX_TIMER_MS }).timeoutMs).toBe(2 ** 31 - 1);
+  });
+
+  it.each([
+    ["timeoutMs", { timeoutMs: 2 ** 31 }],
+    ["timeoutMs", { timeoutMs: Number.POSITIVE_INFINITY }],
+    ["a fixed delay", { backoff: { kind: "fixed", delayMs: 2 ** 31 } }],
+    ["a base delay", { backoff: { kind: "exponential", baseMs: 2 ** 31 } }],
+    [
+      "a delay ceiling",
+      { backoff: { kind: "exponential", baseMs: 1, maxDelayMs: 2 ** 31 } },
+    ],
+    [
+      "a negative delay ceiling",
+      { backoff: { kind: "exponential", baseMs: 1, maxDelayMs: -1 } },
+    ],
+    [
+      "a factor that is not a number",
+      { backoff: { kind: "exponential", baseMs: 1, factor: Number.NaN } },
+    ],
+    [
+      "a factor that shrinks the delay to nothing",
+      { backoff: { kind: "exponential", baseMs: 1, factor: 0 } },
+    ],
+    ["a backoff of no known kind", { backoff: { kind: "linear" } }],
+  ] as const)("refuses %s out of range", (_what, policy) => {
+    expect(codeOf(() => resolve(policy as never))).toBe("INVALID_CONFIG");
+  });
+});
+
+describe("assertPolicyKeys", () => {
+  it("accepts every documented option", () => {
+    expect(() =>
+      assertPolicyKeys(
+        {
+          maxAttempts: 2,
+          timeoutMs: 5,
+          retryable: () => true,
+          backoff: { kind: "exponential", baseMs: 1, factor: 2, maxDelayMs: 9 },
+        },
+        "runtime execution policy"
+      )
+    ).not.toThrow();
+    expect(() => assertPolicyKeys(undefined, "x")).not.toThrow();
+  });
+
+  it("refuses an option it does not have", () => {
+    expect(
+      codeOf(() => assertPolicyKeys({ retries: 3 } as never, "runtime"))
+    ).toBe("INVALID_CONFIG");
+  });
 });

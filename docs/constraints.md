@@ -122,6 +122,20 @@ states: {
 
 Set `trigger` on the constraint to use a type of your own instead of the default.
 
+An entity that declares `triggers` must list the type its bounds deliver, as above. A bound
+whose escalation the entity would refuse as unknown is rejected by `defineEntity`, because
+the instance it was watching would stay stuck. A bound with `policy: "warn"` delivers nothing
+and is exempt.
+
+A bound's `name` defaults to `temporal:<in>:<within>`. Names must be distinct within an entity,
+since a bound fires once per entry into its state and that is tracked by name.
+
+When several bounds on one state are due, they are evaluated in declaration order, and
+evaluation stops as soon as an escalation has moved the instance: the rest were watching a
+state it has left. An escalation refused for a reason that passes (a full inbox, a full
+memory budget, a timeout, a store that could not take the write) is raised again by the next
+sweep, and its violation is recorded only once. One the handler refuses is not retried.
+
 Evaluate on a schedule with `temporal: { sweepMs }` on the runtime, or call `await ekman.sweep()`
 yourself. Without either, a bound is only checked when something asks.
 

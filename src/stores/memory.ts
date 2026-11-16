@@ -8,7 +8,7 @@ import type {
   StoreCapabilities,
   StoreSnapshot,
 } from "../store";
-import { EMPTY_SEQ, latestSeq, scanKeys } from "../store";
+import { EMPTY_SEQ, scanKeys } from "../store";
 
 /**
  * The reference store: everything in a map, nothing on disk.
@@ -35,6 +35,13 @@ export class MemoryStore implements Store {
   readonly authority?: boolean;
 
   readonly #events = new Map<string, EkmanEvent[]>();
+  /**
+   * Each key's latest sequence, kept as it is written.
+   *
+   * Deriving it means scanning the key's events, and doing that on every append makes the
+   * cost of a commit grow with the history behind it. Only a transition advances it.
+   */
+  readonly #seq = new Map<string, number>();
   readonly #snapshots = new Map<string, StoreSnapshot>();
 
   constructor(options: { name?: string; authority?: boolean } = {}) {
@@ -45,8 +52,7 @@ export class MemoryStore implements Store {
   }
 
   append(key: string, event: EkmanEvent, expectedSeq: number): Promise<void> {
-    const events = this.#events.get(key) ?? [];
-    const current = latestSeq(events);
+    const current = this.#seq.get(key) ?? EMPTY_SEQ;
 
     if (current !== expectedSeq) {
       // Refused before anything is touched, so a caller that sees this knows the store is
@@ -54,8 +60,15 @@ export class MemoryStore implements Store {
       return Promise.reject(conflict(this.name, key, expectedSeq, current));
     }
 
-    events.push(event);
-    this.#events.set(key, events);
+    const events = this.#events.get(key);
+    if (events === undefined) {
+      this.#events.set(key, [event]);
+    } else {
+      events.push(event);
+    }
+    if (event.type === "transition") {
+      this.#seq.set(key, event.seq);
+    }
     return Promise.resolve();
   }
 
@@ -70,13 +83,13 @@ export class MemoryStore implements Store {
     // already folded into it, so replaying them again would be work with no effect.
     const after =
       snapshot === undefined
-        ? events
+        ? events.slice()
         : events.filter((event) => event.seq > snapshot.seq);
 
     return Promise.resolve({
       snapshot,
-      events: [...after],
-      seq: latestSeq(events),
+      events: after,
+      seq: this.#seq.get(key) ?? EMPTY_SEQ,
     });
   }
 
@@ -102,6 +115,7 @@ export class MemoryStore implements Store {
     // Both halves, or a snapshot would outlive its stream and a later load would rebuild
     // state for a key that is supposed to be gone.
     this.#events.delete(key);
+    this.#seq.delete(key);
     this.#snapshots.delete(key);
     return Promise.resolve();
   }

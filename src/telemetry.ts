@@ -296,6 +296,21 @@ export interface StorageSweptEvent {
   readonly withinBudget: boolean;
 }
 
+/**
+ * The runtime finished closing.
+ *
+ * Like `storage.swept`, this happens to the runtime rather than to an instance, so it
+ * carries no key.
+ */
+export interface RuntimeClosedEvent {
+  readonly type: "runtime.closed";
+  readonly at: number;
+  /** Whether every key went idle before the deadline. */
+  readonly drained: boolean;
+  /** How many keys still had a handler running or a trigger waiting when it gave up. */
+  readonly pending: number;
+}
+
 export type TelemetryEvent =
   | InboxEnqueuedEvent
   | InboxRejectedEvent
@@ -315,9 +330,44 @@ export type TelemetryEvent =
   | MemoryRefusedEvent
   | AuditFailedEvent
   | StoreCacheFailedEvent
-  | StorageSweptEvent;
+  | StorageSweptEvent
+  | RuntimeClosedEvent;
 
 export type TelemetryEventType = TelemetryEvent["type"];
+
+/**
+ * Every telemetry event name, as a value.
+ *
+ * Written as a record keyed by the union so that it cannot fall out of step with it: an
+ * event type added to `TelemetryEvent` and left out here is a compile error, and so is a
+ * name here that no event carries.
+ */
+const EVENT_TYPES: Readonly<Record<TelemetryEventType, true>> = {
+  "inbox.enqueued": true,
+  "inbox.rejected": true,
+  "inbox.dropped": true,
+  "handler.started": true,
+  "handler.settled": true,
+  "handler.retried": true,
+  "handler.timedOut": true,
+  "commit.fenced": true,
+  "commit.raced": true,
+  "constraint.violated": true,
+  "constraint.escalated": true,
+  "instance.evicted": true,
+  "instance.forgotten": true,
+  "instance.restored": true,
+  "memory.accounted": true,
+  "memory.refused": true,
+  "audit.failed": true,
+  "store.cacheFailed": true,
+  "storage.swept": true,
+  "runtime.closed": true,
+};
+
+export const TELEMETRY_EVENT_TYPES = Object.freeze(
+  Object.keys(EVENT_TYPES)
+) as readonly TelemetryEventType[];
 
 /**
  * Where telemetry goes: a map from event name to handler, each one precisely typed, plus
@@ -343,6 +393,9 @@ export type TelemetryEventType = TelemetryEvent["type"];
  *   "*":               console.log,
  * }
  * ```
+ *
+ * A handler may be async. The return type stays `void` so that a handler returning
+ * anything at all, `(event) => seen.push(event)` included, keeps being accepted.
  */
 export type TelemetrySink = {
   readonly [K in TelemetryEventType]?: (
@@ -358,6 +411,9 @@ export type TelemetrySink = {
  * A sink that throws must not be able to break the dispatch that emitted the event, so
  * its failure is routed out the same way a `post()` failure is. Telemetry observes the
  * runtime; it never gates it.
+ *
+ * A handler may be async. Its promise is never awaited, and a rejection is routed out the
+ * same way: left alone it would be an unhandled rejection, which ends the process.
  */
 export function emit(
   sink: TelemetrySink | undefined,
@@ -374,10 +430,21 @@ export function emit(
   }
 
   try {
-    (handler as (delivered: TelemetryEvent) => void)(event);
+    const returned = (handler as (delivered: TelemetryEvent) => unknown)(event);
+    if (isThenable(returned)) {
+      returned.then(undefined, onUnhandled);
+    }
   } catch (error) {
     onUnhandled(error);
   }
+}
+
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { then?: unknown }).then === "function"
+  );
 }
 
 /**
