@@ -1,17 +1,21 @@
 import {
   appendFileSync,
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import type { EkmanEvent } from "../src/events";
+import type { EkmanError } from "../src/errors";
+import type { EkmanEvent, TransitionEvent } from "../src/events";
 import {
   defaultLogDir,
   defaultStoreDir,
@@ -49,6 +53,12 @@ const onDisk = (dir: string, key: string): number => {
     (existsSync(snapshot) ? readFileSync(snapshot).byteLength : 0)
   );
 };
+
+/**
+ * Whether taking permissions away would stop this process. It would not on Windows, and it
+ * would not as root, so tests that deny access to provoke a failure are skipped there.
+ */
+const CANNOT_DENY = process.platform === "win32" || process.getuid?.() === 0;
 
 const temporaryDirs: string[] = [];
 
@@ -655,6 +665,75 @@ describe("retention", () => {
       expect(await store.read("orders:1")).toHaveLength(4);
     });
 
+    it("replaces both files whole, and loses neither the state nor a violation", async () => {
+      const dir = freshDir();
+      const store = fileStore(dir, {
+        retention: { totalBytes: 1, policy: "compact", perLogBytes: 0 },
+      });
+      await fill(store, "orders:1", 6);
+      await store.append(
+        "orders:1",
+        {
+          type: "violation",
+          key: "orders:1",
+          seq: 5,
+          at: 99,
+          constraint: { kind: "invariant", name: "bounded" },
+          policy: "warn",
+          reason: "over the line",
+          cause: { type: "poke", id: "t99" },
+        },
+        5
+      );
+      const before = replay((await store.load("orders:1")) as LoadResult);
+
+      const swept = await store.compact();
+
+      expect(swept.logs).toBe(1);
+      expect(readdirSync(join(dir, "orders")).sort()).toEqual([
+        "orders%3A1.jsonl",
+        "orders%3A1.snapshot.json",
+      ]);
+      const loaded = (await fileStore(dir).load("orders:1")) as LoadResult;
+      expect(replay(loaded)).toEqual(before);
+      expect(loaded.snapshot?.seq).toBe(5);
+      expect((await store.read("orders:1")).map((event) => event.type)).toEqual(
+        ["violation"]
+      );
+    });
+
+    it("stops rewriting a log that holds nothing left to fold", async () => {
+      const dir = freshDir();
+      const store = fileStore(dir, { retention: { perLogBytes: 256 } });
+      const refuse = (at: number): EkmanEvent => ({
+        type: "rejected",
+        key: "orders:1",
+        seq: 0,
+        at,
+        code: "UNKNOWN_TRIGGER",
+        reason: "x".repeat(200),
+        cause: { type: "nonsense", id: `t${at}` },
+      });
+      await store.append("orders:1", move("orders:1", 0, {}), EMPTY_SEQ);
+      await store.append("orders:1", refuse(1), 0);
+      await store.append("orders:1", refuse(2), 0);
+      const path = logPathOf(dir, "orders:1");
+      expect((await store.load("orders:1"))?.snapshot?.seq).toBe(0);
+      const { ino } = statSync(path);
+
+      for (let at = 3; at < 13; at += 1) {
+        // biome-ignore lint/performance/noAwaitInLoops: appends have to land in order
+        await store.append("orders:1", refuse(at), 0);
+      }
+
+      expect(statSync(path).ino).toBe(ino);
+      expect(await store.read("orders:1")).toHaveLength(12);
+
+      await store.append("orders:1", move("orders:1", 1, {}), 0);
+      expect((await store.load("orders:1"))?.snapshot?.seq).toBe(1);
+      expect(statSync(path).ino).not.toBe(ino);
+    });
+
     it("keeps every event when compaction is switched off", async () => {
       const dir = freshDir();
       const store = fileStore(dir, { retention: { perLogBytes: 0 } });
@@ -903,6 +982,167 @@ describe("a log whose last append did not finish", () => {
     // as a healthy shorter log would hide real corruption.
     appendFileSync(logPathOf(dir, "orders:1"), "not json at all\n", "utf8");
 
-    expect(() => fileStore(dir).load("orders:1")).toThrow(SyntaxError);
+    const refusal = await fileStore(dir)
+      .load("orders:1")
+      .catch((error: unknown) => error as EkmanError);
+
+    expect(refusal).toMatchObject({
+      code: "STORE_UNAVAILABLE",
+      key: "orders:1",
+    });
+    expect((refusal as EkmanError).message).toContain(
+      'log for "orders:1" is corrupt at line 2'
+    );
+    expect((refusal as EkmanError).message).not.toContain(dir);
   });
+
+  it.skipIf(CANNOT_DENY)(
+    "trims the fragment its own failed write left, before appending again",
+    async () => {
+      const dir = freshDir();
+      const store = fileStore(dir);
+      await store.append("orders:1", event("orders:1", 0), EMPTY_SEQ);
+      const path = logPathOf(dir, "orders:1");
+
+      chmodSync(path, 0o400);
+      const failed = await store
+        .append("orders:1", event("orders:1", 1), 0)
+        .catch((error: unknown) => error as EkmanError);
+      chmodSync(path, 0o600);
+      appendFileSync(path, '{"type":"transi', "utf8");
+
+      expect(failed).toMatchObject({ code: "STORE_UNAVAILABLE" });
+      await store.append("orders:1", event("orders:1", 1), 0);
+
+      const lines = readFileSync(path, "utf8").split("\n").filter(Boolean);
+      expect(lines.map((line: string) => JSON.parse(line).seq)).toEqual([0, 1]);
+    }
+  );
+});
+
+describe("a file store whose filesystem fails", () => {
+  const init = (key: string): TransitionEvent => ({
+    type: "transition",
+    key,
+    from: null,
+    to: "a",
+    seq: 0,
+    at: 0,
+    cause: { type: "init", id: "t0" },
+    values: {},
+  });
+
+  it.skipIf(CANNOT_DENY)(
+    "refuses an append with its own code and without the path",
+    async () => {
+      const dir = freshDir();
+      const store = fileStore(dir);
+
+      chmodSync(dir, 0o500);
+      const refusal = await store
+        .append("orders:1", init("orders:1"), EMPTY_SEQ)
+        .catch((error: unknown) => error as EkmanError);
+      chmodSync(dir, 0o700);
+
+      expect(refusal).toMatchObject({
+        code: "STORE_UNAVAILABLE",
+        key: "orders:1",
+      });
+      expect((refusal as EkmanError).message).toContain('"orders:1" (EACCES)');
+      expect((refusal as EkmanError).message).not.toContain(dir);
+      expect(((refusal as EkmanError).cause as Error).message).toContain(dir);
+    }
+  );
+
+  it.skipIf(CANNOT_DENY)("rejects a scan it cannot list", async () => {
+    const dir = freshDir();
+    const store = fileStore(dir);
+    await store.append("orders:1", init("orders:1"), EMPTY_SEQ);
+
+    chmodSync(join(dir, "orders"), 0o000);
+    const refusal = await store
+      .scan({ entity: "orders", now: 0 })
+      .catch((error: unknown) => error as EkmanError);
+    chmodSync(join(dir, "orders"), 0o700);
+
+    expect(refusal).toMatchObject({ code: "STORE_UNAVAILABLE" });
+    expect((refusal as EkmanError).key).toBeUndefined();
+  });
+
+  it("wraps a failure that carries no system code", async () => {
+    const store = fileStore(freshDir());
+
+    const refusal = await store
+      .append(
+        "orders:1",
+        { ...init("orders:1"), values: { count: 1n as unknown as number } },
+        EMPTY_SEQ
+      )
+      .catch((error: unknown) => error as EkmanError);
+
+    expect(refusal).toMatchObject({ code: "STORE_UNAVAILABLE" });
+    expect((refusal as EkmanError).message).toBe(
+      'the file store could not append to the log of "orders:1".'
+    );
+    expect(await store.load("orders:1")).toBeUndefined();
+  });
+
+  it("refuses a snapshot that does not parse", async () => {
+    const dir = freshDir();
+    const store = fileStore(dir);
+    await store.append("orders:1", init("orders:1"), EMPTY_SEQ);
+    writeFileSync(snapshotPathOf(dir, "orders:1"), "{", "utf8");
+
+    await expect(fileStore(dir).load("orders:1")).rejects.toMatchObject({
+      code: "STORE_UNAVAILABLE",
+      message: 'the file store\'s snapshot for "orders:1" is corrupt.',
+    });
+  });
+
+  it("refuses a directory it cannot create, and says which", () => {
+    const dir = freshDir();
+    const blocked = join(dir, "taken");
+    writeFileSync(blocked, "", "utf8");
+
+    expect(() => fileStore(join(blocked, "logs"))).toThrow(
+      expect.objectContaining({
+        code: "INVALID_CONFIG",
+        message: expect.stringContaining(join(blocked, "logs")),
+      })
+    );
+  });
+
+  it.skipIf(CANNOT_DENY)(
+    "keeps a landed append when the compaction after it fails",
+    async () => {
+      const dir = freshDir();
+      const store = fileStore(dir, { retention: { perLogBytes: 1 } });
+      const step = (seq: number): TransitionEvent => ({
+        ...init("orders:1"),
+        from: "a",
+        seq,
+      });
+      mkdirSync(join(dir, "orders"));
+      writeFileSync(logPathOf(dir, "orders:1"), "", "utf8");
+      chmodSync(join(dir, "orders"), 0o500);
+
+      try {
+        await store.append("orders:1", init("orders:1"), EMPTY_SEQ);
+        await store.append("orders:1", step(1), 0);
+
+        expect(store.lastHousekeepingError).toMatchObject({
+          code: "STORE_UNAVAILABLE",
+          key: "orders:1",
+        });
+        expect(store.lastHousekeepingError?.message).not.toContain(dir);
+        expect((await store.load("orders:1"))?.events).toHaveLength(2);
+      } finally {
+        chmodSync(join(dir, "orders"), 0o700);
+      }
+
+      await store.append("orders:1", step(2), 1);
+      expect(store.lastHousekeepingError).toBeUndefined();
+      expect((await store.load("orders:1"))?.snapshot?.seq).toBe(2);
+    }
+  );
 });

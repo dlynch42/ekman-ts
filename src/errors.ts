@@ -30,7 +30,11 @@ export const ERROR_CODES = [
   "CONSTRAINT_VIOLATED",
   /** A conditional append found the key at a different sequence. Nothing was written. */
   "STORE_CONFLICT",
-  /** The commit authority could not be reached, so the commit did not happen. */
+  /**
+   * The store could not do what was asked, so the commit did not happen. Raised by a
+   * store for a failure of whatever it stands on: the file store raises it for a
+   * filesystem error or a log it cannot parse.
+   */
   "STORE_UNAVAILABLE",
   /**
    * A store is at its retention budget and its policy refuses new instances rather than

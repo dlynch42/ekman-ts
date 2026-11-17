@@ -78,6 +78,29 @@ Each log compacts once it passes 5MB. The events already folded into a snapshot 
 current state and replay are untouched and only `history()` shortens. When it does, `history()`
 reports itself incomplete rather than presenting a truncated stream as a whole one.
 
+The snapshot and the shortened log are each written under a temporary name and renamed into
+place, snapshot first, so a crash mid-compaction leaves the old files or the new ones.
+Refusals and violations are never folded. A log that holds nothing else is left alone until
+the next commit gives compaction something to fold.
+
+### Failures
+
+A filesystem failure (a full disk, a permission change, a corrupt log) surfaces as
+`STORE_UNAVAILABLE`. The message names the store and the key, never a path; `store.dir` says
+where the files are, and the original error is on `cause`.
+
+A commit is reported as failed only if its line did not reach the log. Accounting and
+compaction run after the write, and a failure there does not fail the commit. It is kept on
+the store instead, until the next pass succeeds:
+
+```ts
+const store = fileStore("/var/lib/app");
+store.lastHousekeepingError; // EkmanError | undefined
+```
+
+A write that fails partway can leave a fragment at the end of a log. The store trims it
+before the next append to that key, so the fragment costs the one event that never landed.
+
 ## Retention
 
 ```ts

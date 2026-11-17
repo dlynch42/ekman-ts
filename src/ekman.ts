@@ -1122,22 +1122,24 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * Whether a snapshot has absorbed events this stream can no longer show.
    *
    * Asked of the events rather than of the store, so every adapter answers it the same way
-   * with no capability for it: a whole stream starts where the instance did, and one that
-   * starts later is missing its beginning.
+   * with no capability for it: a whole stream holds the transition that initialized the
+   * instance, and one without it is missing its beginning. The earliest event's sequence
+   * cannot answer this, because refusals and violations survive compaction and one recorded
+   * at sequence zero would make a folded stream read as whole.
    *
-   * The empty stream is the case events alone cannot answer, because compaction can fold
-   * every event a key has and leave nothing behind to be later than anything. A key nobody
-   * addressed and a key wholly inside its snapshot look identical from here, and only the
-   * snapshot tells them apart.
+   * A stream with no initialization in it is the case events alone cannot settle. A key
+   * that was never initialized and a key whose beginning is inside its snapshot look
+   * identical from here, and only the snapshot tells them apart.
    */
   async #wasCompacted(
     key: string,
     stored: readonly EkmanEvent[],
     authority: Store
   ): Promise<boolean> {
-    const [earliest] = stored;
-    if (earliest !== undefined) {
-      return earliest.seq > FIRST_SEQ;
+    if (
+      stored.some((event) => event.type === "transition" && event.from === null)
+    ) {
+      return false;
     }
     return (await authority.load(key))?.snapshot !== undefined;
   }
@@ -1487,9 +1489,6 @@ const CAPPED_IN_MEMORY: readonly Partiality[] = Object.freeze([
 ]);
 const RESIDENT_ONLY: readonly string[] = Object.freeze(["resident"]);
 const COMPACTED: readonly Partiality[] = Object.freeze(["compacted"]);
-
-/** The first sequence any instance holds, so a stream starting later has lost its head. */
-const FIRST_SEQ = 0;
 
 /** Why a history is not the whole story, if it is not. */
 function partiality(

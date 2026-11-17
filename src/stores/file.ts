@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { EkmanError } from "../errors";
+import { EkmanError, isEkmanError } from "../errors";
 import type { EkmanEvent } from "../events";
 import type {
   LoadResult,
@@ -190,6 +190,34 @@ function resolveRetention(
 }
 
 /**
+ * Turn a filesystem failure into the store's own error.
+ *
+ * The message names the store and what it was doing, never the resolved path. These
+ * messages end up in a caller's logs and HTTP responses, and the path is `store.dir` for
+ * anyone who needs it. The original error rides along as `cause`.
+ *
+ * An error that is already Ekman's passes through, so a conflict or a refusal raised
+ * inside a guarded block keeps its own code.
+ */
+function toStoreError(
+  error: unknown,
+  store: string,
+  what: string,
+  key?: string
+): EkmanError {
+  if (isEkmanError(error)) {
+    return error;
+  }
+  const code = (error as { code?: unknown } | null)?.code;
+  const suffix = typeof code === "string" ? ` (${code})` : "";
+  return new EkmanError(
+    "STORE_UNAVAILABLE",
+    `the ${store} store could not ${what}${suffix}.`,
+    key === undefined ? { cause: error } : { key, cause: error }
+  );
+}
+
+/**
  * A durable store: one JSONL append log per key, plus a snapshot file beside it.
  *
  * JSONL because an append log wants appends, and because a file you can read with `tail`
@@ -208,6 +236,11 @@ function resolveRetention(
  * Logs are sharded into a directory per entity, because every scan is scoped to one entity,
  * so a flat directory would mean listing every other entity's files to answer about one.
  * Given no directory, the store takes `.ekman/logs` under the calling project's root.
+ *
+ * A filesystem failure reaches the caller as `STORE_UNAVAILABLE`, naming the store and the
+ * key. Once a line is in the log the append has succeeded: accounting and compaction run
+ * after it, and a failure there is kept on `lastHousekeepingError` instead of being
+ * reported as a write that never happened.
  */
 export class FileStore implements Store {
   readonly name: string;
@@ -258,6 +291,18 @@ export class FileStore implements Store {
   /** Logs plus snapshots. What the budget is measured against. */
   #total = 0;
 
+  /**
+   * Logs with nothing left to fold: no transition since the last compaction.
+   *
+   * Refusals and violations survive compaction by design, so a log made only of them stays
+   * over its limit however often it is rewritten. Remembering that keeps an append from
+   * re-reading the whole log to learn it again. A transition is the only thing that gives
+   * compaction something to do, so appending one takes the key back out.
+   */
+  readonly #uncompactable = new Set<string>();
+
+  #housekeepingError: EkmanError | undefined;
+
   constructor(options?: FileStoreOptions);
   constructor(dir: string, options?: FileStoreOptions);
   constructor(
@@ -280,14 +325,51 @@ export class FileStore implements Store {
 
     // Eagerly, not at first append: a root that cannot be created is a configuration that
     // cannot work, and startup is the only useful moment to find that out.
-    mkdirSync(this.dir, { recursive: true });
+    try {
+      mkdirSync(this.dir, { recursive: true });
+    } catch (error) {
+      const { code } = error as { code?: unknown };
+      // biome-ignore lint/style/useErrorCause: EkmanError takes `cause` in its options bag and forwards it to the Error constructor
+      throw new EkmanError(
+        "INVALID_CONFIG",
+        `the ${this.name} store could not create its directory ${this.dir} (${String(code)}). ` +
+          'Pass { kind: "file", dir } to choose another location.',
+        { cause: error }
+      );
+    }
+  }
+
+  /**
+   * The failure of the last accounting or compaction pass that followed an append, if the
+   * most recent one failed.
+   *
+   * Those passes run after the line is in the log, so their failure is never the append's:
+   * the event is durable and the sequence has moved. It is kept here for an operator to
+   * read, and cleared by the next pass that succeeds.
+   */
+  get lastHousekeepingError(): EkmanError | undefined {
+    return this.#housekeepingError;
   }
 
   append(key: string, event: EkmanEvent, expectedSeq: number): Promise<void> {
-    const current = this.#currentSeq(key);
+    return this.#settle(
+      `append to the log of ${JSON.stringify(key)}`,
+      key,
+      () => this.#append(key, event, expectedSeq)
+    );
+  }
 
+  /**
+   * The conditional append, as one synchronous block.
+   *
+   * The sequence moves as soon as the line is written and before any housekeeping, so
+   * nothing that fails afterwards can leave the cache behind the log and let a second
+   * append through at the same sequence.
+   */
+  #append(key: string, event: EkmanEvent, expectedSeq: number): void {
+    const current = this.#currentSeq(key);
     if (current !== expectedSeq) {
-      return Promise.reject(conflict(this.name, key, expectedSeq, current));
+      throw conflict(this.name, key, expectedSeq, current);
     }
 
     const line = `${JSON.stringify(event)}\n`;
@@ -298,26 +380,51 @@ export class FileStore implements Store {
     // work already in flight is not.
     const refusal = this.#refuseIfFull(key, width);
     if (refusal !== undefined) {
-      return Promise.reject(refusal);
+      throw refusal;
     }
 
-    mkdirSync(this.#entityDir(key), { recursive: true });
-    appendFileSync(this.#logPath(key), line, "utf8");
-    this.#account(key, width);
-
+    this.#write(key, line);
     if (event.type === "transition") {
       this.#seq.set(key, event.seq);
+      this.#uncompactable.delete(key);
     }
 
-    // After the write rather than before it, so the size that triggers compaction is the
-    // size the log actually reached.
-    this.#compactIfOversized(key);
-    return Promise.resolve();
+    try {
+      this.#account(key, width);
+      this.#compactIfOversized(key);
+      this.#housekeepingError = undefined;
+    } catch (error) {
+      this.#housekeepingError = toStoreError(
+        error,
+        this.name,
+        `account for or compact the log of ${JSON.stringify(key)} after appending to it`,
+        key
+      );
+    }
+  }
+
+  /**
+   * Put one line at the end of a key's log.
+   *
+   * A write that fails may have left part of a line behind. Dropping the cached sequence
+   * makes the next append read the log again, and reading is what trims a torn tail, so
+   * nothing is ever concatenated onto the fragment.
+   */
+  #write(key: string, line: string): void {
+    try {
+      mkdirSync(this.#entityDir(key), { recursive: true });
+      appendFileSync(this.#logPath(key), line, "utf8");
+    } catch (error) {
+      this.#seq.delete(key);
+      throw error;
+    }
   }
 
   /** What this store is holding, and what it is allowed to hold. */
   get usage(): StoreUsage {
-    const bytes = this.#seeded();
+    const bytes = this.#attempt("measure its logs", undefined, () =>
+      this.#seeded()
+    );
     return Object.freeze({
       bytes: this.#total,
       logs: bytes.size,
@@ -326,75 +433,119 @@ export class FileStore implements Store {
   }
 
   load(key: string): Promise<LoadResult | undefined> {
-    const events = this.#readLog(key);
-    const snapshot = this.#readSnapshot(key);
+    return this.#settle(`load ${JSON.stringify(key)}`, key, () => {
+      const events = this.#readLog(key);
+      const snapshot = this.#readSnapshot(key);
 
-    if (events.length === 0 && snapshot === undefined) {
-      return Promise.resolve(undefined);
-    }
+      if (events.length === 0 && snapshot === undefined) {
+        return;
+      }
 
-    const after =
-      snapshot === undefined
-        ? events
-        : events.filter((event) => event.seq > snapshot.seq);
+      const after =
+        snapshot === undefined
+          ? events
+          : events.filter((event) => event.seq > snapshot.seq);
 
-    return Promise.resolve({
-      snapshot,
-      events: after,
-      seq: this.#currentSeq(key),
+      return { snapshot, events: after, seq: this.#currentSeq(key) };
     });
   }
 
   read(key: string): Promise<readonly EkmanEvent[]> {
-    return Promise.resolve(this.#readLog(key));
+    return this.#settle(`read the log of ${JSON.stringify(key)}`, key, () =>
+      this.#readLog(key)
+    );
   }
 
   snapshot(key: string, snapshot: StoreSnapshot): Promise<void> {
-    const existing = this.#readSnapshot(key);
-    if (existing !== undefined && existing.seq >= snapshot.seq) {
-      return Promise.resolve();
-    }
+    return this.#settle(`snapshot ${JSON.stringify(key)}`, key, () => {
+      const existing = this.#readSnapshot(key);
+      if (existing !== undefined && existing.seq >= snapshot.seq) {
+        return;
+      }
 
-    // Written to a temporary name and renamed, because a half-written snapshot that
-    // replaced a whole one would be worse than having no snapshot at all. Rename is atomic
-    // within a filesystem.
-    mkdirSync(this.#entityDir(key), { recursive: true });
-    const path = this.#snapshotPath(key);
-    const temp = `${path}.tmp`;
-    writeFileSync(temp, JSON.stringify(snapshot), "utf8");
-    renameSync(temp, path);
-    this.#accountSnapshot(key);
-    return Promise.resolve();
+      mkdirSync(this.#entityDir(key), { recursive: true });
+      this.#writeWhole(this.#snapshotPath(key), JSON.stringify(snapshot));
+      this.#accountSnapshot(key);
+    });
   }
 
   scan(criteria: ScanCriteria): Promise<ScanResult> {
     // Scoped to the one entity asked about, which is the whole reason logs are sharded by
     // entity: the alternative is listing every other entity's files to answer about one.
-    return scanKeys(this.#keysOf(criteria.entity), criteria, (key) =>
-      this.load(key)
-    );
+    return this.#settle(
+      `list the logs of ${JSON.stringify(criteria.entity)}`,
+      undefined,
+      () => this.#keysOf(criteria.entity)
+    ).then((keys) => scanKeys(keys, criteria, (key) => this.load(key)));
   }
 
   forget(key: string): Promise<void> {
-    // `force` so forgetting a key this store never held is not an error. A sweep that dies
-    // halfway and is retried should behave the same the second time.
-    rmSync(this.#logPath(key), { force: true });
-    rmSync(this.#snapshotPath(key), { force: true });
+    return this.#settle(`forget ${JSON.stringify(key)}`, key, () => {
+      // `force` so forgetting a key this store never held is not an error. A sweep that
+      // dies halfway and is retried should behave the same the second time.
+      rmSync(this.#logPath(key), { force: true });
+      rmSync(this.#snapshotPath(key), { force: true });
 
-    // The cached sequence has to go too, or a key created again under the same name would
-    // be appended at the old number and refused as a conflict.
-    this.#seq.delete(key);
+      // The cached sequence has to go too, or a key created again under the same name
+      // would be appended at the old number and refused as a conflict.
+      this.#seq.delete(key);
+      this.#uncompactable.delete(key);
 
-    // Zero when nothing is counting yet, which makes this a no-op rather than a special
-    // case: an unseeded store has a total of zero to take it off. Both files come off,
-    // because both were counted.
-    this.#total -= this.#bytes?.get(key) ?? 0;
-    this.#bytes?.delete(key);
-    if (this.#bytes !== undefined) {
-      this.#total -= this.#snapshotBytes.get(key) ?? 0;
+      // Zero when nothing is counting yet, which makes this a no-op rather than a special
+      // case: an unseeded store has a total of zero to take it off. Both files come off,
+      // because both were counted.
+      this.#total -= this.#bytes?.get(key) ?? 0;
+      this.#bytes?.delete(key);
+      if (this.#bytes !== undefined) {
+        this.#total -= this.#snapshotBytes.get(key) ?? 0;
+      }
+      this.#snapshotBytes.delete(key);
+    });
+  }
+
+  /** Run one synchronous store operation, raising any failure as the store's own error. */
+  #attempt<T>(what: string, key: string | undefined, operation: () => T): T {
+    try {
+      return operation();
+    } catch (error) {
+      throw toStoreError(error, this.name, what, key);
     }
-    this.#snapshotBytes.delete(key);
-    return Promise.resolve();
+  }
+
+  /**
+   * The same, as the promise the store interface returns.
+   *
+   * A failure is a rejection and never a synchronous throw, so a caller that only attached
+   * a `catch` still sees it.
+   */
+  #settle<T>(
+    what: string,
+    key: string | undefined,
+    operation: () => T
+  ): Promise<T> {
+    try {
+      return Promise.resolve(this.#attempt(what, key, operation));
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+
+  /**
+   * Write a whole file through a temporary name and a rename.
+   *
+   * A crash leaves the old file or the new one, never a torn one: a half-written snapshot
+   * that replaced a whole one would be worse than no snapshot at all. Rename is atomic
+   * within a filesystem.
+   */
+  #writeWhole(path: string, contents: string): void {
+    const temp = `${path}.tmp`;
+    try {
+      writeFileSync(temp, contents, "utf8");
+      renameSync(temp, path);
+    } catch (error) {
+      rmSync(temp, { force: true });
+      throw error;
+    }
   }
 
   /**
@@ -415,13 +566,17 @@ export class FileStore implements Store {
    * across every layer without asking each one what it was configured for.
    */
   compact(): Promise<StoreCompaction> {
+    return this.#settle("compact its logs", undefined, () => this.#sweep());
+  }
+
+  #sweep(): StoreCompaction {
     // Seeded even when there is nothing to do, so `withinBudget` is answered from the real
     // numbers rather than from an empty table that would read as comfortably inside a
     // budget the store has never measured itself against.
     const bytes = this.#seeded();
 
     if (this.#retention.policy !== "compact") {
-      return Promise.resolve(this.#compaction(0, 0));
+      return this.#compaction(0, 0);
     }
 
     // Both key and size taken from one snapshot of the table, because compacting rewrites
@@ -443,7 +598,7 @@ export class FileStore implements Store {
       }
     }
 
-    return Promise.resolve(this.#compaction(logs, reclaimed));
+    return this.#compaction(logs, reclaimed);
   }
 
   #compaction(logs: number, reclaimed: number): StoreCompaction {
@@ -461,7 +616,7 @@ export class FileStore implements Store {
    * same way twice. Directory order is not something to build a contract on.
    */
   get keys(): readonly string[] {
-    return this.#keysOf();
+    return this.#attempt("list its logs", undefined, () => this.#keysOf());
   }
 
   /**
@@ -535,7 +690,7 @@ export class FileStore implements Store {
    */
   #compactIfOversized(key: string): void {
     const limit = this.#retention.perLogBytes;
-    if (limit === 0) {
+    if (limit === 0 || this.#uncompactable.has(key)) {
       return;
     }
 
@@ -568,13 +723,20 @@ export class FileStore implements Store {
       events,
       seq: latestSeq(events),
     });
-    if (current === undefined) {
-      // Nothing but refusals and violations so far. There is no state to snapshot, so
-      // there is nothing that could be dropped without losing the only record of it.
+    if (
+      current === undefined ||
+      !events.some((event) => event.type === "transition")
+    ) {
+      // Nothing but refusals and violations in the log. Either there is no state to
+      // snapshot, or the snapshot already holds all of it, and what is left is the only
+      // record that those triggers were turned away.
+      this.#uncompactable.add(key);
       return 0;
     }
 
-    writeFileSync(
+    // Snapshot first: it has to be whole on disk before the log gives up the events it
+    // folds, or a crash between the two would lose them.
+    this.#writeWhole(
       this.#snapshotPath(key),
       JSON.stringify({
         key,
@@ -584,8 +746,7 @@ export class FileStore implements Store {
         seq: current.seq,
         at: Date.now(),
         enteredAt: current.enteredAt,
-      } satisfies StoreSnapshot),
-      "utf8"
+      } satisfies StoreSnapshot)
     );
     this.#accountSnapshot(key);
 
@@ -599,7 +760,7 @@ export class FileStore implements Store {
       .map((event) => `${JSON.stringify(event)}\n`)
       .join("");
 
-    writeFileSync(this.#logPath(key), rewritten, "utf8");
+    this.#writeWhole(this.#logPath(key), rewritten);
     this.#resize(key, size, Buffer.byteLength(rewritten, "utf8"));
     return before - this.#total;
   }
@@ -719,9 +880,9 @@ export class FileStore implements Store {
    * parseable, and parsing it would throw on every later load, so a torn tail would cost
    * the key everything rather than the one event that never landed.
    *
-   * A malformed line that *is* newline-terminated still throws. It was written whole, so
-   * whatever damaged it damaged the file, and reporting a corrupted log as a short healthy
-   * one is the worse of the two failures.
+   * A malformed line that *is* newline-terminated is refused as `STORE_UNAVAILABLE`. It was
+   * written whole, so whatever damaged it damaged the file, and reporting a corrupted log
+   * as a short healthy one is the worse of the two failures.
    */
   #readLog(key: string): EkmanEvent[] {
     const path = this.#logPath(key);
@@ -744,7 +905,13 @@ export class FileStore implements Store {
       .toString("utf8", 0, lastNewline + 1)
       .split("\n")
       .filter((line) => line.length > 0)
-      .map((line) => JSON.parse(line) as EkmanEvent);
+      .map((line, index) =>
+        this.#parse<EkmanEvent>(
+          line,
+          key,
+          `log for ${JSON.stringify(key)} is corrupt at line ${index + 1}`
+        )
+      );
   }
 
   #readSnapshot(key: string): StoreSnapshot | undefined {
@@ -752,7 +919,25 @@ export class FileStore implements Store {
     if (!existsSync(path)) {
       return;
     }
-    return JSON.parse(readFileSync(path, "utf8")) as StoreSnapshot;
+    return this.#parse<StoreSnapshot>(
+      readFileSync(path, "utf8"),
+      key,
+      `snapshot for ${JSON.stringify(key)} is corrupt`
+    );
+  }
+
+  /** Parse stored JSON, naming the key and never the file when it does not parse. */
+  #parse<T>(text: string, key: string, problem: string): T {
+    try {
+      return JSON.parse(text) as T;
+    } catch (error) {
+      // biome-ignore lint/style/useErrorCause: EkmanError takes `cause` in its options bag and forwards it to the Error constructor
+      throw new EkmanError(
+        "STORE_UNAVAILABLE",
+        `the ${this.name} store's ${problem}.`,
+        { key, cause: error }
+      );
+    }
   }
 
   /**

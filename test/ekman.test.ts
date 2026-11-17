@@ -1844,6 +1844,38 @@ describe("history after compaction", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it("reports itself incomplete even when a refusal survives at the first sequence", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ekman-compact-"));
+    const declared = defineEntity("tickets", {
+      initial: "open",
+      values: { note: "" },
+      triggers: ["update"],
+      states: { open: () => stay({ note: "x".repeat(200) }) },
+    });
+    const ekman = new Ekman({
+      entities: [declared],
+      store: { kind: "file", dir, retention: { perLogBytes: 1024 } },
+    });
+
+    await expect(
+      ekman.entities.tickets.send("t1", { type: "nonsense" } as never)
+    ).rejects.toMatchObject({ code: "UNKNOWN_TRIGGER" });
+    for (let i = 0; i < 40; i += 1) {
+      // biome-ignore lint/performance/noAwaitInLoops: each commit has to land before the next
+      await ekman.entities.tickets.send("t1", { type: "update" });
+    }
+
+    const { events, complete, reasons } =
+      await ekman.entities.tickets.history("t1");
+
+    expect(events[0]).toMatchObject({ type: "rejected", seq: 0 });
+    expect(complete).toBe(false);
+    expect(reasons).toEqual(["compacted"]);
+
+    await ekman.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it("stays complete when nothing has been compacted", async () => {
     const dir = mkdtempSync(join(tmpdir(), "ekman-compact-"));
     const ekman = new Ekman({
