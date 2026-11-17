@@ -607,6 +607,140 @@ describe("a cache layer that is slow, or never answers", () => {
   });
 });
 
+describe("a record another writer has overtaken", () => {
+  // Every state tries to open the gate, and only an ajar one is allowed to.
+  const gate = defineEntity("gate", {
+    initial: "shut",
+    states: {
+      shut: () => transitionTo("open"),
+      ajar: () => transitionTo("open"),
+      open: () => stay(),
+    },
+    constraints: {
+      transitions: { allow: { shut: ["ajar"], ajar: ["open"] } },
+    },
+  });
+
+  it("is read again after a refusal the store would not take, not only after a commit", async () => {
+    const truth = memoryStore({ name: "truth" });
+    const unhandled: unknown[] = [];
+    const ekman = new Ekman({
+      entities: [gate],
+      store: truth,
+      onUnhandled: (error) => unhandled.push(error),
+    });
+    const knock = () =>
+      ekman.entities.gate.send("1", { type: "knock" }).then(
+        (sent) => sent.state,
+        (error: EkmanError) => error.code
+      );
+    expect(await knock()).toBe("CONSTRAINT_VIOLATED");
+    await settle();
+    expect(unhandled).toEqual([]);
+
+    // Moved by something else. This runtime still holds it shut, and a knock there is a
+    // violation it records without ever trying a commit.
+    await truth.append(
+      "gate:1",
+      {
+        type: "transition",
+        key: "gate:1",
+        from: "shut",
+        to: "ajar",
+        seq: 1,
+        at: 0,
+        cause: { type: "open", id: "x1" },
+        values: {},
+      },
+      0
+    );
+    expect(await knock()).toBe("CONSTRAINT_VIOLATED");
+    await settle();
+    expect(unhandled).toHaveLength(1);
+    expect(unhandled[0]).toMatchObject({ code: "STORE_CONFLICT" });
+
+    expect(await knock()).toBe("open");
+    await ekman.close();
+  });
+});
+
+describe("a refusal the store could not record", () => {
+  const strict = defineEntity("strict", {
+    initial: "shut",
+    states: { shut: () => transitionTo("open"), open: () => stay() },
+    constraints: { transitions: { allow: { shut: [] } } },
+  });
+
+  it("is reported, and the record is not taken to be behind for it", async () => {
+    const inner = memoryStore({ name: "truth" });
+    const asked = vi.spyOn(inner, "load");
+    const unhandled: unknown[] = [];
+    const ekman = new Ekman({
+      entities: [strict],
+      store: wrap(inner, {
+        append: (key, event, expectedSeq) =>
+          event.type === "violation"
+            ? Promise.reject(new Error("disk is full"))
+            : inner.append(key, event, expectedSeq),
+      }),
+      onUnhandled: (error) => unhandled.push(error),
+    });
+    const push = () =>
+      ekman.entities.strict
+        .send("1", { type: "push" })
+        .catch((error: EkmanError) => error.code);
+
+    expect(await push()).toBe("CONSTRAINT_VIOLATED");
+    await settle();
+    expect(await push()).toBe("CONSTRAINT_VIOLATED");
+    await settle();
+
+    expect(unhandled).toHaveLength(2);
+    expect(unhandled[0]).toMatchObject({ message: "disk is full" });
+    // Loaded once, when it was created, and never again.
+    expect(asked).toHaveBeenCalledTimes(1);
+    await ekman.close();
+  });
+});
+
+describe("an eviction snapshot still on its way to the store", () => {
+  it("is waited for by forget, so it cannot bring the key back", async () => {
+    const inner = memoryStore({ name: "truth" });
+    const waiting: (() => void)[] = [];
+    const store = wrap(inner, {
+      snapshot: (key, snapshot) =>
+        new Promise<void>((resolve, reject) => {
+          waiting.push(() => {
+            inner.snapshot(key, snapshot).then(resolve, reject);
+          });
+        }),
+    });
+    const ekman = new Ekman({
+      entities: [orders],
+      store,
+      memory: { maxBytes: 0 },
+    });
+    // Evicted twice, so two snapshots are on their way and both have to be waited for.
+    await ekman.entities.orders.send("1", { type: "touch" });
+    await settle();
+    await ekman.entities.orders.send("1", { type: "touch" });
+    await settle();
+    expect(ekman.residentKeys).toEqual([]);
+    expect(waiting).toHaveLength(2);
+
+    const forgotten = ekman.forget("orders:1");
+    await settle();
+    expect(await inner.load("orders:1")).toBeDefined();
+    for (const release of waiting) {
+      release();
+    }
+    await forgotten;
+
+    expect(await inner.load("orders:1")).toBeUndefined();
+    await ekman.close();
+  });
+});
+
 describe("keeping a cache layer honest", () => {
   const stack = () => ({
     cache: memoryStore({ name: "cache" }),

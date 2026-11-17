@@ -611,7 +611,15 @@ export class InstanceRecord<
     // Not awaited. Nothing downstream depends on it, and a caller being refused should not
     // wait on a disk write to be told so. Ordering against the next commit is preserved by
     // the write chain rather than by the caller.
-    this.#persist(event, this.#seq).catch(this.#deps.onUnhandled);
+    this.#persist(event, this.#seq).catch((error: unknown) => {
+      // Refused as conflicting, so another writer has moved this key, and whatever was
+      // just turned away was turned away on a state that is no longer the key's. Nothing
+      // else would ever say so: a record that only refuses never tries a commit.
+      if (isEkmanError(error) && error.code === "STORE_CONFLICT") {
+        this.#overtaken();
+      }
+      this.#deps.onUnhandled(error);
+    });
   }
 
   /**

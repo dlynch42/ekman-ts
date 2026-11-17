@@ -90,6 +90,8 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   readonly #ledger = new MemoryLedger();
   /** Deletions still in progress, by key. A new record for the key waits on its entry before loading. */
   readonly #forgetting = new Map<string, Promise<void>>();
+  /** Eviction snapshots still on their way to the store, by key. Empty when none are. */
+  readonly #snapshotting = new Map<string, Promise<unknown>>();
   #sweepTimer: ReturnType<typeof setInterval> | undefined;
   #storageSweepTimer: ReturnType<typeof setInterval> | undefined;
   /**
@@ -349,6 +351,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     const deleting = (this.#forgetting.get(parsed) ?? Promise.resolve()).then(
       async () => {
         await instance?.flushed();
+        await this.#snapshotting.get(parsed);
 
         await allSettledOrThrow([
           this.#caches.forget(parsed),
@@ -1013,6 +1016,22 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   }
 
   /**
+   * Remember an eviction snapshot until the store has it.
+   *
+   * Nobody waits for it but `forget`. A store holds a key that is only a snapshot, so one
+   * that landed after the key was deleted would bring the key back.
+   */
+  #snapshotted(key: string, written: Promise<unknown>): void {
+    const pending = Promise.all([this.#snapshotting.get(key), written]);
+    this.#snapshotting.set(key, pending);
+    pending.then(() => {
+      if (this.#snapshotting.get(key) === pending) {
+        this.#snapshotting.delete(key);
+      }
+    });
+  }
+
+  /**
    * Release an idle instance to make room, snapshotting it first when a store exists.
    *
    * A record another writer has overtaken is released without a snapshot: its view is
@@ -1031,9 +1050,12 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       // Not awaited: the snapshot is an optimization for the next load, and the events it
       // summarizes are already in the store. A failed snapshot costs replay time, never
       // state.
-      authority
-        .snapshot(instance.key, instance.storeSnapshot(this.#now()))
-        .catch(this.#onUnhandled);
+      this.#snapshotted(
+        instance.key,
+        authority
+          .snapshot(instance.key, instance.storeSnapshot(this.#now()))
+          .catch(this.#onUnhandled)
+      );
     }
 
     const bytes = this.#release(instance);

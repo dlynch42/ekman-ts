@@ -42,6 +42,7 @@ const UNKNOWN_OPTION = /has an unrecognized option/;
 const PERMISSION_BITS = /permission bits between 0 and 0o777/;
 const TWO_FILES = /holds two files for "orders:Abc"/;
 const TOO_LONG_TO_RENAME = /named under an earlier scheme.*309 bytes/;
+const TOO_LONG_AS_IT_IS = /named under an earlier scheme.*241 bytes/;
 const OWNER_ONLY_FILE = 0o600;
 const OWNER_ONLY_DIR = 0o700;
 const GROUP_READABLE_FILE = 0o640;
@@ -706,6 +707,25 @@ describe("how the file store names its files", () => {
       expect(error.key).toBe(long);
       expect(error.message).toMatch(TOO_LONG_TO_RENAME);
       expect(error.message).not.toContain(dir);
+      expect(existsSync(earlier)).toBe(true);
+
+      rmSync(earlier);
+      expect(await store.load("orders:1")).toBeUndefined();
+    });
+
+    it("refuses it over an earlier file that is too long under a name both schemes share", async () => {
+      const dir = freshDir();
+      // Lowercase letters are written the same way by both schemes, and an earlier
+      // version had no limit on how many.
+      const long = `orders:${"a".repeat(232)}`;
+      const earlier = writeEarlier(dir, long);
+      const store = fileStore(dir);
+
+      const error = await store.load("orders:1").catch((err) => err);
+
+      expect(error.code).toBe("STORE_UNAVAILABLE");
+      expect(error.key).toBe(long);
+      expect(error.message).toMatch(TOO_LONG_AS_IT_IS);
       expect(existsSync(earlier)).toBe(true);
 
       rmSync(earlier);
@@ -1832,6 +1852,34 @@ describe("loading a key that has a snapshot", () => {
     expect(loaded?.snapshot?.seq).toBe(9);
     expect(loaded?.events).toEqual([]);
     expect(loaded?.seq).toBe(9);
+  });
+
+  it("lists and counts a key it holds only a snapshot of, once", async () => {
+    const dir = freshDir();
+    const first = fileStore(dir);
+    await first.snapshot("orders:only", {
+      ...snapshotAt(3),
+      key: "orders:only",
+    });
+    await first.append(KEY, event(0), EMPTY_SEQ);
+    await first.snapshot(KEY, snapshotAt(0));
+
+    // Wide enough for what is there and not for another key.
+    const held =
+      readFileSync(snapshotPathOf(dir, "orders:only")).byteLength +
+      onDisk(dir, KEY);
+    const store = fileStore(dir, {
+      retention: { totalBytes: held, policy: "reject" },
+    });
+
+    expect(store.keys).toEqual([KEY, "orders:only"].sort());
+    expect(store.usage.bytes).toBe(held);
+    // It exists, so under a full budget it still commits where a new key is refused.
+    await store.append("orders:only", { ...event(4), key: "orders:only" }, 3);
+    const refused = await store
+      .append("orders:new", { ...event(0), key: "orders:new" }, EMPTY_SEQ)
+      .catch((error: EkmanError) => error.code);
+    expect(refused).toBe("STORE_FULL");
   });
 
   it("starts over for a key that was forgotten and created again", async () => {

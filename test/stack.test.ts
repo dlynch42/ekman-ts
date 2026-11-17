@@ -48,6 +48,10 @@ const code = (run: () => unknown): string => {
   return "no-throw";
 };
 
+const UNCONDITIONAL_AUTHORITY =
+  /"truth" is the commit authority behind a cache layer, and it does not declare a conditional append/;
+const BEHIND_SEVERAL = /behind cache layers/;
+
 describe("resolving a store stack", () => {
   it("is empty when no store is configured, which is a valid mode", () => {
     const stack = resolveStack(undefined);
@@ -179,6 +183,30 @@ describe("resolving a store stack", () => {
       // Declaring it is not having it.
       const { forget: _forget, ...withoutTheMethod } = lacking({});
       expect(refusal(withoutTheMethod)).toContain("does not declare forget.");
+    });
+
+    it("is refused in front of an authority that cannot refuse a stale commit", () => {
+      const inner = memoryStore({ name: "truth", authority: true });
+      const unconditional: Store = {
+        name: inner.name,
+        authority: true,
+        capabilities: { ...inner.capabilities, conditionalAppend: false },
+        append: inner.append.bind(inner),
+        load: inner.load.bind(inner),
+        read: inner.read.bind(inner),
+        snapshot: inner.snapshot.bind(inner),
+        scan: inner.scan.bind(inner),
+        forget: inner.forget.bind(inner),
+      };
+
+      expect(() => resolveStack([lacking({}), unconditional])).toThrow(
+        UNCONDITIONAL_AUTHORITY
+      );
+      expect(() =>
+        resolveStack([lacking({}), memoryStore({ name: "mid" }), unconditional])
+      ).toThrow(BEHIND_SEVERAL);
+      // On its own it has no cache to be misled by.
+      expect(resolveStack([unconditional]).authority).toBe(unconditional);
     });
 
     it("is told everything it lacks at once", () => {

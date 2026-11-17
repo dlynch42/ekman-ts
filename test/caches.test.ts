@@ -188,7 +188,93 @@ describe("a cache layer with writes still queued", () => {
   });
 });
 
+describe("a cache layer that throws where it stands", () => {
+  /** A store written without `async`: its failures are throws, not rejections. */
+  function throwing(method: "append" | "snapshot" | "load"): {
+    layer: Store;
+    forget: ReturnType<typeof vi.fn>;
+  } {
+    const inner = memoryStore({ name: "cache" });
+    const forget = vi.fn(inner.forget.bind(inner));
+    const layer: Store = {
+      name: inner.name,
+      capabilities: inner.capabilities,
+      append: inner.append.bind(inner),
+      load: inner.load.bind(inner),
+      read: inner.read.bind(inner),
+      scan: inner.scan.bind(inner),
+      snapshot: inner.snapshot.bind(inner),
+      forget,
+      [method]: () => {
+        throw new Error(`${method} threw`);
+      },
+    };
+    return { layer, forget };
+  }
+  const watched = (layer: Store) => {
+    const failures: CacheFailure[] = [];
+    const caches = new Caches([layer], {
+      now: () => 0,
+      failed: (failure) => failures.push(failure),
+    });
+    return { caches, failures };
+  };
+
+  it("is reported and cleared when the throw is from a write", async () => {
+    const { layer, forget } = throwing("append");
+    const { caches, failures } = watched(layer);
+
+    caches.mirror(committed(0));
+    await caches.settled("orders:1");
+
+    expect(failures.map((failure) => failure.error)).toEqual(["append threw"]);
+    expect(forget).toHaveBeenCalledTimes(1);
+  });
+
+  it("is reported and cleared when the throw is from a fill", async () => {
+    const { layer, forget } = throwing("snapshot");
+    const { caches, failures } = watched(layer);
+
+    caches.refill("orders:1", STATE);
+    await caches.settled("orders:1");
+
+    expect(failures.map((failure) => failure.error)).toEqual([
+      "snapshot threw",
+    ]);
+    expect(forget).toHaveBeenCalledTimes(1);
+  });
+
+  it("is a miss when the throw is from a read, and the authority answers", async () => {
+    const { layer } = throwing("load");
+    const { caches, failures } = watched(layer);
+
+    const found = await caches.read("orders:1", () =>
+      Promise.resolve({ snapshot: undefined, events: [committed(0)], seq: 0 })
+    );
+
+    expect(found.current).toMatchObject({ state: "open", seq: 0 });
+    expect(failures.map((failure) => failure.error)).toEqual(["load threw"]);
+  });
+});
+
 describe("cache layers that are closing", () => {
+  it("refuse a deletion that was still waiting, and do not run it", async () => {
+    const { layer, forget, release } = held();
+    const caches = new Caches([layer], {
+      now: () => 0,
+      failed: () => undefined,
+    });
+    caches.mirror(committed(0));
+    await started();
+    const forgotten = caches.forget("orders:1").catch((error) => error.code);
+
+    caches.close();
+    release();
+
+    expect(await forgotten).toBe("RUNTIME_CLOSED");
+    expect(forget).not.toHaveBeenCalled();
+  });
+
   it("are not sent what was still queued for them", async () => {
     const { layer, append, release } = held();
     const caches = new Caches([layer], {

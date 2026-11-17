@@ -64,7 +64,9 @@ A cache is only read while it holds exactly what the authority accepted for a ke
 Two things follow from a cache being read first:
 
 - **A cache layer has to be able to stay honest.** One that does not declare a conditional
-  append and `forget` is refused at startup with `INVALID_CONFIG`.
+  append and `forget` is refused at startup with `INVALID_CONFIG`. So is an authority behind a
+  cache that does not declare a conditional append, since refusing a commit built on a stale
+  answer is its job.
 - **Nothing else may write the authority.** A cache cannot know what another process committed,
   so a stack with a cache layer is refused under `coordination: "multi"`. If something outside
   the runtime does move a key, the cache can answer one load with the older state. The commit

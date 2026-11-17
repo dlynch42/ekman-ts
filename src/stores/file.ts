@@ -377,6 +377,41 @@ function keyNamed(directory: string, stem: string): string | undefined {
 }
 
 /**
+ * The keys the files in an entity's directory are named for, each once.
+ *
+ * A key is listed for its log, or for its snapshot when it has no log: a key can be held
+ * as a snapshot alone, and it loads, so it has to be found. A snapshot beside a log is
+ * passed over by its name, without decoding it a second time.
+ */
+function keysAmong(directory: string, files: readonly string[]): string[] {
+  const keys: string[] = [];
+  const logged = new Set<string>();
+  const found = (stem: string): void => {
+    const key = keyNamed(directory, stem);
+    if (key !== undefined) {
+      keys.push(key);
+    }
+  };
+
+  for (const file of files) {
+    if (file.endsWith(LOG_SUFFIX)) {
+      const stem = file.slice(0, -LOG_SUFFIX.length);
+      logged.add(stem);
+      found(stem);
+    }
+  }
+  for (const file of files) {
+    if (file.endsWith(SNAPSHOT_SUFFIX)) {
+      const stem = file.slice(0, -SNAPSHOT_SUFFIX.length);
+      if (!logged.has(stem)) {
+        found(stem);
+      }
+    }
+  }
+  return keys;
+}
+
+/**
  * Turn a filesystem failure into the store's own error.
  *
  * The message names the store and what it was doing, never the resolved path. These
@@ -1080,7 +1115,7 @@ export class FileStore implements Store {
     const bytes = new Map<string, number>();
     let total = 0;
     for (const key of this.#keysOf()) {
-      const { size } = statSync(this.#logPath(key));
+      const size = this.#sizeOf(this.#logPath(key));
       bytes.set(key, size);
       total += size;
 
@@ -1295,14 +1330,7 @@ export class FileStore implements Store {
       if (!existsSync(dir)) {
         continue;
       }
-      for (const file of readdirSync(dir)) {
-        const key = file.endsWith(LOG_SUFFIX)
-          ? keyNamed(name, file.slice(0, -LOG_SUFFIX.length))
-          : undefined;
-        if (key !== undefined) {
-          keys.push(key);
-        }
-      }
+      keys.push(...keysAmong(name, readdirSync(dir)));
     }
 
     return keys.sort();
@@ -1403,10 +1431,9 @@ export class FileStore implements Store {
     const home = encodeName(entityOf(key));
     const from = join(directory, file);
     const to = join(home, `${name}${suffix}`);
-    if (from.toLowerCase() === to.toLowerCase()) {
-      return false;
-    }
-
+    // Before anything else, and for a file already at its current name too: a key of
+    // lowercase letters has one name under both schemes, and an earlier version would
+    // write one longer than this version will read.
     if (name.length > MAX_NAME_BYTES) {
       throw new EkmanError(
         "STORE_UNAVAILABLE",
@@ -1416,6 +1443,10 @@ export class FileStore implements Store {
           "without that key.",
         { key }
       );
+    }
+
+    if (from.toLowerCase() === to.toLowerCase()) {
+      return false;
     }
 
     if (existsSync(join(this.dir, to))) {

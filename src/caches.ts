@@ -1,3 +1,4 @@
+import { EkmanError } from "./errors";
 import type { EkmanEvent } from "./events";
 import type { LoadResult, ReplayedState, Store, StoreSnapshot } from "./store";
 import { EMPTY_SEQ, entityOf, previousSeq, replay } from "./store";
@@ -118,9 +119,11 @@ export class Caches {
       }
 
       // biome-ignore lint/performance/noAwaitInLoops: layers are asked in order, fastest first, and the first answer ends the walk
-      const hit = await layer.load(key).catch((error: unknown): undefined => {
-        this.#report(layer, key, EMPTY_SEQ, error);
-      });
+      const hit = await calling(() => layer.load(key)).catch(
+        (error: unknown): undefined => {
+          this.#report(layer, key, EMPTY_SEQ, error);
+        }
+      );
       const current = hit === undefined ? undefined : replay(hit);
       if (current !== undefined) {
         this.#fill(key, current, missed);
@@ -170,9 +173,9 @@ export class Caches {
           return;
         }
 
-        return layer
-          .append(key, event, expected)
-          .catch((error: unknown) => this.#clear(layer, key, event.seq, error));
+        return calling(() => layer.append(key, event, expected)).catch(
+          (error: unknown) => this.#clear(layer, key, event.seq, error)
+        );
       })
     );
   }
@@ -194,10 +197,20 @@ export class Caches {
    *
    * Queued behind the key's writes, so none of them lands afterwards and brings the
    * stream back. Every layer is tried. A layer that fails is left out for the key from
-   * then on, and the first failure is the caller's to hear.
+   * then on, and the first failure is the caller's to hear. A deletion still waiting when
+   * the layers close is refused, and never run against a closed layer.
    */
   forget(key: string): Promise<void> {
     return this.#enqueue(key, async () => {
+      if (this.#lifetime.closed) {
+        throw new EkmanError(
+          "RUNTIME_CLOSED",
+          `${JSON.stringify(key)} was not deleted from the cache layers, because the runtime ` +
+            "closed them while the deletion was waiting behind an earlier write.",
+          { key }
+        );
+      }
+
       const outcomes = await Promise.allSettled(
         this.#layers.map(async (layer) => {
           try {
@@ -247,7 +260,7 @@ export class Caches {
         if (this.#standingOf(layer, key) === "distrusted") {
           return;
         }
-        return layer.snapshot(key, snapshot).then(
+        return calling(() => layer.snapshot(key, snapshot)).then(
           () => {
             this.#standing.get(layer)?.delete(key);
           },
@@ -335,6 +348,18 @@ export class Caches {
     });
     return result;
   }
+}
+
+/**
+ * Call into a layer so that a throw and a rejection come back the same way.
+ *
+ * A store is somebody else's code. One written without `async` throws where it stands,
+ * past a `catch` chained onto the promise it never returned.
+ */
+function calling<T>(call: () => Promise<T>): Promise<T> {
+  return new Promise((resolve) => {
+    resolve(call());
+  });
 }
 
 function ignore(): void {

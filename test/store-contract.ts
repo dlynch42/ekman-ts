@@ -283,6 +283,13 @@ export function storeContract(
     expect(loaded?.events).toEqual([]);
     expect(loaded?.seq).toBe(3);
 
+    // And it is found by a scan, since a key that loads is a key the store holds.
+    expect(
+      (await store.scan({ entity: "orders", now: 5000 })).matches.map(
+        (match) => match.key
+      )
+    ).toEqual(["orders:1"]);
+
     // The snapshot is where the key is, so that is what the next append is held to.
     expect(
       await code(

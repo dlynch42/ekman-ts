@@ -264,6 +264,16 @@ export function resolveStack(
   for (const cache of caches) {
     assertCacheable(cache);
   }
+  if (caches.length > 0 && !authority.capabilities.conditionalAppend) {
+    // A cache can be behind, and what stops a commit built on its answer is the authority
+    // refusing it. One that cannot refuse would take the stale event as the next one.
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      `store layer "${authority.name}" is the commit authority behind ${caches.length === 1 ? "a cache layer" : "cache layers"}, ` +
+        "and it does not declare a conditional append. A cache that fell behind would then " +
+        "have its stale answer committed over newer state. Use it as the only layer."
+    );
+  }
 
   if (
     authority.capabilities.durability === "ephemeral" &&
