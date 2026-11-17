@@ -1550,14 +1550,26 @@ function byAgeThenKey(a: QueryMatch, b: QueryMatch): number {
   return a.key < b.key ? -1 : 1;
 }
 
+/** The longest list `oldest` keeps in order by insertion. */
+const BOUNDED_INSERTION_LIMIT = 64;
+
 /**
  * The first `limit` matches in `byAgeThenKey` order, without sorting the rest.
  *
  * A short sorted list is kept and each match is placed into it by binary search, or passed
  * over when it would land past the end. A dashboard asking for ten of a hundred thousand
  * pays for the ten.
+ *
+ * Only while the list is short. Placing a match moves everything after it, so matches
+ * that arrive newest first cost the length of the list each, and a limit just under the
+ * number of matches would make that the square of it. Past `BOUNDED_INSERTION_LIMIT` the
+ * matches are sorted and cut, which is what an untruncated answer costs anyway.
  */
 function oldest(matches: Iterable<QueryMatch>, limit: number): QueryMatch[] {
+  if (limit > BOUNDED_INSERTION_LIMIT) {
+    return [...matches].sort(byAgeThenKey).slice(0, limit);
+  }
+
   const kept: QueryMatch[] = [];
 
   for (const match of matches) {

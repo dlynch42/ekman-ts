@@ -442,6 +442,14 @@ describe("querying", () => {
     ]);
     expect(limited.instances).toEqual(everything.instances.slice(0, 3));
     expect(limited.reasons).toContain("limit-reached");
+
+    // Small limits and large ones are picked two different ways, and have to agree.
+    for (const limit of [64, 65, 999]) {
+      // biome-ignore lint/performance/noAwaitInLoops: one query at a time is the point of comparing them
+      const cut = await ekman.query({ entity: "orders", limit });
+      expect(cut.instances).toEqual(everything.instances.slice(0, limit));
+      expect(cut.reasons).toContain("limit-reached");
+    }
     await ekman.close();
   });
 
