@@ -1,0 +1,60 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "durable/013-a-cache-layer-in-front-of-the-authority-never-fails-a-write",
+  "name": "with a cache layer in front of a durable authority, commits before and after a restart all land, no cache write fails, and an instance untouched since the restart is still where it was left",
+  "level": "durable",
+  "given": {
+    "runtime": {
+      "store": [{ "kind": "memory", "name": "cache" }, { "kind": "file" }]
+    },
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "open",
+        "states": [
+          {
+            "state": "open",
+            "cases": [
+              {
+                "when": { "trigger": "close" },
+                "do": { "result": "transitionTo", "to": "closed" }
+              }
+            ],
+            "else": { "result": "stay" }
+          },
+          { "state": "closed", "else": { "result": "stay" } }
+        ]
+      }
+    ]
+  },
+  "when": [
+    { "send": { "key": "orders:1", "trigger": { "type": "touch" } } },
+    { "send": { "key": "orders:1", "trigger": { "type": "touch" } } },
+    { "send": { "key": "orders:2", "trigger": { "type": "close" } } },
+    { "restart": true },
+    { "send": { "key": "orders:1", "trigger": { "type": "touch" } } }
+  ],
+  "then": {
+    "sends": [
+      { "outcome": "committed", "state": "open", "seq": 1 },
+      { "outcome": "committed", "state": "open", "seq": 2 },
+      { "outcome": "committed", "state": "closed", "seq": 1 },
+      { "outcome": "committed", "state": "open", "seq": 3 }
+    ],
+    "telemetryAbsent": [{ "type": "store.cacheFailed" }],
+    "queries": [
+      {
+        "entity": "orders",
+        "state": "closed",
+        "keys": ["orders:2"],
+        "complete": true
+      },
+      {
+        "entity": "orders",
+        "state": "open",
+        "keys": ["orders:1"],
+        "complete": true
+      }
+    ]
+  }
+}

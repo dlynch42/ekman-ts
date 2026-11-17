@@ -1,3 +1,4 @@
+import type { Loaded } from "./caches";
 import type { RuntimeDeps } from "./config";
 import type { Violation } from "./constraints";
 import type { ErrorCode } from "./errors";
@@ -191,8 +192,7 @@ export class InstanceRecord<
       const event = this.#initEvent(args.at, args.cause);
       this.#keep(event);
       // Initialization is a commit, so it fans out like one. Skipping it here would give
-      // an audit trail that starts at the second event, and leave a cache layer without
-      // the only event that establishes the key exists.
+      // an audit trail that starts at the second event.
       args.deps.audit(event);
       return;
     }
@@ -524,7 +524,7 @@ export class InstanceRecord<
       // doing it inside a failing commit would reload on behalf of an attempt that is
       // already over. Nothing was written, so there is nothing to undo.
       if (isEkmanError(error) && error.code === "STORE_CONFLICT") {
-        this.#stale = true;
+        this.#overtaken();
       }
       throw error;
     }
@@ -611,7 +611,15 @@ export class InstanceRecord<
     // Not awaited. Nothing downstream depends on it, and a caller being refused should not
     // wait on a disk write to be told so. Ordering against the next commit is preserved by
     // the write chain rather than by the caller.
-    this.#persist(event, this.#seq).catch(this.#deps.onUnhandled);
+    this.#persist(event, this.#seq).catch((error: unknown) => {
+      // Refused as conflicting, so another writer has moved this key, and whatever was
+      // just turned away was turned away on a state that is no longer the key's. Nothing
+      // else would ever say so: a record that only refuses never tries a commit.
+      if (isEkmanError(error) && error.code === "STORE_CONFLICT") {
+        this.#overtaken();
+      }
+      this.#deps.onUnhandled(error);
+    });
   }
 
   /**
@@ -643,6 +651,9 @@ export class InstanceRecord<
       loaded === undefined
         ? undefined
         : (replay(loaded) as ReplayedState<S, V> | undefined);
+    if (current !== undefined && this.#deps.caches.any) {
+      this.#deps.caches.refill(this.key, current);
+    }
 
     this.#stale = false;
 
@@ -701,13 +712,11 @@ export class InstanceRecord<
   }
 
   async #hydrate(pending: PendingInit<S, V>, authority: Store): Promise<void> {
-    const loaded = await authority.load(this.key);
+    const found = await this.#load(pending, authority);
+    const { loaded } = found;
     // The store contract is untyped in the state and values, because a store holds many
     // entities. The definition this record was built from is what knows their real types.
-    const current =
-      loaded === undefined
-        ? undefined
-        : (replay(loaded) as ReplayedState<S, V> | undefined);
+    const current = found.current as ReplayedState<S, V> | undefined;
 
     if (loaded === undefined || current === undefined) {
       // Genuinely new. Initialization is a commit at sequence 0, and it has to be durable
@@ -717,7 +726,7 @@ export class InstanceRecord<
         await this.#persist(event, EMPTY_SEQ);
       } catch (error) {
         if (isEkmanError(error) && error.code === "STORE_CONFLICT") {
-          this.#stale = true;
+          this.#overtaken();
           this.#pending = undefined;
         }
         throw error;
@@ -747,6 +756,40 @@ export class InstanceRecord<
     this.#pending = undefined;
   }
 
+  /**
+   * Read this key for a record that has never been reconciled.
+   *
+   * A first load may be answered by a cache layer. A load that follows a conflict may
+   * not: it happens because another writer moved the key, and a cache is exactly what
+   * would not know. With no cache layers the authority is asked directly, so a runtime
+   * without them takes no extra turn on the way in.
+   */
+  async #load(pending: PendingInit<S, V>, authority: Store): Promise<Loaded> {
+    const { caches } = this.#deps;
+    if (caches.any && pending.cause !== RELOAD_CAUSE) {
+      return caches.read(this.key, () => authority.load(this.key));
+    }
+
+    const loaded = await authority.load(this.key);
+    return {
+      loaded,
+      current: loaded === undefined ? undefined : replay(loaded),
+    };
+  }
+
+  /**
+   * Note that another writer has moved this key.
+   *
+   * Whatever a cache layer holds for it is suspect from here, and may be what misled this
+   * record in the first place, so the key is cleared from them.
+   */
+  #overtaken(): void {
+    this.#stale = true;
+    if (this.#deps.caches.any) {
+      this.#deps.caches.drop(this.key, this.#seq);
+    }
+  }
+
   #initEvent(at: number, cause: EventCause): TransitionEvent<S, V> {
     // The only event whose `from` is null. Recording it is what makes the stream
     // replayable on its own.
@@ -762,10 +805,13 @@ export class InstanceRecord<
   }
 
   /**
-   * Send one event to the commit authority, in stream order.
+   * Send one event to the commit authority, in stream order, and on to the cache layers
+   * once the authority has it.
    *
    * The returned promise carries this write's real outcome; the chain itself is kept
-   * non-rejecting so one failure cannot poison every write queued behind it.
+   * non-rejecting so one failure cannot poison every write queued behind it. The caches
+   * are handed the event from the same chain, so they see events in stream order, and on
+   * a chain of their own, so nothing here waits for them.
    */
   #persist(event: EkmanEvent<S, V>, expectedSeq: number): Promise<void> {
     const { authority } = this.#deps.stack;
@@ -776,6 +822,10 @@ export class InstanceRecord<
     const written = this.#writes.then(() =>
       authority.append(this.key, event as EkmanEvent, expectedSeq)
     );
+    const { caches } = this.#deps;
+    if (caches.any) {
+      written.then(() => caches.mirror(event as EkmanEvent), ignore);
+    }
     this.#writes = written.then(ignore, ignore);
     return written;
   }

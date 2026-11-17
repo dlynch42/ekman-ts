@@ -1,5 +1,6 @@
 import type { AuditSink } from "./audit";
 import { assertAuditSink, deliverTo } from "./audit";
+import { Caches } from "./caches";
 import type { CommittedRecord, RuntimeDeps } from "./config";
 import { assertKnownKeys, resolveInboxConfig } from "./config";
 import type { CompiledTemporal } from "./constraints";
@@ -82,12 +83,15 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   /** Where every resident instance sits. Read by temporal constraints and by queries. */
   readonly #temporal = new TemporalIndex();
   readonly #stack: ResolvedStack;
+  readonly #caches: Caches;
   readonly #memory: ResolvedMemoryConfig;
   readonly #audit: readonly AuditSink[];
   /** What is resident and what it costs, in least-recently-used order. */
   readonly #ledger = new MemoryLedger();
   /** Deletions still in progress, by key. A new record for the key waits on its entry before loading. */
   readonly #forgetting = new Map<string, Promise<void>>();
+  /** Eviction snapshots still on their way to the store, by key. Empty when none are. */
+  readonly #snapshotting = new Map<string, Promise<unknown>>();
   #sweepTimer: ReturnType<typeof setInterval> | undefined;
   #storageSweepTimer: ReturnType<typeof setInterval> | undefined;
   /**
@@ -127,12 +131,27 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       assertAuditSink(sink);
     }
 
+    this.#caches = new Caches(this.#stack.caches, {
+      now: () => this.#now(),
+      failed: (failure) =>
+        this.#emit({
+          type: "store.cacheFailed",
+          key: failure.key,
+          entity: parseKey(failure.key).entity,
+          store: failure.store,
+          error: failure.error,
+          seq: failure.seq,
+          at: telemetryNow(),
+        }),
+    });
+
     this.#runtime = {
       now: () => this.#now(),
       telemetry: config.telemetry,
       onUnhandled: (error) => this.#onUnhandled(error),
       inbox: resolveInboxConfig(config.inbox),
       stack: this.#stack,
+      caches: this.#caches,
       memory: this.#memory,
       audit: (event) => this.#fanOut(event),
       committed: (record, moved) => this.#committed(record, moved),
@@ -179,6 +198,31 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   }
 
   /**
+   * The definition registered under an entity name, or an `UNKNOWN_ENTITY` refusal.
+   *
+   * Everything that takes a key or an entity name from a caller goes through this before
+   * it reaches a store, so a name nobody registered is never looked up, listed or deleted
+   * on disk.
+   *
+   * @param entity the name to resolve
+   * @param key the key that named it, when one did, for the error
+   */
+  #definitionFor(entity: string, key?: string): AnyDefinition {
+    const definition = this.#definitions.get(entity);
+    if (definition === undefined) {
+      const subject =
+        key === undefined ? "the query" : `key ${JSON.stringify(key)}`;
+      throw new EkmanError(
+        "UNKNOWN_ENTITY",
+        `${subject} names entity ${JSON.stringify(entity)}, which is not registered. ` +
+          `Registered: ${this.entityNames.join(", ") || "(none)"}`,
+        key === undefined ? {} : { key }
+      );
+    }
+    return definition;
+  }
+
+  /**
    * Deliver a trigger to the instance at `key`.
    *
    * Resolves at commit with the committed state, values and sequence. Rejects with an
@@ -197,17 +241,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       );
     }
 
-    const parsed = parseKey(key);
-    const definition = this.#definitions.get(parsed.entity);
-
-    if (definition === undefined) {
-      throw new EkmanError(
-        "UNKNOWN_ENTITY",
-        `key ${JSON.stringify(key)} names entity "${parsed.entity}", which is not registered. ` +
-          `Registered: ${this.entityNames.join(", ") || "(none)"}`,
-        { key }
-      );
-    }
+    const definition = this.#definitionFor(parseKey(key).entity, key);
 
     const normalized = this.#normalizeTrigger(trigger, key);
     const instance = this.#resolveInstance(key, definition, normalized);
@@ -273,7 +307,8 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * The delete itself waits for the record's queued writes, because a refusal written
    * without being awaited would otherwise land afterwards and recreate the stream. It then
    * clears every layer, not only the authority: a cache still holding the stream would
-   * serve it back on the next load.
+   * serve it back on the next load. A cache that cannot be cleared fails the call, and is
+   * not read or written for the key again until a later forget of it succeeds.
    */
   async forget(key: string): Promise<void> {
     if (this.#closing.signal.aborted) {
@@ -284,7 +319,8 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       );
     }
 
-    const parsed = parseKey(key).key;
+    const { key: parsed, entity } = parseKey(key);
+    this.#definitionFor(entity, key);
     const instance = this.#instances.get(parsed);
 
     // Checked before anything is deleted, so a store that cannot delete leaves the runtime
@@ -315,10 +351,12 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     const deleting = (this.#forgetting.get(parsed) ?? Promise.resolve()).then(
       async () => {
         await instance?.flushed();
+        await this.#snapshotting.get(parsed);
 
-        await allSettledOrThrow(
-          this.#stack.layers.map((layer) => layer.forget?.(parsed))
-        );
+        await allSettledOrThrow([
+          this.#caches.forget(parsed),
+          this.#stack.authority?.forget?.(parsed),
+        ]);
       }
     );
 
@@ -348,7 +386,8 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   async history<S extends string = string, V extends Values = Values>(
     key: string
   ): Promise<HistoryResult<S, V>> {
-    const parsed = parseKey(key).key;
+    const { key: parsed, entity } = parseKey(key);
+    this.#definitionFor(entity, key);
     const instance = this.#instances.get(parsed);
     const { authority } = this.#stack;
 
@@ -402,6 +441,15 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * must never do.
    */
   async query(criteria: QueryCriteria): Promise<QueryResult> {
+    this.#definitionFor(criteria.entity);
+    const { limit } = criteria;
+    if (limit !== undefined && !(Number.isInteger(limit) && limit >= 0)) {
+      throw new EkmanError(
+        "INVALID_CONFIG",
+        `a query's limit must be a non-negative integer, received ${JSON.stringify(limit)}. ` +
+          "Omit it to ask for every match."
+      );
+    }
     const at = this.#now();
     const olderThanMs =
       criteria.olderThan === undefined
@@ -436,16 +484,17 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
 
     // Applied after the union, so a limit cannot silently prefer resident instances over
     // stored ones or the other way round.
-    const ordered = [...matches.values()].sort(byAgeThenKey);
-    const limited =
-      criteria.limit === undefined ? ordered : ordered.slice(0, criteria.limit);
+    const truncated = limit !== undefined && limit < matches.size;
+    const instances = truncated
+      ? oldest(matches.values(), limit)
+      : [...matches.values()].sort(byAgeThenKey);
 
-    if (limited.length < ordered.length) {
+    if (truncated) {
       reasons.add("limit-reached");
     }
 
     return Object.freeze({
-      instances: Object.freeze(limited),
+      instances: Object.freeze(instances),
       complete: reasons.size === 0,
       reasons: Object.freeze([...reasons]),
       sources: Object.freeze(sources),
@@ -529,7 +578,8 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    *
    * Two kinds of store write are not waited for, by design: the snapshot an eviction
    * leaves behind and an append to a cache layer. Both are optimizations whose loss costs
-   * replay time or a cache miss, never committed state.
+   * replay time or a cache miss, never committed state. A cache write still queued when
+   * the layers are closed is dropped, and never run against a layer that has been closed.
    *
    * The wait is bounded. A handler that never settles would otherwise hold shutdown open
    * forever, so after `timeoutMs` the layers are closed regardless and `runtime.closed`
@@ -581,6 +631,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       at: telemetryNow(),
     });
 
+    this.#caches.close();
     await Promise.all(this.#stack.layers.map((layer) => layer.close?.()));
   }
 
@@ -965,6 +1016,22 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   }
 
   /**
+   * Remember an eviction snapshot until the store has it.
+   *
+   * Nobody waits for it but `forget`. A store holds a key that is only a snapshot, so one
+   * that landed after the key was deleted would bring the key back.
+   */
+  #snapshotted(key: string, written: Promise<unknown>): void {
+    const pending = Promise.all([this.#snapshotting.get(key), written]);
+    this.#snapshotting.set(key, pending);
+    pending.then(() => {
+      if (this.#snapshotting.get(key) === pending) {
+        this.#snapshotting.delete(key);
+      }
+    });
+  }
+
+  /**
    * Release an idle instance to make room, snapshotting it first when a store exists.
    *
    * A record another writer has overtaken is released without a snapshot: its view is
@@ -983,9 +1050,12 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       // Not awaited: the snapshot is an optimization for the next load, and the events it
       // summarizes are already in the store. A failed snapshot costs replay time, never
       // state.
-      authority
-        .snapshot(instance.key, instance.storeSnapshot(this.#now()))
-        .catch(this.#onUnhandled);
+      this.#snapshotted(
+        instance.key,
+        authority
+          .snapshot(instance.key, instance.storeSnapshot(this.#now()))
+          .catch(this.#onUnhandled)
+      );
     }
 
     const bytes = this.#release(instance);
@@ -1017,8 +1087,6 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     for (const sink of this.#audit) {
       setImmediate(() => this.#deliver(sink, event));
     }
-
-    this.#writeCaches(event);
   }
 
   #deliver(sink: AuditSink, event: EkmanEvent): void {
@@ -1037,29 +1105,6 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
         }
       })
       .catch(this.#onUnhandled);
-  }
-
-  /**
-   * Mirror an event into the cache layers.
-   *
-   * After the authority, never awaited, and a failure is reported rather than raised. The
-   * commit is already durable by this point, so a stale cache is a performance problem.
-   * Treating it as a commit failure would turn it into a correctness one.
-   */
-  #writeCaches(event: EkmanEvent): void {
-    for (const cache of this.#stack.caches) {
-      cache.append(event.key, event, previousSeq(event)).catch((error) => {
-        this.#emit({
-          type: "store.cacheFailed",
-          key: event.key,
-          entity: parseKey(event.key).entity,
-          store: cache.name,
-          error: (error as Error).message,
-          seq: event.seq,
-          at: telemetryNow(),
-        });
-      });
-    }
   }
 
   #startSweeping(sweepMs: number | undefined): void {
@@ -1122,22 +1167,24 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * Whether a snapshot has absorbed events this stream can no longer show.
    *
    * Asked of the events rather than of the store, so every adapter answers it the same way
-   * with no capability for it: a whole stream starts where the instance did, and one that
-   * starts later is missing its beginning.
+   * with no capability for it: a whole stream holds the transition that initialized the
+   * instance, and one without it is missing its beginning. The earliest event's sequence
+   * cannot answer this, because refusals and violations survive compaction and one recorded
+   * at sequence zero would make a folded stream read as whole.
    *
-   * The empty stream is the case events alone cannot answer, because compaction can fold
-   * every event a key has and leave nothing behind to be later than anything. A key nobody
-   * addressed and a key wholly inside its snapshot look identical from here, and only the
-   * snapshot tells them apart.
+   * A stream with no initialization in it is the case events alone cannot settle. A key
+   * that was never initialized and a key whose beginning is inside its snapshot look
+   * identical from here, and only the snapshot tells them apart.
    */
   async #wasCompacted(
     key: string,
     stored: readonly EkmanEvent[],
     authority: Store
   ): Promise<boolean> {
-    const [earliest] = stored;
-    if (earliest !== undefined) {
-      return earliest.seq > FIRST_SEQ;
+    if (
+      stored.some((event) => event.type === "transition" && event.from === null)
+    ) {
+      return false;
     }
     return (await authority.load(key))?.snapshot !== undefined;
   }
@@ -1306,6 +1353,13 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    *
    * Resident wins because it is the more current of the two: the store lags by whatever is
    * queued behind the last commit, and an instance in memory is by definition up to date.
+   * The store is told which keys those are, so it does not load what would be discarded.
+   * Only keys that matched are named. A resident instance that did not match is still
+   * asked about, because its stored row is the answer when another writer has moved it.
+   *
+   * The caller's limit is not passed down. A store truncates in key order and the answer
+   * is ordered by age, so a store that stopped early could drop a row older than every one
+   * it returned.
    */
   async #scanInto(
     matches: Map<string, QueryMatch>,
@@ -1320,6 +1374,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       now: at,
       ...(criteria.state === undefined ? {} : { state: criteria.state }),
       ...(olderThanMs === undefined ? {} : { olderThanMs }),
+      skip: new Set(matches.keys()),
     });
 
     if (!result.complete) {
@@ -1488,9 +1543,6 @@ const CAPPED_IN_MEMORY: readonly Partiality[] = Object.freeze([
 const RESIDENT_ONLY: readonly string[] = Object.freeze(["resident"]);
 const COMPACTED: readonly Partiality[] = Object.freeze(["compacted"]);
 
-/** The first sequence any instance holds, so a stream starting later has lost its head. */
-const FIRST_SEQ = 0;
-
 /** Why a history is not the whole story, if it is not. */
 function partiality(
   durable: boolean,
@@ -1505,9 +1557,63 @@ function partiality(
 /**
  * Oldest first, which is the order the question is asked in: "what has been stuck longest".
  * Ties break on the key so a limited answer is the same answer twice.
+ *
+ * Keys are compared as plain strings and not by locale, so the order is the same on every
+ * machine. Two matches never share a key, so there is no equal case.
  */
 function byAgeThenKey(a: QueryMatch, b: QueryMatch): number {
-  return b.ageMs - a.ageMs || a.key.localeCompare(b.key);
+  if (a.ageMs !== b.ageMs) {
+    return b.ageMs - a.ageMs;
+  }
+  return a.key < b.key ? -1 : 1;
+}
+
+/** The longest list `oldest` keeps in order by insertion. */
+const BOUNDED_INSERTION_LIMIT = 64;
+
+/**
+ * The first `limit` matches in `byAgeThenKey` order, without sorting the rest.
+ *
+ * A short sorted list is kept and each match is placed into it by binary search, or passed
+ * over when it would land past the end. A dashboard asking for ten of a hundred thousand
+ * pays for the ten.
+ *
+ * Only while the list is short. Placing a match moves everything after it, so matches
+ * that arrive newest first cost the length of the list each, and a limit just under the
+ * number of matches would make that the square of it. Past `BOUNDED_INSERTION_LIMIT` the
+ * matches are sorted and cut, which is what an untruncated answer costs anyway.
+ */
+function oldest(matches: Iterable<QueryMatch>, limit: number): QueryMatch[] {
+  if (limit > BOUNDED_INSERTION_LIMIT) {
+    return [...matches].sort(byAgeThenKey).slice(0, limit);
+  }
+
+  const kept: QueryMatch[] = [];
+
+  for (const match of matches) {
+    const last = kept[limit - 1];
+    if (last !== undefined && byAgeThenKey(match, last) > 0) {
+      continue;
+    }
+
+    let low = 0;
+    let high = kept.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (byAgeThenKey(kept[middle] as QueryMatch, match) < 0) {
+        low = middle + 1;
+      } else {
+        high = middle;
+      }
+    }
+
+    kept.splice(low, 0, match);
+    if (kept.length > limit) {
+      kept.pop();
+    }
+  }
+
+  return kept;
 }
 
 /**
@@ -1592,15 +1698,4 @@ function noop(): void {
 
 function defaultOnUnhandled(error: unknown): void {
   console.error("[ekman] unhandled failure from post()", error);
-}
-
-/**
- * What a cache append is conditional on.
- *
- * A commit is conditional on the sequence before it, so a cache that has fallen behind
- * refuses the write rather than accepting a hole. Anything else carries the current
- * sequence, because it does not advance one.
- */
-function previousSeq(event: EkmanEvent): number {
-  return event.type === "transition" ? event.seq - 1 : event.seq;
 }

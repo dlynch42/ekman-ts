@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Ekman } from "../src/ekman";
 import { defineEntity } from "../src/entity";
 import { isEkmanError } from "../src/errors";
@@ -236,6 +236,25 @@ describe("querying", () => {
     await ekman.close();
   });
 
+  it("prefers the resident view even when a store returns the key it was told to leave out", async () => {
+    const inner = memoryStore();
+    const unhelpful = wrap(inner, {
+      scan: (criteria: ScanCriteria): Promise<ScanResult> =>
+        inner.scan({ entity: criteria.entity, now: criteria.now }),
+    });
+    const ekman = new Ekman({ entities: [orders], store: unhelpful });
+
+    await ekman.entities.orders.send("1", { type: "close" });
+
+    const result = await ekman.query({ entity: "orders" });
+    expect(result.instances).toHaveLength(1);
+    expect(result.instances[0]).toMatchObject({
+      key: "orders:1",
+      resident: true,
+    });
+    await ekman.close();
+  });
+
   it("finds an evicted instance through the store", async () => {
     const store = memoryStore();
     const ekman = new Ekman({
@@ -345,6 +364,124 @@ describe("querying", () => {
     ]);
     await ekman.close();
   });
+
+  it("orders tied keys as plain strings, the same on every machine", async () => {
+    const ekman = new Ekman({ entities: [orders], now: () => 0 });
+
+    await ekman.entities.orders.send("a", { type: "t" });
+    await ekman.entities.orders.send("B", { type: "t" });
+
+    // A locale-aware comparison would put `a` first.
+    const result = await ekman.query({ entity: "orders" });
+    expect(result.instances.map((i) => i.key)).toEqual([
+      "orders:B",
+      "orders:a",
+    ]);
+    await ekman.close();
+  });
+
+  it("does not ask the store about a key it already answered from memory", async () => {
+    const store = memoryStore();
+    const ekman = new Ekman({ entities: [orders], store });
+    await ekman.entities.orders.send("1", { type: "t" });
+    await ekman.entities.orders.send("2", { type: "close" });
+
+    const load = vi.spyOn(store, "load");
+    const result = await ekman.query({ entity: "orders", state: "open" });
+
+    expect(result.instances.map((i) => i.key)).toEqual(["orders:1"]);
+    expect(load.mock.calls.map(([key]) => key)).toEqual(["orders:2"]);
+    await ekman.close();
+  });
+
+  it("still answers from the store for a resident key another writer has moved", async () => {
+    const store = memoryStore();
+    const here = new Ekman({ entities: [orders], store });
+    const elsewhere = new Ekman({ entities: [orders], store });
+
+    await here.entities.orders.send("1", { type: "t" });
+    await elsewhere.entities.orders.send("1", { type: "close" });
+
+    // Resident here as `open`, which does not match, so the stored row is the answer.
+    expect(here.entities.orders.inspect("1")?.state).toBe("open");
+    const result = await here.query({ entity: "orders", state: "closed" });
+    expect(result.instances).toHaveLength(1);
+    expect(result.instances[0]).toMatchObject({
+      key: "orders:1",
+      state: "closed",
+      resident: false,
+    });
+    await here.close();
+    await elsewhere.close();
+  });
+
+  it("picks the oldest few out of many without changing which they are", async () => {
+    const time = clock();
+    const ekman = new Ekman({ entities: [orders], now: time.now });
+    const ids = Array.from({ length: 999 }, (_, n) =>
+      String(n).padStart(3, "0")
+    );
+
+    await ekman.entities.orders.send("zz-first", { type: "t" });
+    time.advance(1000);
+    // Sent last key first, so nothing arrives already in order.
+    await Promise.all(
+      ids.reverse().map((id) => ekman.entities.orders.send(id, { type: "t" }))
+    );
+    time.advance(1000);
+
+    const everything = await ekman.query({ entity: "orders" });
+    const limited = await ekman.query({ entity: "orders", limit: 3 });
+
+    expect(everything.instances).toHaveLength(1000);
+    expect(everything.reasons).not.toContain("limit-reached");
+    expect(limited.instances.map((i) => i.key)).toEqual([
+      "orders:zz-first",
+      "orders:000",
+      "orders:001",
+    ]);
+    expect(limited.instances).toEqual(everything.instances.slice(0, 3));
+    expect(limited.reasons).toContain("limit-reached");
+
+    // Small limits and large ones are picked two different ways, and have to agree.
+    for (const limit of [64, 65, 999]) {
+      // biome-ignore lint/performance/noAwaitInLoops: one query at a time is the point of comparing them
+      const cut = await ekman.query({ entity: "orders", limit });
+      expect(cut.instances).toEqual(everything.instances.slice(0, limit));
+      expect(cut.reasons).toContain("limit-reached");
+    }
+    await ekman.close();
+  });
+
+  it("reports a limit as reached only when it left something out", async () => {
+    const ekman = new Ekman({ entities: [orders], now: () => 0 });
+    await ekman.entities.orders.send("1", { type: "t" });
+    await ekman.entities.orders.send("2", { type: "t" });
+
+    const exact = await ekman.query({ entity: "orders", limit: 2 });
+    expect(exact.instances).toHaveLength(2);
+    expect(exact.reasons).not.toContain("limit-reached");
+
+    const none = await ekman.query({ entity: "orders", limit: 0 });
+    expect(none.instances).toEqual([]);
+    expect(none.reasons).toContain("limit-reached");
+    await ekman.close();
+  });
+
+  it.each([-1, 1.5, Number.NaN, "3"])(
+    "refuses a limit of %s rather than guessing at it",
+    async (limit) => {
+      const ekman = new Ekman({ entities: [orders] });
+
+      await expect(
+        ekman.query({ entity: "orders", limit: limit as number })
+      ).rejects.toMatchObject({
+        code: "INVALID_CONFIG",
+        message: expect.stringContaining("non-negative integer"),
+      });
+      await ekman.close();
+    }
+  );
 });
 
 describe("reading history", () => {

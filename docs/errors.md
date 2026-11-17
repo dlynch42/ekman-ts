@@ -31,8 +31,8 @@ still true.
 
 | Code | Means | HTTP |
 |---|---|---|
-| `INVALID_KEY` | The key is malformed. | 400 |
-| `UNKNOWN_ENTITY` | The key's first segment names no registered entity. | 404 |
+| `INVALID_KEY` | The key is malformed, or is too long for the store to name a file after. | 400 |
+| `UNKNOWN_ENTITY` | The key's first segment, or a query's `entity`, names no registered entity. | 404 |
 | `UNKNOWN_STATE` | The current state has no handler and the unknown policy is `reject`. | 409 |
 | `UNKNOWN_TRIGGER` | The trigger's type is not in the entity's declared trigger list. | 422 |
 | `CONSTRAINT_VIOLATED` | A result did not satisfy a constraint whose policy is `reject`. | 409 |
@@ -55,7 +55,7 @@ Try again later. These are the codes that mean backpressure.
 | `TRIGGER_DROPPED` | The inbox was full and an overflow policy dropped this trigger on purpose. | 503 |
 | `MEMORY_EXHAUSTED` | The memory budget is full and the eviction policy refuses rather than evicting. | 503 |
 | `STORE_FULL` | A store is at its retention budget and its policy refuses new instances. Instances it already holds keep committing. | 503 |
-| `STORE_UNAVAILABLE` | The commit authority could not be reached, so the commit did not happen. | 503 |
+| `STORE_UNAVAILABLE` | The store could not do what was asked: the commit authority could not be reached, or the file store met a filesystem failure or a corrupt log. The commit did not happen. The message names the store and the key, never a path. | 503 |
 | `STORE_CONFLICT` | A conditional append found the key at a different sequence. Nothing was written. | 409 |
 | `KEY_BUSY` | An operation needed the key idle and it was not. Only `forget` raises this. | 409 |
 | `RUNTIME_CLOSED` | The runtime has been closed, so the trigger was not accepted, or a retry that was waiting was abandoned. Not retried by the runtime; a replacement process is usually starting. | 503 |
@@ -91,11 +91,18 @@ const STATUS: Record<string, number> = {
   TRIGGER_DROPPED: 503,
   MEMORY_EXHAUSTED: 503,
   HANDLER_TIMEOUT: 504,
+  STORE_FULL: 503,
   STORE_UNAVAILABLE: 503,
   STORE_CONFLICT: 409,
+  KEY_BUSY: 409,
+  COMMIT_FENCED: 409,
+  RUNTIME_CLOSED: 503,
   HANDLER_FAILED: 500,
 };
 ```
+
+A 500 answers with a fixed message and logs the real one, because a handler's own error can
+hold details that should not leave the service.
 
 The distinction a client actually needs is 409 versus 503: **409 means this will never work and
 you should stop, 503 means try again shortly.** A constraint violation is deterministic, so it

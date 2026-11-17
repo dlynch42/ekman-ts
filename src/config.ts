@@ -1,3 +1,4 @@
+import type { Caches } from "./caches";
 import { EkmanError } from "./errors";
 import type { EkmanEvent } from "./events";
 import type { ResolvedMemoryConfig } from "./memory";
@@ -36,6 +37,8 @@ export interface RuntimeDeps {
   readonly inbox: ResolvedInboxConfig;
   /** Which layer owns the truth, and which are caches. */
   readonly stack: ResolvedStack;
+  /** The stack's cache layers, and everything that keeps them worth reading. */
+  readonly caches: Caches;
   readonly memory: ResolvedMemoryConfig;
   /**
    * Hand a committed event to the audit sinks. Never awaited, never able to fail a commit.

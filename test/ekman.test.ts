@@ -101,6 +101,29 @@ describe("addressing", () => {
     );
   });
 
+  it("refuses an unregistered entity before any store is asked about it", async () => {
+    const ekman = new Ekman({ entities: [orders] });
+
+    expect(await code(ekman.history("invoices:1"))).toBe("UNKNOWN_ENTITY");
+    expect(await code(ekman.forget("invoices:1"))).toBe("UNKNOWN_ENTITY");
+    expect(await code(ekman.query({ entity: "invoices" }))).toBe(
+      "UNKNOWN_ENTITY"
+    );
+  });
+
+  it("names the key that asked, or the query when no key did", async () => {
+    const ekman = new Ekman({ entities: [orders] });
+
+    const byKey = await ekman.history("invoices:1").catch((err) => err);
+    expect(byKey.key).toBe("invoices:1");
+    expect(byKey.message).toContain('key "invoices:1" names entity "invoices"');
+
+    const byQuery = await ekman.query({ entity: "invoices" }).catch((e) => e);
+    expect(byQuery.key).toBeUndefined();
+    expect(byQuery.message).toContain('the query names entity "invoices"');
+    expect(byQuery.message).toContain("Registered: orders");
+  });
+
   it("never throws synchronously, so every caller can rely on catch", () => {
     const ekman = new Ekman({ entities: [orders] });
     const promise = ekman.send("nope", { type: "approve" });
@@ -1829,6 +1852,10 @@ describe("history after compaction", () => {
       // biome-ignore lint/performance/noAwaitInLoops: each commit has to land before the next
       await ekman.entities.tickets.send("t1", { type: "update" });
     }
+    // A log past its limit is compacted on the next turn of the event loop.
+    await new Promise((done) => {
+      setImmediate(done);
+    });
 
     const { events, complete, reasons } =
       await ekman.entities.tickets.history("t1");
@@ -1839,6 +1866,42 @@ describe("history after compaction", () => {
     expect(complete).toBe(false);
     expect(reasons).toEqual(["compacted"]);
     expect(ekman.entities.tickets.inspect("t1")?.seq).toBe(40);
+
+    await ekman.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("reports itself incomplete even when a refusal survives at the first sequence", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ekman-compact-"));
+    const declared = defineEntity("tickets", {
+      initial: "open",
+      values: { note: "" },
+      triggers: ["update"],
+      states: { open: () => stay({ note: "x".repeat(200) }) },
+    });
+    const ekman = new Ekman({
+      entities: [declared],
+      store: { kind: "file", dir, retention: { perLogBytes: 1024 } },
+    });
+
+    await expect(
+      ekman.entities.tickets.send("t1", { type: "nonsense" } as never)
+    ).rejects.toMatchObject({ code: "UNKNOWN_TRIGGER" });
+    for (let i = 0; i < 40; i += 1) {
+      // biome-ignore lint/performance/noAwaitInLoops: each commit has to land before the next
+      await ekman.entities.tickets.send("t1", { type: "update" });
+    }
+    // A log past its limit is compacted on the next turn of the event loop.
+    await new Promise((done) => {
+      setImmediate(done);
+    });
+
+    const { events, complete, reasons } =
+      await ekman.entities.tickets.history("t1");
+
+    expect(events[0]).toMatchObject({ type: "rejected", seq: 0 });
+    expect(complete).toBe(false);
+    expect(reasons).toEqual(["compacted"]);
 
     await ekman.close();
     rmSync(dir, { recursive: true, force: true });

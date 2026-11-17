@@ -208,8 +208,10 @@ store: ["memory", "file"],   // fastest first; the last durable layer owns the t
 ```
 
 Durability is configured, never implied: omit `store` and nothing survives the process, which is a
-documented mode rather than a degraded one. Every store declares what it can do, and the runtime
-refuses configurations those declarations cannot satisfy rather than quietly under-delivering.
+documented mode rather than a degraded one. In a layered stack every commit goes to the authority
+first, and a layer in front of it answers the load of an instance that is not resident. Every
+store declares what it can do, and the runtime refuses configurations those declarations cannot
+satisfy rather than quietly under-delivering.
 [More](./docs/durability.md)
 
 ### Memory budget

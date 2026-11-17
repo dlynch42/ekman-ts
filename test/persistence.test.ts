@@ -25,19 +25,46 @@ const orders = defineEntity("orders", {
 
 /** A store that wraps another and can be told to misbehave in one specific way. */
 function wrap(
-  inner: Store,
-  overrides: Partial<Pick<Store, "append" | "load" | "snapshot">>
+  inner: MemoryStore,
+  overrides: Partial<Pick<Store, "append" | "load" | "snapshot" | "forget">>
 ): Store {
   return {
     name: inner.name,
     capabilities: inner.capabilities,
+    ...(inner.authority === undefined ? {} : { authority: inner.authority }),
     append: overrides.append ?? inner.append.bind(inner),
     load: overrides.load ?? inner.load.bind(inner),
     read: inner.read.bind(inner),
     snapshot: overrides.snapshot ?? inner.snapshot.bind(inner),
     scan: inner.scan.bind(inner),
+    forget: overrides.forget ?? inner.forget.bind(inner),
   };
 }
+
+/** One turn of the event loop, which is long enough for an in-memory cache to catch up. */
+const settle = (): Promise<void> =>
+  new Promise((done) => {
+    setImmediate(done);
+  });
+
+/** A commit made by something other than the runtime under test. */
+const elsewhere = (seq: number): EkmanEvent => ({
+  type: "transition",
+  key: "orders:1",
+  from: seq === 0 ? null : "open",
+  to: "open",
+  seq,
+  at: 0,
+  cause: { type: "elsewhere", id: `x${seq}` },
+  values: { n: seq },
+});
+
+type CacheFailed = Extract<TelemetryEvent, { type: "store.cacheFailed" }>;
+
+const cacheFailures = (seen: readonly TelemetryEvent[]): CacheFailed[] =>
+  seen.filter(
+    (event): event is CacheFailed => event.type === "store.cacheFailed"
+  );
 
 describe("committing through a store", () => {
   it("persists before it applies, so a failed write changes nothing", async () => {
@@ -345,13 +372,12 @@ describe("layered stores", () => {
 
   it("closes every layer that can be closed", async () => {
     const closed: string[] = [];
-    const closeable = {
-      ...memoryStore({ name: "closeable" }),
+    const closeable: Store = Object.assign(memoryStore({ name: "closeable" }), {
       close: () => {
         closed.push("closeable");
         return Promise.resolve();
       },
-    } as Store;
+    });
 
     const ekman = new Ekman({
       entities: [orders],
@@ -361,6 +387,583 @@ describe("layered stores", () => {
 
     await ekman.close();
     expect(closed).toEqual(["closeable"]);
+  });
+});
+
+describe("reading through a cache layer", () => {
+  const stack = () => ({
+    cache: memoryStore({ name: "cache" }),
+    truth: memoryStore({ name: "truth", authority: true }),
+  });
+
+  it("answers a load from the cache without asking the authority", async () => {
+    const { cache, truth } = stack();
+    const ekman = new Ekman({
+      entities: [orders],
+      store: [cache, truth],
+      memory: { maxBytes: 0 },
+    });
+    await ekman.entities.orders.send("1", { type: "touch" });
+    await settle();
+    expect(ekman.residentKeys).toEqual([]);
+
+    const asked = vi.spyOn(truth, "load");
+    const sent = await ekman.entities.orders.send("1", { type: "close" });
+
+    expect(sent).toMatchObject({ state: "closed", seq: 2 });
+    expect(asked).not.toHaveBeenCalled();
+    await ekman.close();
+  });
+
+  it("fills a cold cache from the authority, so nothing after a restart fails", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ekman-cache-"));
+    const before = new Ekman({
+      entities: [orders],
+      store: ["memory", { kind: "file", dir }],
+      memory: { maxBytes: 0 },
+    });
+    await before.entities.orders.send("1", { type: "touch" });
+    await before.entities.orders.send("1", { type: "touch" });
+    await before.entities.orders.send("2", { type: "touch" });
+    await before.close();
+
+    // A new process: the same directory, and a cache with nothing in it.
+    const cache = memoryStore({ name: "cache" });
+    const truth = fileStore(dir);
+    const asked = vi.spyOn(truth, "load");
+    const seen: TelemetryEvent[] = [];
+    const after = new Ekman({
+      entities: [orders],
+      store: [cache, truth],
+      memory: { maxBytes: 0 },
+      telemetry: { "*": (event) => seen.push(event) },
+    });
+
+    await after.entities.orders.send("1", { type: "touch" });
+    await after.entities.orders.send("1", { type: "close" });
+    await settle();
+
+    expect(cacheFailures(seen)).toEqual([]);
+    // Asked once, for the miss. The second load was the cache's.
+    expect(asked).toHaveBeenCalledTimes(1);
+    expect((await cache.load("orders:1"))?.seq).toBe(4);
+    expect(replay((await cache.load("orders:1")) as never)).toMatchObject({
+      state: "closed",
+      seq: 4,
+    });
+    // History is the authority's, whole, whatever the cache was handed.
+    const history = await after.entities.orders.history("1");
+    expect(history.events.filter((e) => e.type === "transition")).toHaveLength(
+      5
+    );
+
+    await after.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("fills a cache that missed from one further back that did not", async () => {
+    const near = memoryStore({ name: "near" });
+    const far = memoryStore({ name: "far" });
+    const truth = memoryStore({ name: "truth", authority: true });
+    const first = new Ekman({ entities: [orders], store: [far, truth] });
+    await first.entities.orders.send("1", { type: "touch" });
+    await first.close();
+
+    const asked = vi.spyOn(truth, "load");
+    const second = new Ekman({ entities: [orders], store: [near, far, truth] });
+    await second.entities.orders.send("1", { type: "touch" });
+    await settle();
+
+    expect(asked).not.toHaveBeenCalled();
+    expect((await near.load("orders:1"))?.seq).toBe(2);
+    await second.close();
+  });
+
+  it("treats a cache that throws as a miss, and says so", async () => {
+    const { cache: inner, truth } = stack();
+    const cache = wrap(inner, {
+      // Not an Error on purpose: an adapter can reject with anything.
+      load: () => Promise.reject("the cache is unreachable"),
+    });
+    const seen: TelemetryEvent[] = [];
+    const ekman = new Ekman({
+      entities: [orders],
+      store: [cache, truth],
+      telemetry: { "*": (event) => seen.push(event) },
+    });
+
+    await expect(
+      ekman.entities.orders.send("1", { type: "close" })
+    ).resolves.toMatchObject({ state: "closed", seq: 1 });
+    expect(cacheFailures(seen)).toEqual([
+      expect.objectContaining({
+        store: "cache",
+        error: "the cache is unreachable",
+      }),
+    ]);
+    await ekman.close();
+  });
+
+  it("does not take a cache's word that a key is new", async () => {
+    const { cache, truth } = stack();
+    await truth.append("orders:1", elsewhere(0), EMPTY_SEQ);
+    await truth.append("orders:1", elsewhere(1), 0);
+    // All this cache holds for the key is a refusal, which replays to no state at all.
+    await cache.append(
+      "orders:1",
+      {
+        type: "rejected",
+        key: "orders:1",
+        seq: EMPTY_SEQ,
+        at: 0,
+        code: "UNKNOWN_TRIGGER",
+        reason: "never declared",
+        cause: { type: "nonsense", id: "t0" },
+      },
+      EMPTY_SEQ
+    );
+
+    const ekman = new Ekman({ entities: [orders], store: [cache, truth] });
+    const sent = await ekman.entities.orders.send("1", { type: "touch" });
+
+    expect(sent.seq).toBe(2);
+    await settle();
+    expect((await cache.load("orders:1"))?.seq).toBe(2);
+    await ekman.close();
+  });
+
+  it("never makes a commit, a history read or a shutdown wait for a cache", async () => {
+    const { cache: inner, truth } = stack();
+    const cache = wrap(inner, {
+      append: () => new Promise<void>(() => undefined),
+    });
+    const ekman = new Ekman({ entities: [orders], store: [cache, truth] });
+
+    await expect(
+      ekman.entities.orders.send("1", { type: "close" })
+    ).resolves.toMatchObject({ state: "closed" });
+    await expect(ekman.entities.orders.history("1")).resolves.toMatchObject({
+      complete: false,
+    });
+    await ekman.close();
+  });
+});
+
+describe("a cache layer that is slow, or never answers", () => {
+  const stack = () => ({
+    cache: memoryStore({ name: "cache" }),
+    truth: memoryStore({ name: "truth", authority: true }),
+  });
+
+  it("does not hold up the next load of a key it never finished writing", async () => {
+    const { cache: inner, truth } = stack();
+    const cache = wrap(inner, {
+      append: () => new Promise<void>(() => undefined),
+    });
+    const asked = vi.spyOn(inner, "load");
+    const ekman = new Ekman({
+      entities: [orders],
+      store: [cache, truth],
+      memory: { maxBytes: 0 },
+    });
+
+    await ekman.entities.orders.send("1", { type: "touch" });
+    await settle();
+    expect(ekman.residentKeys).toEqual([]);
+    const sent = await ekman.entities.orders.send("1", { type: "close" });
+
+    expect(sent).toMatchObject({ state: "closed", seq: 2 });
+    expect(asked).not.toHaveBeenCalled();
+    await ekman.close();
+  });
+
+  it("is sent nothing more once the runtime has closed", async () => {
+    const { cache: inner, truth } = stack();
+    const waiting: (() => void)[] = [];
+    const append = vi.fn(
+      (key: string, event: EkmanEvent, expectedSeq: number): Promise<void> =>
+        new Promise<void>((resolve, reject) => {
+          waiting.push(() => {
+            inner.append(key, event, expectedSeq).then(resolve, reject);
+          });
+        })
+    );
+    const ekman = new Ekman({
+      entities: [orders],
+      store: [wrap(inner, { append }), truth],
+    });
+    await ekman.entities.orders.send("1", { type: "touch" });
+    await ekman.entities.orders.send("1", { type: "close" });
+    await settle();
+    expect(append).toHaveBeenCalledTimes(1);
+
+    await ekman.close();
+    for (const release of waiting) {
+      release();
+    }
+    await settle();
+
+    expect(append).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("a record another writer has overtaken", () => {
+  // Every state tries to open the gate, and only an ajar one is allowed to.
+  const gate = defineEntity("gate", {
+    initial: "shut",
+    states: {
+      shut: () => transitionTo("open"),
+      ajar: () => transitionTo("open"),
+      open: () => stay(),
+    },
+    constraints: {
+      transitions: { allow: { shut: ["ajar"], ajar: ["open"] } },
+    },
+  });
+
+  it("is read again after a refusal the store would not take, not only after a commit", async () => {
+    const truth = memoryStore({ name: "truth" });
+    const unhandled: unknown[] = [];
+    const ekman = new Ekman({
+      entities: [gate],
+      store: truth,
+      onUnhandled: (error) => unhandled.push(error),
+    });
+    const knock = () =>
+      ekman.entities.gate.send("1", { type: "knock" }).then(
+        (sent) => sent.state,
+        (error: EkmanError) => error.code
+      );
+    expect(await knock()).toBe("CONSTRAINT_VIOLATED");
+    await settle();
+    expect(unhandled).toEqual([]);
+
+    // Moved by something else. This runtime still holds it shut, and a knock there is a
+    // violation it records without ever trying a commit.
+    await truth.append(
+      "gate:1",
+      {
+        type: "transition",
+        key: "gate:1",
+        from: "shut",
+        to: "ajar",
+        seq: 1,
+        at: 0,
+        cause: { type: "open", id: "x1" },
+        values: {},
+      },
+      0
+    );
+    expect(await knock()).toBe("CONSTRAINT_VIOLATED");
+    await settle();
+    expect(unhandled).toHaveLength(1);
+    expect(unhandled[0]).toMatchObject({ code: "STORE_CONFLICT" });
+
+    expect(await knock()).toBe("open");
+    await ekman.close();
+  });
+});
+
+describe("a refusal the store could not record", () => {
+  const strict = defineEntity("strict", {
+    initial: "shut",
+    states: { shut: () => transitionTo("open"), open: () => stay() },
+    constraints: { transitions: { allow: { shut: [] } } },
+  });
+
+  it("is reported, and the record is not taken to be behind for it", async () => {
+    const inner = memoryStore({ name: "truth" });
+    const asked = vi.spyOn(inner, "load");
+    const unhandled: unknown[] = [];
+    const ekman = new Ekman({
+      entities: [strict],
+      store: wrap(inner, {
+        append: (key, event, expectedSeq) =>
+          event.type === "violation"
+            ? Promise.reject(new Error("disk is full"))
+            : inner.append(key, event, expectedSeq),
+      }),
+      onUnhandled: (error) => unhandled.push(error),
+    });
+    const push = () =>
+      ekman.entities.strict
+        .send("1", { type: "push" })
+        .catch((error: EkmanError) => error.code);
+
+    expect(await push()).toBe("CONSTRAINT_VIOLATED");
+    await settle();
+    expect(await push()).toBe("CONSTRAINT_VIOLATED");
+    await settle();
+
+    expect(unhandled).toHaveLength(2);
+    expect(unhandled[0]).toMatchObject({ message: "disk is full" });
+    // Loaded once, when it was created, and never again.
+    expect(asked).toHaveBeenCalledTimes(1);
+    await ekman.close();
+  });
+});
+
+describe("an eviction snapshot still on its way to the store", () => {
+  it("is waited for by forget, so it cannot bring the key back", async () => {
+    const inner = memoryStore({ name: "truth" });
+    const waiting: (() => void)[] = [];
+    const store = wrap(inner, {
+      snapshot: (key, snapshot) =>
+        new Promise<void>((resolve, reject) => {
+          waiting.push(() => {
+            inner.snapshot(key, snapshot).then(resolve, reject);
+          });
+        }),
+    });
+    const ekman = new Ekman({
+      entities: [orders],
+      store,
+      memory: { maxBytes: 0 },
+    });
+    // Evicted twice, so two snapshots are on their way and both have to be waited for.
+    await ekman.entities.orders.send("1", { type: "touch" });
+    await settle();
+    await ekman.entities.orders.send("1", { type: "touch" });
+    await settle();
+    expect(ekman.residentKeys).toEqual([]);
+    expect(waiting).toHaveLength(2);
+
+    const forgotten = ekman.forget("orders:1");
+    await settle();
+    expect(await inner.load("orders:1")).toBeDefined();
+    for (const release of waiting) {
+      release();
+    }
+    await forgotten;
+
+    expect(await inner.load("orders:1")).toBeUndefined();
+    await ekman.close();
+  });
+});
+
+describe("keeping a cache layer honest", () => {
+  const stack = () => ({
+    cache: memoryStore({ name: "cache" }),
+    truth: memoryStore({ name: "truth", authority: true }),
+  });
+
+  it("deletes a key from a cache that missed a write, and leaves it alone until it is filled", async () => {
+    const { cache: inner, truth } = stack();
+    const append = vi.fn(
+      (key: string, event: EkmanEvent, expectedSeq: number): Promise<void> =>
+        event.type === "transition" && event.seq === 1
+          ? Promise.reject(new Error("cache is gone"))
+          : inner.append(key, event, expectedSeq)
+    );
+    const seen: TelemetryEvent[] = [];
+    const ekman = new Ekman({
+      entities: [orders],
+      store: [wrap(inner, { append }), truth],
+      telemetry: { "*": (event) => seen.push(event) },
+    });
+
+    await ekman.entities.orders.send("1", { type: "touch" });
+    await ekman.entities.orders.send("1", { type: "touch" });
+    await settle();
+
+    // One failure, not one per commit since. The key is gone from the cache, so the next
+    // load misses, and nothing is appended to a stream with a hole in it.
+    expect(cacheFailures(seen)).toHaveLength(1);
+    expect(await inner.load("orders:1")).toBeUndefined();
+    expect(append).toHaveBeenCalledTimes(2);
+    expect((await truth.load("orders:1"))?.seq).toBe(2);
+    await ekman.close();
+  });
+
+  it("fills that cache again the next time the instance is loaded", async () => {
+    const { cache: inner, truth } = stack();
+    const cache = wrap(inner, {
+      append: (key, event, expectedSeq) =>
+        event.type === "transition" && event.seq === 1
+          ? Promise.reject(new Error("cache is gone"))
+          : inner.append(key, event, expectedSeq),
+    });
+    const seen: TelemetryEvent[] = [];
+    const ekman = new Ekman({
+      entities: [orders],
+      store: [cache, truth],
+      memory: { maxBytes: 0 },
+      telemetry: { "*": (event) => seen.push(event) },
+    });
+
+    await ekman.entities.orders.send("1", { type: "touch" });
+    await ekman.entities.orders.send("1", { type: "touch" });
+    await settle();
+
+    expect(cacheFailures(seen)).toHaveLength(1);
+    expect((await inner.load("orders:1"))?.seq).toBe(2);
+    await ekman.close();
+  });
+
+  it("deletes a key from a cache that could not be filled", async () => {
+    const { cache: inner, truth } = stack();
+    await truth.append("orders:1", elsewhere(0), EMPTY_SEQ);
+    const append = vi.fn(inner.append.bind(inner));
+    const cache = wrap(inner, {
+      append,
+      snapshot: () => Promise.reject(new Error("no room")),
+    });
+    const seen: TelemetryEvent[] = [];
+    const ekman = new Ekman({
+      entities: [orders],
+      store: [cache, truth],
+      telemetry: { "*": (event) => seen.push(event) },
+    });
+
+    const sent = await ekman.entities.orders.send("1", { type: "touch" });
+    await settle();
+
+    expect(sent.seq).toBe(1);
+    expect(cacheFailures(seen)).toEqual([
+      expect.objectContaining({ store: "cache", error: "no room", seq: 0 }),
+    ]);
+    expect(append).not.toHaveBeenCalled();
+    expect(await inner.load("orders:1")).toBeUndefined();
+    await ekman.close();
+  });
+
+  it("stops using a cache for a key it can neither write nor clear, until a forget clears it", async () => {
+    const { cache: inner, truth } = stack();
+    const health: { broken: boolean } = { broken: true };
+    const load = vi.fn(inner.load.bind(inner));
+    const append = vi.fn(
+      (key: string, event: EkmanEvent, expectedSeq: number): Promise<void> =>
+        health.broken
+          ? Promise.reject(new Error("cache is gone"))
+          : inner.append(key, event, expectedSeq)
+    );
+    const forget = vi.fn(
+      (key: string): Promise<void> =>
+        health.broken
+          ? Promise.reject(new Error("and cannot be cleared"))
+          : inner.forget(key)
+    );
+    const seen: TelemetryEvent[] = [];
+    const ekman = new Ekman({
+      entities: [orders],
+      store: [wrap(inner, { load, append, forget }), truth],
+      memory: { maxBytes: 0 },
+      telemetry: { "*": (event) => seen.push(event) },
+    });
+
+    await ekman.entities.orders.send("1", { type: "touch" });
+    await settle();
+    expect(cacheFailures(seen).map((event) => event.error)).toEqual([
+      "cache is gone",
+      "and cannot be cleared",
+    ]);
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(append).toHaveBeenCalledTimes(1);
+
+    // Neither read nor written from here: every send reloads, and none asks the cache.
+    await ekman.entities.orders.send("1", { type: "touch" });
+    await ekman.entities.orders.send("1", { type: "touch" });
+    await settle();
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(append).toHaveBeenCalledTimes(1);
+    expect(forget).toHaveBeenCalledTimes(1);
+    expect(cacheFailures(seen)).toHaveLength(2);
+
+    health.broken = false;
+    await ekman.entities.orders.forget("1");
+    await ekman.entities.orders.send("1", { type: "touch" });
+    await settle();
+    expect(load).toHaveBeenCalledTimes(2);
+    expect((await inner.load("orders:1"))?.seq).toBe(1);
+    await ekman.close();
+  });
+
+  it("clears a key another writer moved, reloads from the authority, and fills the cache from that", async () => {
+    const { cache, truth } = stack();
+    const ekman = new Ekman({ entities: [orders], store: [cache, truth] });
+    await ekman.entities.orders.send("1", { type: "touch" });
+    await settle();
+
+    await truth.append("orders:1", elsewhere(2), 1);
+    await expect(
+      ekman.entities.orders.send("1", { type: "touch" })
+    ).rejects.toMatchObject({ code: "STORE_CONFLICT" });
+    await settle();
+    expect(await cache.load("orders:1")).toBeUndefined();
+
+    const asked = vi.spyOn(cache, "load");
+    const sent = await ekman.entities.orders.send("1", { type: "close" });
+    await settle();
+    asked.mockRestore();
+
+    expect(sent).toMatchObject({ state: "closed", seq: 3 });
+    expect(asked).not.toHaveBeenCalled();
+    expect((await cache.load("orders:1"))?.seq).toBe(3);
+    await ekman.close();
+  });
+
+  it("recovers from a cache that answered with a state the authority had moved past", async () => {
+    const { cache, truth } = stack();
+    const ekman = new Ekman({
+      entities: [orders],
+      store: [cache, truth],
+      memory: { maxBytes: 0 },
+    });
+    await ekman.entities.orders.send("1", { type: "touch" });
+    await settle();
+    await truth.append("orders:1", elsewhere(2), 1);
+
+    // The cache answers at 1. The authority refuses the commit built on that, which is
+    // what stops a stale read from ever becoming a stale write.
+    await expect(
+      ekman.entities.orders.send("1", { type: "touch" })
+    ).rejects.toMatchObject({ code: "STORE_CONFLICT" });
+    const sent = await ekman.entities.orders.send("1", { type: "touch" });
+
+    expect(sent).toMatchObject({ seq: 3, values: { n: 1 } });
+    await settle();
+    expect((await cache.load("orders:1"))?.seq).toBe(3);
+    await ekman.close();
+  });
+
+  it("starts a key over in the cache when another writer deleted it", async () => {
+    const { cache, truth } = stack();
+    const ekman = new Ekman({ entities: [orders], store: [cache, truth] });
+    await ekman.entities.orders.send("1", { type: "touch" });
+    await ekman.entities.orders.send("1", { type: "touch" });
+    await settle();
+
+    await truth.forget("orders:1");
+    await expect(
+      ekman.entities.orders.send("1", { type: "touch" })
+    ).rejects.toMatchObject({ code: "STORE_CONFLICT" });
+    const sent = await ekman.entities.orders.send("1", { type: "touch" });
+    await settle();
+
+    expect(sent.seq).toBe(1);
+    expect(await cache.read("orders:1")).toHaveLength(2);
+    expect((await cache.load("orders:1"))?.seq).toBe(1);
+    await ekman.close();
+  });
+
+  it("leaves nothing in a cache when a forget arrives while it is being filled", async () => {
+    const { cache: inner, truth } = stack();
+    await truth.append("orders:1", elsewhere(0), EMPTY_SEQ);
+    const cache = wrap(inner, {
+      snapshot: async (key, snapshot) => {
+        await new Promise((done) => setTimeout(done, 20));
+        await inner.snapshot(key, snapshot);
+      },
+    });
+    const ekman = new Ekman({ entities: [orders], store: [cache, truth] });
+
+    await ekman.entities.orders.send("1", { type: "touch" });
+    await ekman.entities.orders.forget("1");
+    await new Promise((done) => setTimeout(done, 40));
+
+    expect(inner.keys).toEqual([]);
+    expect(await truth.load("orders:1")).toBeUndefined();
+    await ekman.close();
   });
 });
 

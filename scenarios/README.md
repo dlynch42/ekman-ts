@@ -145,10 +145,12 @@ valid documented mode: nothing survives the process, and nothing pretends to.
 | `name` | Layer name, used in telemetry. Defaults to the kind. Layers must not share one. |
 | `authority` | Claim to be the commit authority, overriding the runtime's choice. |
 
-A list is a layered stack, read fastest first. Exactly one layer is the **commit
-authority**: the last durable one, or the last one when none is durable, unless a layer
-claims it. Every other layer is a cache, written after the fact, and a cache write that
-fails is reported without failing the commit.
+A list is a layered stack, fastest first. Exactly one layer is the **commit authority**: the
+last durable one, or the last one when none is durable, unless a layer claims it. Every
+other layer is a cache. It is written after the authority, and a write that fails is
+reported without failing the commit. It is read before the authority when an instance is
+loaded, and only then: history and queries are the authority's. A cache that misses is
+filled from whatever answered, so one that starts empty fails nothing.
 
 Runners give a `file` layer somewhere of their own to keep its bytes, and clean it up
 afterwards. Scenarios never name paths: where a durable store puts things is not behaviour
@@ -610,7 +612,7 @@ only a `type` asserts no event of that type was emitted at all.
 | `instance.evicted` | An instance was released to stay inside the budget. | `state`, `seq`, `bytes`, `snapshotted`, `residentBytes` |
 | `instance.restored` | An instance was rebuilt from the store. | `state`, `seq`, `from`, `replayed` |
 | `audit.failed` | An audit sink could not be delivered to, after its retries. | `sink`, `error`, `seq` |
-| `store.cacheFailed` | A cache layer could not be written. The commit stands. | `store`, `error`, `seq` |
+| `store.cacheFailed` | A cache layer could not be read, written or cleared. The commit stands. | `store`, `error`, `seq` |
 | `runtime.closed` | The runtime finished closing. A `restart` step emits one. | `drained`, `pending` |
 
 `memory.accounted.maxBytes` is `null` when the budget is unlimited.
@@ -719,7 +721,8 @@ Queries run after everything has settled, each with the answer it must give.
 | `reasons` | Why not, asserted as a set. |
 
 Ordering is oldest-first, because that is the order the question is asked in, with ties
-broken on the key so a limited answer is the same answer twice.
+broken on the key so a limited answer is the same answer twice. Keys are compared as plain
+strings, never by locale.
 
 Time in state is measured from the last **move**. A values-only commit leaves the clock
 running, because the instance has not gone anywhere. This is the same measurement a
