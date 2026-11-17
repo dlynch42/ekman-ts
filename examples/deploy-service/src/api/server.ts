@@ -62,25 +62,41 @@ const STATUS: Record<string, number> = {
   TRIGGER_DROPPED: 503,
   MEMORY_EXHAUSTED: 503,
   HANDLER_TIMEOUT: 504,
+  STORE_FULL: 503,
   STORE_UNAVAILABLE: 503,
   STORE_CONFLICT: 409,
+  KEY_BUSY: 409,
+  COMMIT_FENCED: 409,
+  RUNTIME_CLOSED: 503,
   HANDLER_FAILED: 500,
 };
 
 const RETRYABLE = 503;
+const INTERNAL = 500;
 
-export function replyForError(error: unknown): Reply {
+/**
+ * Turn a failure into a response.
+ *
+ * A 500 carries a fixed message. Its real one is a handler's own error or something
+ * nobody anticipated, and either can hold details that belong in this service's logs
+ * rather than in a client's hands, so it is logged here and not echoed.
+ */
+function replyForError(error: unknown): Reply {
   if (error instanceof BadRequest) {
     return json(400, { error: "bad_request", message: error.message });
   }
   if (!isEkmanError(error)) {
-    return json(500, { error: "internal", message: String(error) });
+    console.error(error);
+    return json(INTERNAL, { error: "internal", message: "internal error" });
   }
 
-  const status = STATUS[error.code] ?? 500;
+  const status = STATUS[error.code] ?? INTERNAL;
+  if (status === INTERNAL) {
+    console.error(error);
+  }
   const body: Record<string, unknown> = {
     error: error.code,
-    message: error.message,
+    message: status === INTERNAL ? "internal error" : error.message,
   };
   if (error.key !== undefined) {
     body.key = error.key;

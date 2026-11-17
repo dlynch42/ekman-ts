@@ -131,6 +131,14 @@ export interface ScanCriteria {
   /** The instant `olderThanMs` is measured against, from the runtime's clock. */
   readonly now: number;
   readonly limit?: number;
+  /**
+   * Keys the caller already has an answer for, which the store should leave out.
+   *
+   * Loading them is wasted work: the runtime's resident view wins on any key that appears
+   * in both. Optional in both directions. A caller may omit it, and a store that ignores it
+   * is still correct, only slower.
+   */
+  readonly skip?: ReadonlySet<string>;
 }
 
 export interface ScanMatch {
@@ -303,6 +311,16 @@ export function latestSeq(events: readonly EkmanEvent[]): number {
   return seq;
 }
 
+/**
+ * The sequence an append of this event is conditional on.
+ *
+ * A commit is conditional on the sequence before it. Anything else carries the current
+ * sequence, because it does not advance one.
+ */
+export function previousSeq(event: EkmanEvent): number {
+  return event.type === "transition" ? event.seq - 1 : event.seq;
+}
+
 /** The entity name a key addresses: its first segment. */
 export function entityOf(key: string): string {
   const separator = key.indexOf(":");
@@ -325,7 +343,7 @@ export async function scanKeys(
   const matches: ScanMatch[] = [];
 
   for (const key of keys) {
-    if (entityOf(key) !== criteria.entity) {
+    if (entityOf(key) !== criteria.entity || criteria.skip?.has(key)) {
       continue;
     }
 

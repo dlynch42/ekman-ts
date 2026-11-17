@@ -59,7 +59,7 @@ rejects the error goes to `onUnhandled` rather than becoming an unhandled reject
 | `instance.forgotten` | An instance was deleted outright, from memory and every store layer. |
 | `memory.accounted` | Resident accounting after a commit. |
 | `memory.refused` | The budget is full and the policy refuses rather than evicting. |
-| `store.cacheFailed` | A cache layer could not be written. The commit was unaffected. |
+| `store.cacheFailed` | A cache layer could not be read, written or cleared. The commit was unaffected, and the layer is not read for that key until it is whole again. |
 | `audit.failed` | An audit sink could not be delivered to, after its retries. |
 | `storage.swept` | A store's retention pass ran. |
 | `runtime.closed` | `close()` finished waiting for in-flight work. Carries `drained` and `pending`. |

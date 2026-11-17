@@ -260,7 +260,10 @@ export interface AuditFailedEvent extends TelemetryBase {
   readonly seq: number;
 }
 
-/** A cache layer could not be written. The commit is unaffected; the layer is now stale. */
+/**
+ * A cache layer could not be read, written or cleared. The commit is unaffected, and the
+ * layer is not read for the key again until it is whole.
+ */
 export interface StoreCacheFailedEvent extends TelemetryBase {
   readonly type: "store.cacheFailed";
   readonly store: string;

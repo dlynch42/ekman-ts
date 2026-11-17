@@ -21,10 +21,10 @@ answer, and it is one call.
 
 | Field | Type | What it does |
 |---|---|---|
-| `entity` | `string` | Required. Which entity to search. |
+| `entity` | `string` | Required. Which entity to search. One that is not registered is refused with `UNKNOWN_ENTITY`. |
 | `state` | `string` | Only instances currently in this state. |
 | `olderThan` | `number` \| `string` | Time in state, as milliseconds or a duration string such as `"5m"`, `"2h"`, `"30d"`. |
-| `limit` | `number` | Cap the answer. Truncation is reported, never silent. |
+| `limit` | `number` | Cap the answer to the oldest this many. Truncation is reported, never silent. Anything but a non-negative integer is refused with `INVALID_CONFIG`. |
 
 The string form for `olderThan` exists because `"5m"` is what an operator actually wants to
 write, and `300000` is a number nobody checks twice. A string that is not a duration is refused
@@ -36,7 +36,21 @@ Each match is:
 { key, entity, state, seq, enteredAt, ageMs, resident }
 ```
 
-Results come back oldest first, which is the order the question is asked in.
+Results come back oldest first, which is the order the question is asked in. Instances that
+entered their state at the same instant are ordered by key, compared as plain strings and not by
+locale, so `orders:B` comes before `orders:a` on every machine and a limited answer is the same
+answer twice.
+
+### Where the answer comes from
+
+Resident instances are answered from memory and stored ones from the commit authority. An
+instance that is resident and matches is not read from the store as well: the store is told
+which keys the runtime has already answered and leaves them out. So a query costs one read per
+stored instance the runtime could not answer itself, and nothing for the ones it could.
+
+A resident instance that does not match is still asked about. So is one that is still loading.
+If another writer has moved either into the state you asked for, the stored row is the answer,
+and it comes back with `resident: false`.
 
 ### Time in state is measured from the last move
 

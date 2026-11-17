@@ -266,6 +266,60 @@ export function storeContract(
     });
   });
 
+  it(`${name}: answers for a key it holds only a snapshot of`, async () => {
+    const store = make();
+    await store.snapshot("orders:1", {
+      key: "orders:1",
+      entity: "orders",
+      state: "shipped",
+      values: { n: 3 },
+      seq: 3,
+      at: 3000,
+      enteredAt: 1000,
+    });
+
+    const loaded = await store.load("orders:1");
+    expect(loaded?.snapshot).toMatchObject({ state: "shipped", seq: 3 });
+    expect(loaded?.events).toEqual([]);
+    expect(loaded?.seq).toBe(3);
+
+    // The snapshot is where the key is, so that is what the next append is held to.
+    expect(
+      await code(
+        store.append("orders:1", commit("orders:1", 0, null, "a"), EMPTY_SEQ)
+      )
+    ).toBe("STORE_CONFLICT");
+    await store.append(
+      "orders:1",
+      commit("orders:1", 4, "shipped", "shipped"),
+      3
+    );
+    expect((await store.load("orders:1"))?.seq).toBe(4);
+  });
+
+  it(`${name}: moves a key on when handed a snapshot past its last event`, async () => {
+    const store = make();
+    await store.append("orders:1", commit("orders:1", 0, null, "a"), EMPTY_SEQ);
+    await store.snapshot("orders:1", {
+      key: "orders:1",
+      entity: "orders",
+      state: "b",
+      values: { n: 5 },
+      seq: 5,
+      at: 5000,
+      enteredAt: 4000,
+    });
+
+    const loaded = await store.load("orders:1");
+    expect(loaded?.seq).toBe(5);
+    expect(loaded?.events).toEqual([]);
+    expect(
+      await code(store.append("orders:1", commit("orders:1", 1, "a", "b"), 0))
+    ).toBe("STORE_CONFLICT");
+    await store.append("orders:1", commit("orders:1", 6, "b", "b"), 5);
+    expect((await store.load("orders:1"))?.seq).toBe(6);
+  });
+
   it(`${name}: scans by entity and state`, async () => {
     const store = make();
     await store.append(

@@ -71,9 +71,9 @@ not useful, so a call made while one is running returns 0 immediately rather tha
 | `send(key, trigger)` | `Promise<CommitResult>` | Deliver a trigger. Resolves at commit with the committed state, values and sequence. Rejects on refusal or failure. |
 | `post(key, trigger)` | `void` | Fire and forget. Wraps `send`; failures go to `onUnhandled` rather than becoming an unhandled rejection. |
 | `inspect(key)` | `InstanceSnapshot \| undefined` | **Synchronous.** Current committed state of a resident instance. Does not touch the store and does not reload. |
-| `history(key)` | `Promise<HistoryResult>` | The per-key ordered stream, read through the commit authority. |
-| `query(criteria)` | `Promise<QueryResult>` | Instances by entity, state and time in state. |
-| `forget(key)` | `Promise<void>` | Delete an instance outright, from memory and every store layer. |
+| `history(key)` | `Promise<HistoryResult>` | The per-key ordered stream, read through the commit authority. Rejects with `UNKNOWN_ENTITY` for an entity that is not registered. |
+| `query(criteria)` | `Promise<QueryResult>` | Instances by entity, state and time in state. Rejects with `UNKNOWN_ENTITY` for an entity that is not registered. |
+| `forget(key)` | `Promise<void>` | Delete an instance outright, from memory and every store layer. Rejects with `UNKNOWN_ENTITY` for an entity that is not registered. |
 | `sweep()` | `Promise<number>` | Evaluate every time-in-state constraint once and deliver whatever escalations are due. Returns how many fired. |
 | `sweepStorage()` | `Promise<StorageSweep>` | Run the store's retention pass. Returns `{ logs, reclaimed, overBudget }`. |
 | `close()` | `Promise<void>` | Stop sweep timers and release the runtime. |
