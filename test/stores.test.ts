@@ -54,6 +54,9 @@ const onDisk = (dir: string, key: string): number => {
   );
 };
 
+/** Who may read, write and run a file: its mode without the bits that say what it is. */
+const permissionsOf = (path: string): number => statSync(path).mode % 0o1000;
+
 /**
  * Whether taking permissions away would stop this process. It would not on Windows, and it
  * would not as root, so tests that deny access to provoke a failure are skipped there.
@@ -701,6 +704,101 @@ describe("retention", () => {
         ["violation"]
       );
     });
+
+    it("recovers from a compaction that stopped partway, at either file", async () => {
+      const dir = freshDir();
+      const store = fileStore(dir, {
+        retention: { totalBytes: 1, policy: "compact", perLogBytes: 0 },
+      });
+      await fill(store, "orders:1", 6);
+      await store.append(
+        "orders:1",
+        {
+          type: "rejected",
+          key: "orders:1",
+          seq: 5,
+          at: 99,
+          code: "UNKNOWN_TRIGGER",
+          reason: "nobody handles that",
+          cause: { type: "nonsense", id: "t99" },
+        },
+        5
+      );
+      const before = replay((await store.load("orders:1")) as LoadResult);
+      const log = logPathOf(dir, "orders:1");
+      const snapshot = snapshotPathOf(dir, "orders:1");
+      const reopened = async () => {
+        const fresh = fileStore(dir);
+        return {
+          state: replay((await fresh.load("orders:1")) as LoadResult),
+          kinds: (await fresh.read("orders:1")).map((event) => event.type),
+          keys: fresh.keys,
+        };
+      };
+
+      // A crash while the snapshot's temporary file was half written: the name is taken
+      // and what is under it is not a snapshot.
+      writeFileSync(`${snapshot}.tmp`, '{"key":"orders:1","sta');
+      expect(await reopened()).toEqual({
+        state: before,
+        kinds: [...new Array(6).fill("transition"), "rejected"],
+        keys: ["orders:1"],
+      });
+
+      // The snapshot is replaced and then the log cannot be: a directory is in the way of
+      // its temporary name. This is the state a crash between the two renames leaves.
+      mkdirSync(`${log}.tmp`);
+      const failure = await store.compact().then(
+        () => undefined,
+        (error: EkmanError) => error
+      );
+      expect(failure?.code).toBe("STORE_UNAVAILABLE");
+      expect(JSON.parse(readFileSync(snapshot, "utf8")).seq).toBe(5);
+      expect(existsSync(`${snapshot}.tmp`)).toBe(false);
+      expect(await reopened()).toEqual({
+        state: before,
+        kinds: [...new Array(6).fill("transition"), "rejected"],
+        keys: ["orders:1"],
+      });
+
+      // With the way clear the same compaction finishes, and the refusal is still there.
+      rmdirSync(`${log}.tmp`);
+      expect((await store.compact()).logs).toBe(1);
+      expect(await reopened()).toEqual({
+        state: before,
+        kinds: ["rejected"],
+        keys: ["orders:1"],
+      });
+    });
+
+    it.skipIf(process.platform === "win32")(
+      "keeps a file as private as it was when compaction replaces it",
+      async () => {
+        const dir = freshDir();
+        const store = fileStore(dir, {
+          retention: { totalBytes: 1, policy: "compact", perLogBytes: 0 },
+        });
+        await fill(store, "orders:1", 4);
+        await store.compact();
+        for (let seq = 4; seq < 8; seq += 1) {
+          // biome-ignore lint/performance/noAwaitInLoops: appends have to land in order
+          await store.append("orders:1", move("orders:1", seq, {}), seq - 1);
+        }
+        const log = logPathOf(dir, "orders:1");
+        const snapshot = snapshotPathOf(dir, "orders:1");
+        chmodSync(log, 0o600);
+        chmodSync(snapshot, 0o600);
+        // Left by a crash, and readable by everyone.
+        writeFileSync(`${snapshot}.tmp`, "{}", { mode: 0o644 });
+        chmodSync(`${snapshot}.tmp`, 0o644);
+
+        expect((await store.compact()).logs).toBe(1);
+
+        expect(permissionsOf(log)).toBe(0o600);
+        expect(permissionsOf(snapshot)).toBe(0o600);
+        expect((await store.load("orders:1"))?.snapshot?.seq).toBe(7);
+      }
+    );
 
     it("stops rewriting a log that holds nothing left to fold", async () => {
       const dir = freshDir();

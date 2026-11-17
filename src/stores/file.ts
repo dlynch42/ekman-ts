@@ -536,11 +536,23 @@ export class FileStore implements Store {
    * A crash leaves the old file or the new one, never a torn one: a half-written snapshot
    * that replaced a whole one would be worse than no snapshot at all. Rename is atomic
    * within a filesystem.
+   *
+   * The temporary file is always created here and never reused. One a crash left behind
+   * is removed first, so its contents and its permissions go with it. A file that replaces
+   * another is created with the permissions the other had, so a log somebody restricted
+   * is not widened by being rewritten.
    */
   #writeWhole(path: string, contents: string): void {
     const temp = `${path}.tmp`;
     try {
-      writeFileSync(temp, contents, "utf8");
+      rmSync(temp, { force: true });
+      writeFileSync(temp, contents, {
+        encoding: "utf8",
+        flag: "wx",
+        mode: existsSync(path)
+          ? statSync(path).mode % PERMISSION_SPAN
+          : undefined,
+      });
       renameSync(temp, path);
     } catch (error) {
       rmSync(temp, { force: true });
@@ -975,6 +987,8 @@ const LOG_SUFFIX = ".jsonl";
 const SNAPSHOT_SUFFIX = ".snapshot.json";
 /** The record separator, as a byte, because torn tails are found by byte offset. */
 const NEWLINE = 0x0a;
+/** A file mode modulo this is its permission bits: who may read, write and run it. */
+const PERMISSION_SPAN = 0o1000;
 
 export function fileStore(options?: FileStoreOptions): FileStore;
 export function fileStore(dir: string, options?: FileStoreOptions): FileStore;
