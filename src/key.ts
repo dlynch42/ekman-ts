@@ -13,8 +13,9 @@ export const KEY_SEPARATOR = ":";
 export const MAX_KEY_LENGTH = 512;
 
 const WHITESPACE = /\s/;
-const LAST_CONTROL = 0x1f;
+const LAST_C0_CONTROL = 0x1f;
 const DELETE = 0x7f;
+const LAST_C1_CONTROL = 0x9f;
 /**
  * A surrogate that is not half of a pair. With the `u` flag a pair is read as the one
  * character it encodes, so only an unpaired one is left to match.
@@ -22,14 +23,22 @@ const DELETE = 0x7f;
 const LONE_SURROGATE = /\p{Surrogate}/u;
 
 /** Whether the text can be encoded as UTF-8 without loss. */
-function isWellFormed(text: string): boolean {
+export function isWellFormed(text: string): boolean {
   return !LONE_SURROGATE.test(text);
 }
 
+/**
+ * Whether the text holds a control character: the ASCII ones, delete, and the second
+ * block that follows delete, which holds the likes of next-line and has no printed form
+ * either.
+ */
 function hasControlCharacter(text: string): boolean {
   for (let index = 0; index < text.length; index += 1) {
     const code = text.charCodeAt(index);
-    if (code <= LAST_CONTROL || code === DELETE) {
+    if (
+      code <= LAST_C0_CONTROL ||
+      (code >= DELETE && code <= LAST_C1_CONTROL)
+    ) {
       return true;
     }
   }

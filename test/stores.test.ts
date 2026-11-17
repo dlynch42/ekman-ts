@@ -41,11 +41,16 @@ const PLAIN_IN_A_NAME = /[a-z0-9_-]/;
 const UNKNOWN_OPTION = /has an unrecognized option/;
 const PERMISSION_BITS = /permission bits between 0 and 0o777/;
 const TWO_FILES = /holds two files for "orders:Abc"/;
+const TOO_LONG_TO_RENAME = /named under an earlier scheme.*309 bytes/;
 const OWNER_ONLY_FILE = 0o600;
 const OWNER_ONLY_DIR = 0o700;
 const GROUP_READABLE_FILE = 0o640;
 const GROUP_READABLE_DIR = 0o750;
 const PERMISSION_RANGE = 0o1000;
+
+/** The name a whole-file write goes through on its way to a path. */
+const temporaryOf = (path: string): string =>
+  `${path.slice(0, path.lastIndexOf("."))}.tmp`;
 
 /**
  * The name the file store gives a key or an entity, restated here so the tests pin the
@@ -473,21 +478,72 @@ describe("how the file store names its files", () => {
     const dir = freshDir();
     const store = fileStore(join(dir, "logs"));
 
+    // Named the way an earlier version would have named a log for `..:x`, and sitting
+    // where that version's directory for the entity `..` would be: above the store.
+    const outside = join(dir, "..%3Ax.jsonl");
+    writeFileSync(outside, `${JSON.stringify(created("..:x"))}\n`);
+
     await store.append("..:x", created("..:x"), EMPTY_SEQ);
     await store.append(".:x", created(".:x"), EMPTY_SEQ);
 
-    expect(readdirSync(dir)).toEqual(["logs"]);
+    expect(readdirSync(dir).sort()).toEqual(["..%3Ax.jsonl", "logs"]);
+    expect(readFileSync(outside, "utf8")).toBe(
+      `${JSON.stringify(created("..:x"))}\n`
+    );
     expect(readdirSync(join(dir, "logs")).sort()).toEqual(["%2E", "%2E%2E"]);
     expect(store.keys).toEqual(["..:x", ".:x"]);
   });
 
-  it("stores a key that is not well-formed text without failing on its name", async () => {
-    const store = fileStore(freshDir());
-    const key = "orders:\ud83d";
+  it("refuses a key that is not well-formed text, which would share a file with another", async () => {
+    const dir = freshDir();
+    const store = fileStore(dir);
+    const half = "orders:\ud83d";
+    const replacement = "orders:\ufffd";
+    await store.append(replacement, created(replacement), EMPTY_SEQ);
+
+    const refusals = await Promise.all(
+      [
+        store.append(half, created(half), EMPTY_SEQ),
+        store.load(half),
+        store.read(half),
+        store.forget(half),
+      ].map((attempt) =>
+        attempt.then(
+          () => "resolved",
+          (reason: EkmanError) => reason.code
+        )
+      )
+    );
+
+    expect(refusals).toEqual(new Array(4).fill("INVALID_KEY"));
+    expect((await store.load(replacement))?.seq).toBe(0);
+    expect(store.keys).toEqual([replacement]);
+  });
+
+  it("snapshots and compacts a key whose name is as long as a name may be", async () => {
+    const dir = freshDir();
+    const store = fileStore(dir, { retention: { perLogBytes: 64 } });
+    const key = `orders:${"a".repeat(231)}`;
+    expect(nameOf(key)).toHaveLength(240);
 
     await store.append(key, created(key), EMPTY_SEQ);
+    await store.snapshot(key, {
+      key,
+      entity: "orders",
+      state: "a",
+      values: {},
+      seq: 0,
+      at: 0,
+      enteredAt: 0,
+    });
+    await store.append(key, { ...created(key), from: "a", seq: 1 }, 0);
 
-    expect((await store.load(key))?.seq).toBe(0);
+    expect(store.lastHousekeepingError).toBeUndefined();
+    expect((await store.load(key))?.snapshot?.seq).toBe(1);
+    expect(readdirSync(join(dir, "orders")).sort()).toEqual([
+      `${nameOf(key)}.jsonl`,
+      `${nameOf(key)}.snapshot.json`,
+    ]);
   });
 
   it("refuses a key whose name would not fit in a filename", async () => {
@@ -627,6 +683,24 @@ describe("how the file store names its files", () => {
       // duplicate is gone.
       rmSync(earlier);
       expect((await store.load("orders:Abc"))?.seq).toBe(0);
+    });
+
+    it("refuses an entity's directory over an earlier file whose key no longer fits in a name", async () => {
+      const dir = freshDir();
+      const long = `orders:${"A".repeat(100)}`;
+      const earlier = writeEarlier(dir, long);
+      const store = fileStore(dir);
+
+      const error = await store.load("orders:1").catch((err) => err);
+
+      expect(error.code).toBe("STORE_UNAVAILABLE");
+      expect(error.key).toBe(long);
+      expect(error.message).toMatch(TOO_LONG_TO_RENAME);
+      expect(error.message).not.toContain(dir);
+      expect(existsSync(earlier)).toBe(true);
+
+      rmSync(earlier);
+      expect(await store.load("orders:1")).toBeUndefined();
     });
 
     it("leaves alone a file whose home is the same path in another case", async () => {
@@ -1114,7 +1188,7 @@ describe("retention", () => {
 
       // A crash while the snapshot's temporary file was half written: the name is taken
       // and what is under it is not a snapshot.
-      writeFileSync(`${snapshot}.tmp`, '{"key":"orders:1","sta');
+      writeFileSync(temporaryOf(snapshot), '{"key":"orders:1","sta');
       expect(await reopened()).toEqual({
         state: before,
         kinds: [...new Array(6).fill("transition"), "rejected"],
@@ -1123,14 +1197,14 @@ describe("retention", () => {
 
       // The snapshot is replaced and then the log cannot be: a directory is in the way of
       // its temporary name. This is the state a crash between the two renames leaves.
-      mkdirSync(`${log}.tmp`);
+      mkdirSync(temporaryOf(log));
       const failure = await store.compact().then(
         () => undefined,
         (error: EkmanError) => error
       );
       expect(failure?.code).toBe("STORE_UNAVAILABLE");
       expect(JSON.parse(readFileSync(snapshot, "utf8")).seq).toBe(5);
-      expect(existsSync(`${snapshot}.tmp`)).toBe(false);
+      expect(existsSync(temporaryOf(snapshot))).toBe(false);
       expect(await reopened()).toEqual({
         state: before,
         kinds: [...new Array(6).fill("transition"), "rejected"],
@@ -1138,7 +1212,7 @@ describe("retention", () => {
       });
 
       // With the way clear the same compaction finishes, and the refusal is still there.
-      rmdirSync(`${log}.tmp`);
+      rmdirSync(temporaryOf(log));
       expect((await store.compact()).logs).toBe(1);
       expect(await reopened()).toEqual({
         state: before,
@@ -1165,8 +1239,8 @@ describe("retention", () => {
         chmodSync(log, 0o600);
         chmodSync(snapshot, 0o600);
         // Left by a crash, and readable by everyone.
-        writeFileSync(`${snapshot}.tmp`, "{}", { mode: 0o644 });
-        chmodSync(`${snapshot}.tmp`, 0o644);
+        writeFileSync(temporaryOf(snapshot), "{}", { mode: 0o644 });
+        chmodSync(temporaryOf(snapshot), 0o644);
 
         expect((await store.compact()).logs).toBe(1);
 

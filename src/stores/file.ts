@@ -15,7 +15,7 @@ import { dirname, join, resolve } from "node:path";
 import { assertKnownKeys } from "../config";
 import { EkmanError, isEkmanError } from "../errors";
 import type { EkmanEvent } from "../events";
-import { KEY_SEPARATOR } from "../key";
+import { isWellFormed, KEY_SEPARATOR } from "../key";
 import type {
   LoadResult,
   ScanCriteria,
@@ -707,12 +707,15 @@ export class FileStore implements Store {
    * that replaced a whole one would be worse than no snapshot at all. Rename is atomic
    * within a filesystem.
    *
+   * The temporary name is the destination's with its last extension swapped, not added
+   * to, so it fits in a path component whenever the destination does.
+   *
    * The temporary file is always created here and never reused. One a crash left behind
    * is removed first, so its contents and its permissions go with it, and what replaces
    * the destination always has the configured mode.
    */
   #writeWhole(path: string, contents: string): void {
-    const temp = `${path}.tmp`;
+    const temp = `${path.slice(0, path.lastIndexOf("."))}${TEMPORARY_SUFFIX}`;
     try {
       rmSync(temp, { force: true });
       writeFileSync(temp, contents, {
@@ -1057,11 +1060,17 @@ export class FileStore implements Store {
    * case the current name of one entity can open a directory an earlier version made for
    * another, so files are placed by what their own names decode to, never by which
    * directory they were found in.
+   *
+   * The earlier scheme left `.` unescaped, so the earlier name of an entity called `..` is
+   * the directory above the store. That one is never looked in.
    */
   #adopt(entity: string): string {
     const current = encodeName(entity);
     this.#adoptDirectory(current);
-    this.#adoptDirectory(earlierName(entity));
+    const earlier = earlierName(entity);
+    if (!DIRECTORY_REFERENCES.has(earlier)) {
+      this.#adoptDirectory(earlier);
+    }
     return current;
   }
 
@@ -1094,6 +1103,10 @@ export class FileStore implements Store {
    * A file already in place, and a file the store did not name, are left alone. So is one
    * whose destination is the same path in another case, which is the same file wherever
    * that can happen.
+   *
+   * A file whose key has no name short enough under the current scheme is refused out
+   * loud. Leaving it where it is and carrying on would hide an instance, and where case is
+   * ignored its old name is one another key's current name can open.
    */
   #rehome(directory: string, file: string): boolean {
     const suffix = [SNAPSHOT_SUFFIX, LOG_SUFFIX].find((ending) =>
@@ -1107,11 +1120,23 @@ export class FileStore implements Store {
       return false;
     }
 
+    const name = encodeName(key);
     const home = encodeName(entityOf(key));
     const from = join(directory, file);
-    const to = join(home, `${encodeName(key)}${suffix}`);
+    const to = join(home, `${name}${suffix}`);
     if (from.toLowerCase() === to.toLowerCase()) {
       return false;
+    }
+
+    if (name.length > MAX_NAME_BYTES) {
+      throw new EkmanError(
+        "STORE_UNAVAILABLE",
+        `the ${this.name} store holds a file for ${JSON.stringify(key)} named under an earlier ` +
+          `scheme, and its name under the current one is ${name.length} bytes where the limit ` +
+          `is ${MAX_NAME_BYTES}. The file was left as it is. Move it out of the store to go on ` +
+          "without that key.",
+        { key }
+      );
     }
 
     if (existsSync(join(this.dir, to))) {
@@ -1230,12 +1255,23 @@ export class FileStore implements Store {
    * reads.
    *
    * A name has to fit in one path component with its suffix, so a key whose name does not
-   * is refused, and that is `INVALID_KEY` because no retry can make it fit.
+   * is refused, and that is `INVALID_KEY` because no retry can make it fit. So is a key
+   * that is not well-formed text: half of a surrogate pair is written as the replacement
+   * character, and two such keys would share one file.
    */
   #pathsOf(key: string): KeyPaths {
     const known = this.#paths.get(key);
     if (known !== undefined) {
       return known;
+    }
+
+    if (!isWellFormed(key)) {
+      throw new EkmanError(
+        "INVALID_KEY",
+        `the ${this.name} store names a file after each key, and this key holds half of a ` +
+          "surrogate pair, which has no bytes of its own to be named by.",
+        { key }
+      );
     }
 
     const name = encodeName(key);
@@ -1279,6 +1315,9 @@ interface KeyPaths {
  * path component is limited to 255 on the filesystems this runs on.
  */
 const MAX_NAME_BYTES = 240;
+const TEMPORARY_SUFFIX = ".tmp";
+/** Names that are a path to a directory and never the name of one inside the store. */
+const DIRECTORY_REFERENCES: ReadonlySet<string> = new Set([".", ".."]);
 const LOGS_DIR_NAME = "logs";
 const LOG_SUFFIX = ".jsonl";
 const SNAPSHOT_SUFFIX = ".snapshot.json";

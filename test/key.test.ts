@@ -59,6 +59,8 @@ describe("parseKey", () => {
     ["a control character", "orders:a\u0001b"],
     ["a null byte", "orders:a\u0000"],
     ["a delete character", "orders:a\u007fb"],
+    ["a next-line character", "orders:a\u0085b"],
+    ["a control sequence introducer", "orders:a\u009bb"],
     ["a high surrogate with nothing after it", "orders:a\ud83d"],
     ["a high surrogate followed by an ordinary character", "orders:\ud83db"],
     ["a low surrogate on its own", "orders:\ude00b"],

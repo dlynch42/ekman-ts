@@ -85,12 +85,15 @@ Versions before this escaped less, leaving uppercase letters and `.` as they wer
 that way are renamed the first time the store uses their entity's directory, with no step for
 you to run. If a key has a file under both schemes, which takes moving between versions and
 back to produce, the store refuses that entity's directory with `STORE_UNAVAILABLE` and changes
-neither file.
+neither file. It refuses the same way, naming the key, when an earlier file belongs to a key
+whose name under the current scheme is too long to be a file name. Move that file out of the
+store to carry on without the key.
 
 A name has to fit in one path component, so the file store refuses a key whose escaped name is
 longer than 240 bytes with `INVALID_KEY`. A key of lowercase letters and digits reaches that at
 240 characters; each uppercase letter, `:` or `.` counts as three, and other characters as three
-or more.
+or more. A store used directly also refuses a key holding half of a surrogate pair, which the
+runtime never lets through.
 
 ### Permissions
 
