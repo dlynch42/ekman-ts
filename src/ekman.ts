@@ -420,6 +420,14 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    */
   async query(criteria: QueryCriteria): Promise<QueryResult> {
     this.#definitionFor(criteria.entity);
+    const { limit } = criteria;
+    if (limit !== undefined && !(Number.isInteger(limit) && limit >= 0)) {
+      throw new EkmanError(
+        "INVALID_CONFIG",
+        `a query's limit must be a non-negative integer, received ${JSON.stringify(limit)}. ` +
+          "Omit it to ask for every match."
+      );
+    }
     const at = this.#now();
     const olderThanMs =
       criteria.olderThan === undefined
@@ -454,16 +462,17 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
 
     // Applied after the union, so a limit cannot silently prefer resident instances over
     // stored ones or the other way round.
-    const ordered = [...matches.values()].sort(byAgeThenKey);
-    const limited =
-      criteria.limit === undefined ? ordered : ordered.slice(0, criteria.limit);
+    const truncated = limit !== undefined && limit < matches.size;
+    const instances = truncated
+      ? oldest(matches.values(), limit)
+      : [...matches.values()].sort(byAgeThenKey);
 
-    if (limited.length < ordered.length) {
+    if (truncated) {
       reasons.add("limit-reached");
     }
 
     return Object.freeze({
-      instances: Object.freeze(limited),
+      instances: Object.freeze(instances),
       complete: reasons.size === 0,
       reasons: Object.freeze([...reasons]),
       sources: Object.freeze(sources),
@@ -1326,6 +1335,13 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    *
    * Resident wins because it is the more current of the two: the store lags by whatever is
    * queued behind the last commit, and an instance in memory is by definition up to date.
+   * The store is told which keys those are, so it does not load what would be discarded.
+   * Only keys that matched are named. A resident instance that did not match is still
+   * asked about, because its stored row is the answer when another writer has moved it.
+   *
+   * The caller's limit is not passed down. A store truncates in key order and the answer
+   * is ordered by age, so a store that stopped early could drop a row older than every one
+   * it returned.
    */
   async #scanInto(
     matches: Map<string, QueryMatch>,
@@ -1340,6 +1356,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       now: at,
       ...(criteria.state === undefined ? {} : { state: criteria.state }),
       ...(olderThanMs === undefined ? {} : { olderThanMs }),
+      skip: new Set(matches.keys()),
     });
 
     if (!result.complete) {
@@ -1522,9 +1539,51 @@ function partiality(
 /**
  * Oldest first, which is the order the question is asked in: "what has been stuck longest".
  * Ties break on the key so a limited answer is the same answer twice.
+ *
+ * Keys are compared as plain strings and not by locale, so the order is the same on every
+ * machine. Two matches never share a key, so there is no equal case.
  */
 function byAgeThenKey(a: QueryMatch, b: QueryMatch): number {
-  return b.ageMs - a.ageMs || a.key.localeCompare(b.key);
+  if (a.ageMs !== b.ageMs) {
+    return b.ageMs - a.ageMs;
+  }
+  return a.key < b.key ? -1 : 1;
+}
+
+/**
+ * The first `limit` matches in `byAgeThenKey` order, without sorting the rest.
+ *
+ * A short sorted list is kept and each match is placed into it by binary search, or passed
+ * over when it would land past the end. A dashboard asking for ten of a hundred thousand
+ * pays for the ten.
+ */
+function oldest(matches: Iterable<QueryMatch>, limit: number): QueryMatch[] {
+  const kept: QueryMatch[] = [];
+
+  for (const match of matches) {
+    const last = kept[limit - 1];
+    if (last !== undefined && byAgeThenKey(match, last) > 0) {
+      continue;
+    }
+
+    let low = 0;
+    let high = kept.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (byAgeThenKey(kept[middle] as QueryMatch, match) < 0) {
+        low = middle + 1;
+      } else {
+        high = middle;
+      }
+    }
+
+    kept.splice(low, 0, match);
+    if (kept.length > limit) {
+      kept.pop();
+    }
+  }
+
+  return kept;
 }
 
 /**

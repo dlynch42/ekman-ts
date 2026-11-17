@@ -30,6 +30,7 @@ import {
 } from "./lib";
 import { NAME as LONG_HISTORY, run as longHistory } from "./long-history";
 import { NAME as OVERFLOW, run as overflow } from "./overflow";
+import { NAME as QUERY, run as query } from "./query";
 
 const SUITES: ReadonlyMap<string, () => Promise<SuiteResult>> = new Map([
   [COMMIT_RATE, commitRate],
@@ -39,6 +40,7 @@ const SUITES: ReadonlyMap<string, () => Promise<SuiteResult>> = new Map([
   [FAN_OUT, fanOut],
   [LONG_HISTORY, longHistory],
   [OVERFLOW, overflow],
+  [QUERY, query],
 ]);
 
 async function main(): Promise<void> {

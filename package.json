@@ -57,6 +57,7 @@
     "bench:fan-out": "tsx benchmarks/run.ts fan-out",
     "bench:long-history": "tsx benchmarks/run.ts long-history",
     "bench:overflow": "tsx benchmarks/run.ts overflow",
+    "bench:query": "tsx benchmarks/run.ts query",
     "demo:ordering": "tsx demos/ordering.ts",
     "demo:recovery": "tsx demos/recovery.ts",
     "demo:no-going-backwards": "tsx demos/no-going-backwards.ts",

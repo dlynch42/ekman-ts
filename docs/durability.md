@@ -168,6 +168,12 @@ A trigger for an instance that is not resident reloads it transparently, from a 
 one exists and by replaying the stream where one does not. Your code cannot tell a resident
 instance from one that just came back off disk.
 
+The file store reads the snapshot first and then only the events after it. The first load of a
+key in a process parses its whole log, which is also when a torn last line is trimmed. After
+that it remembers where the events past the snapshot begin, so an instance that is evicted and
+reloaded over and over pays for what it committed since it was last loaded, not for its whole
+history.
+
 The reload is recorded in the per-key stream as a `restored` event, carrying the sequence it was
 restored *to* without advancing it. That is what makes a gap in a stream explicable rather than
 mysterious. It is deliberately not persisted; writing a restore back to the store would turn

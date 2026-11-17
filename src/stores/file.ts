@@ -434,6 +434,19 @@ export class FileStore implements Store {
   readonly #adopted = new Set<string>();
 
   /**
+   * Per key, where in its log a load can start reading.
+   *
+   * A load with a snapshot needs only the events after it, and everything before `offset`
+   * is known to be at or below `floor`. So a later load whose snapshot is at `floor` or
+   * past it reads from `offset` and parses what one residency added, not the whole log.
+   *
+   * `size` is the log's length as this store last knew it, kept in step with its own
+   * appends. A log of any other length was changed by something else, and the entry is
+   * dropped for a full read. Compaction, forgetting and a failed write drop it too.
+   */
+  readonly #tails = new Map<string, Tail>();
+
+  /**
    * Bytes per log, and their total.
    *
    * Seeded lazily rather than at construction, because summing the tree costs a walk of
@@ -551,6 +564,10 @@ export class FileStore implements Store {
     }
 
     this.#write(key, line);
+    const tail = this.#tails.get(key);
+    if (tail !== undefined) {
+      this.#tails.set(key, { ...tail, size: tail.size + width });
+    }
     if (event.type === "transition") {
       this.#seq.set(key, event.seq);
       this.#uncompactable.delete(key);
@@ -584,6 +601,7 @@ export class FileStore implements Store {
       appendFileSync(log, line, { encoding: "utf8", mode: this.#mode.file });
     } catch (error) {
       this.#seq.delete(key);
+      this.#tails.delete(key);
       throw error;
     }
   }
@@ -600,21 +618,31 @@ export class FileStore implements Store {
     });
   }
 
+  /**
+   * The snapshot, if there is one, and the events after it.
+   *
+   * The snapshot is read first, because it says how much of the log does not need reading.
+   * The sequence is worked out from what was just read and remembered, so the append that
+   * usually follows a load does not read either file again.
+   */
   load(key: string): Promise<LoadResult | undefined> {
     return this.#settle(`load ${JSON.stringify(key)}`, key, () => {
-      const events = this.#readLog(key);
       const snapshot = this.#readSnapshot(key);
+      const events =
+        snapshot === undefined
+          ? this.#readLog(key)
+          : this.#readAfter(key, snapshot.seq);
 
       if (events.length === 0 && snapshot === undefined) {
         return;
       }
 
-      const after =
-        snapshot === undefined
-          ? events
-          : events.filter((event) => event.seq > snapshot.seq);
-
-      return { snapshot, events: after, seq: this.#currentSeq(key) };
+      const seq = Math.max(
+        latestSeq(events),
+        snapshot === undefined ? EMPTY_SEQ : snapshot.seq
+      );
+      this.#seq.set(key, seq);
+      return { snapshot, events, seq };
     });
   }
 
@@ -659,6 +687,7 @@ export class FileStore implements Store {
       // would be appended at the old number and refused as a conflict.
       this.#seq.delete(key);
       this.#uncompactable.delete(key);
+      this.#tails.delete(key);
       this.#paths.delete(key);
 
       // Zero when nothing is counting yet, which makes this a no-op rather than a special
@@ -943,6 +972,7 @@ export class FileStore implements Store {
       .join("");
 
     this.#writeWhole(this.#logPath(key), rewritten);
+    this.#tails.delete(key);
     this.#resize(key, size, Buffer.byteLength(rewritten, "utf8"));
     return before - this.#total;
   }
@@ -1191,9 +1221,14 @@ export class FileStore implements Store {
    * as a short healthy one is the worse of the two failures.
    */
   #readLog(key: string): EkmanEvent[] {
+    return this.#eventsIn(key, this.#wholeLines(key));
+  }
+
+  /** The bytes of a key's log up to its last whole line, trimming a torn tail off the file. */
+  #wholeLines(key: string): Buffer {
     const path = this.#logPath(key);
     if (!existsSync(path)) {
-      return [];
+      return NO_BYTES;
     }
 
     // Byte offsets, not string indices: a multibyte character before the cut would put a
@@ -1205,19 +1240,99 @@ export class FileStore implements Store {
     // and leave a corrupt line that is no longer last, indistinguishable from real damage.
     if (lastNewline !== bytes.length - 1) {
       truncateSync(path, lastNewline + 1);
+      this.#tails.delete(key);
     }
 
-    return bytes
-      .toString("utf8", 0, lastNewline + 1)
-      .split("\n")
-      .filter((line) => line.length > 0)
-      .map((line, index) =>
-        this.#parse<EkmanEvent>(
+    return bytes.subarray(0, lastNewline + 1);
+  }
+
+  /**
+   * Parse whole lines into events, keeping those above `covered`.
+   *
+   * `startsAt`, when asked for, is given the index into the text of the first line kept,
+   * or the text's length when none was.
+   */
+  #eventsIn(
+    key: string,
+    lines: Buffer,
+    covered = Number.NEGATIVE_INFINITY,
+    startsAt?: (text: string, index: number) => void
+  ): EkmanEvent[] {
+    const text = lines.toString("utf8");
+    const events: EkmanEvent[] = [];
+    let index = 0;
+    let first = text.length;
+
+    for (const [number, line] of text.split("\n").entries()) {
+      if (line.length > 0) {
+        const event = this.#parse<EkmanEvent>(
           line,
           key,
-          `log for ${JSON.stringify(key)} is corrupt at line ${index + 1}`
-        )
-      );
+          `log for ${JSON.stringify(key)} is corrupt at line ${number + 1}`
+        );
+        if (event.seq > covered) {
+          first = Math.min(first, index);
+          events.push(event);
+        }
+      }
+      index += line.length + 1;
+    }
+
+    startsAt?.(text, first);
+    return events;
+  }
+
+  /**
+   * The events above a snapshot's sequence, reading no more of the log than it has to.
+   *
+   * The first load of a key in this process reads the whole log, which is also what trims
+   * a torn tail. It leaves behind where the events it kept begin, and later loads start
+   * there. Anything unexpected about the remembered tail, its length or its contents,
+   * sends the load back to the whole log, so a stale entry costs a read and never an
+   * answer.
+   */
+  #readAfter(key: string, covered: number): EkmanEvent[] {
+    return this.#readTail(key, covered) ?? this.#remember(key, covered, 0);
+  }
+
+  /** Events from the remembered offset, or undefined when the whole log has to be read. */
+  #readTail(key: string, covered: number): EkmanEvent[] | undefined {
+    const tail = this.#tails.get(key);
+    if (tail === undefined) {
+      return;
+    }
+
+    const path = this.#logPath(key);
+    const size = statSync(path, { throwIfNoEntry: false })?.size;
+    if (tail.floor > covered || size !== tail.size) {
+      this.#tails.delete(key);
+      return;
+    }
+    if (tail.offset === tail.size) {
+      return [];
+    }
+
+    try {
+      return this.#remember(key, covered, tail.offset);
+    } catch {
+      this.#tails.delete(key);
+    }
+  }
+
+  /**
+   * Read a key's log from a byte offset, keep the events above `covered`, and record
+   * where they begin for the next load.
+   */
+  #remember(key: string, covered: number, from: number): EkmanEvent[] {
+    const whole =
+      from === 0 ? this.#wholeLines(key) : readFileSync(this.#logPath(key));
+    return this.#eventsIn(key, whole.subarray(from), covered, (text, index) => {
+      this.#tails.set(key, {
+        floor: covered,
+        offset: from + Buffer.byteLength(text.slice(0, index), "utf8"),
+        size: whole.length,
+      });
+    });
   }
 
   #readSnapshot(key: string): StoreSnapshot | undefined {
@@ -1304,6 +1419,13 @@ export class FileStore implements Store {
   }
 }
 
+interface Tail {
+  /** Every event before `offset` has a sequence at or below this. */
+  readonly floor: number;
+  readonly offset: number;
+  readonly size: number;
+}
+
 interface KeyPaths {
   readonly dir: string;
   readonly log: string;
@@ -1323,6 +1445,7 @@ const LOG_SUFFIX = ".jsonl";
 const SNAPSHOT_SUFFIX = ".snapshot.json";
 /** The record separator, as a byte, because torn tails are found by byte offset. */
 const NEWLINE = 0x0a;
+const NO_BYTES = Buffer.alloc(0);
 
 export function fileStore(options?: FileStoreOptions): FileStore;
 export function fileStore(dir: string, options?: FileStoreOptions): FileStore;

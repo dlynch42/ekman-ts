@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import type { EkmanError } from "../src/errors";
 import type { EkmanEvent, TransitionEvent } from "../src/events";
 import {
@@ -26,7 +26,7 @@ import {
   replay,
   STORE_DIR_NAME,
 } from "../src/index";
-import type { LoadResult } from "../src/store";
+import type { LoadResult, Store, StoreSnapshot } from "../src/store";
 import type { FileStore, RetentionPolicy } from "../src/stores/file";
 import { fileStore } from "../src/stores/file";
 import { memoryStore } from "../src/stores/memory";
@@ -1566,6 +1566,261 @@ describe("a log whose last append did not finish", () => {
       expect(lines.map((line: string) => JSON.parse(line).seq)).toEqual([0, 1]);
     }
   );
+});
+
+describe("a scan told which keys to leave out", () => {
+  const stores: [string, () => Store][] = [
+    ["memory", () => memoryStore()],
+    ["file", () => fileStore(freshDir())],
+  ];
+
+  it.each(stores)("%s: does not load them", async (_name, make) => {
+    const store = make();
+    for (const key of ["orders:1", "orders:2", "orders:3"]) {
+      // biome-ignore lint/performance/noAwaitInLoops: three appends, in order
+      await store.append(
+        key,
+        {
+          type: "transition",
+          key,
+          from: null,
+          to: "a",
+          seq: 0,
+          at: 0,
+          cause: { type: "init", id: "t0" },
+          values: {},
+        },
+        EMPTY_SEQ
+      );
+    }
+
+    const load = vi.spyOn(store, "load");
+    const found = await store.scan({
+      entity: "orders",
+      now: 0,
+      skip: new Set(["orders:2"]),
+    });
+
+    expect(found.matches.map((match) => match.key)).toEqual([
+      "orders:1",
+      "orders:3",
+    ]);
+    expect(found.complete).toBe(true);
+    expect(load.mock.calls.map(([key]) => key)).toEqual([
+      "orders:1",
+      "orders:3",
+    ]);
+  });
+});
+
+describe("loading a key that has a snapshot", () => {
+  const KEY = "orders:1";
+
+  const event = (seq: number): EkmanEvent => ({
+    type: "transition",
+    key: KEY,
+    from: seq === 0 ? null : "a",
+    to: "a",
+    seq,
+    at: seq,
+    cause: { type: "tick", id: `t${seq}` },
+    // Multibyte on purpose: the place a load resumes from is a byte offset.
+    values: { n: seq, note: "héllo ✓" },
+  });
+
+  const snapshotAt = (seq: number): StoreSnapshot => ({
+    key: KEY,
+    entity: "orders",
+    state: "a",
+    values: { n: seq, note: "héllo ✓" },
+    seq,
+    at: seq,
+    enteredAt: 0,
+  });
+
+  /** A store holding events 0 to `last`, and a snapshot when asked for one. */
+  async function filled(
+    last: number,
+    snapshot?: number
+  ): Promise<{ dir: string; store: FileStore }> {
+    const dir = freshDir();
+    const store = fileStore(dir);
+    for (let seq = 0; seq <= last; seq += 1) {
+      // biome-ignore lint/performance/noAwaitInLoops: a log is written in order
+      await store.append(KEY, event(seq), seq - 1);
+    }
+    if (snapshot !== undefined) {
+      await store.snapshot(KEY, snapshotAt(snapshot));
+    }
+    return { dir, store };
+  }
+
+  /** Load, reporting how many documents were parsed to do it. */
+  async function parsedBy(
+    store: FileStore
+  ): Promise<{ loaded: LoadResult | undefined; parsed: number }> {
+    const parse = vi.spyOn(JSON, "parse");
+    try {
+      const loaded = await store.load(KEY);
+      return { loaded, parsed: parse.mock.calls.length };
+    } finally {
+      parse.mockRestore();
+    }
+  }
+
+  const seqs = (loaded: LoadResult | undefined): number[] =>
+    (loaded?.events ?? []).map((found) => found.seq);
+
+  it("returns the events after the snapshot", async () => {
+    const { store } = await filled(9, 4);
+
+    const loaded = await store.load(KEY);
+
+    expect(loaded?.snapshot?.seq).toBe(4);
+    expect(seqs(loaded)).toEqual([5, 6, 7, 8, 9]);
+    expect(loaded?.seq).toBe(9);
+  });
+
+  it("parses the whole log once, and after that only what the snapshot does not cover", async () => {
+    const { store } = await filled(9, 4);
+
+    const first = await parsedBy(store);
+    const second = await parsedBy(store);
+
+    // The snapshot is one document. Then ten lines the first time and five the second.
+    expect(first.parsed).toBe(11);
+    expect(second.parsed).toBe(6);
+    expect(second.loaded).toEqual(first.loaded);
+  });
+
+  it("reads none of the log when the snapshot covers all of it", async () => {
+    const { store } = await filled(9, 9);
+    await store.load(KEY);
+
+    const { loaded, parsed } = await parsedBy(store);
+
+    expect(parsed).toBe(1);
+    expect(loaded?.events).toEqual([]);
+    expect(loaded?.seq).toBe(9);
+  });
+
+  it("picks up its own appends, and stops reading them once a snapshot covers them", async () => {
+    const { store } = await filled(9, 9);
+    await store.load(KEY);
+
+    await store.append(KEY, event(10), 9);
+    const afterAppend = await parsedBy(store);
+    expect(seqs(afterAppend.loaded)).toEqual([10]);
+    expect(afterAppend.parsed).toBe(2);
+
+    await store.snapshot(KEY, snapshotAt(10));
+    // Read once more to learn the new snapshot covers it, then never again.
+    expect((await parsedBy(store)).parsed).toBe(2);
+    const settled = await parsedBy(store);
+    expect(settled.parsed).toBe(1);
+    expect(settled.loaded?.events).toEqual([]);
+    expect(settled.loaded?.seq).toBe(10);
+  });
+
+  it("reads the whole log again when another store has written to it", async () => {
+    const { dir, store } = await filled(9, 4);
+    await store.load(KEY);
+
+    await fileStore(dir).append(KEY, event(10), 9);
+
+    const loaded = await store.load(KEY);
+    expect(seqs(loaded)).toEqual([5, 6, 7, 8, 9, 10]);
+    expect(loaded?.seq).toBe(10);
+  });
+
+  it("leaves the next append knowing where the key is", async () => {
+    const { dir, store } = await filled(1);
+    await fileStore(dir).append(KEY, event(2), 1);
+
+    // This store last saw the key at 1. Loading is what tells it otherwise.
+    await store.load(KEY);
+
+    await expect(store.append(KEY, event(3), 2)).resolves.toBeUndefined();
+  });
+
+  it("reads the whole log again when the snapshot is older than the one it remembers", async () => {
+    const { dir, store } = await filled(9, 5);
+    await store.load(KEY);
+
+    writeFileSync(snapshotPathOf(dir, KEY), JSON.stringify(snapshotAt(2)));
+
+    expect(seqs(await store.load(KEY))).toEqual([3, 4, 5, 6, 7, 8, 9]);
+  });
+
+  it("reports damage in the part it would have skipped to, by its real line", async () => {
+    const { dir, store } = await filled(9, 4);
+    await store.load(KEY);
+
+    // The last line replaced by one of the same length, so the log's size says nothing.
+    const path = logPathOf(dir, KEY);
+    const lines = readFileSync(path, "utf8").split("\n");
+    const last = lines.at(-2) ?? "";
+    lines[lines.length - 2] = "x".repeat(Buffer.byteLength(last, "utf8"));
+    writeFileSync(path, lines.join("\n"));
+
+    const refusal = await store
+      .load(KEY)
+      .catch((error: unknown) => error as EkmanError);
+
+    expect(refusal).toMatchObject({ code: "STORE_UNAVAILABLE", key: KEY });
+    expect((refusal as EkmanError).message).toContain("corrupt at line 10");
+  });
+
+  it("answers from the snapshot alone when the log is gone", async () => {
+    const { dir, store } = await filled(9, 9);
+    await store.load(KEY);
+
+    rmSync(logPathOf(dir, KEY));
+
+    const loaded = await store.load(KEY);
+    expect(loaded?.snapshot?.seq).toBe(9);
+    expect(loaded?.events).toEqual([]);
+    expect(loaded?.seq).toBe(9);
+  });
+
+  it("starts over for a key that was forgotten and created again", async () => {
+    const { store } = await filled(9, 4);
+    await store.load(KEY);
+
+    await store.forget(KEY);
+    await store.append(KEY, event(0), EMPTY_SEQ);
+    await store.append(KEY, event(1), 0);
+    await store.snapshot(KEY, snapshotAt(0));
+
+    const loaded = await store.load(KEY);
+    expect(seqs(loaded)).toEqual([1]);
+    expect(loaded?.seq).toBe(1);
+  });
+
+  it("starts over after compaction rewrites the log", async () => {
+    const dir = freshDir();
+    const width = Buffer.byteLength(`${JSON.stringify(event(0))}\n`, "utf8");
+    const store = fileStore(dir, { retention: { perLogBytes: width * 4 } });
+    for (let seq = 0; seq <= 2; seq += 1) {
+      // biome-ignore lint/performance/noAwaitInLoops: a log is written in order
+      await store.append(KEY, event(seq), seq - 1);
+    }
+    await store.snapshot(KEY, snapshotAt(1));
+    expect(seqs(await store.load(KEY))).toEqual([2]);
+
+    // Past the limit on the fifth line, so the log is folded into a snapshot at 4.
+    await store.append(KEY, event(3), 2);
+    await store.append(KEY, event(4), 3);
+    await store.append(KEY, event(5), 4);
+
+    const loaded = await store.load(KEY);
+    expect(loaded?.snapshot?.seq).toBe(4);
+    expect(seqs(loaded)).toEqual([5]);
+    expect(replay(loaded as LoadResult)).toMatchObject({
+      seq: 5,
+      values: { n: 5 },
+    });
+  });
 });
 
 describe("a file store whose filesystem fails", () => {

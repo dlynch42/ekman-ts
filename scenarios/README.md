@@ -719,7 +719,8 @@ Queries run after everything has settled, each with the answer it must give.
 | `reasons` | Why not, asserted as a set. |
 
 Ordering is oldest-first, because that is the order the question is asked in, with ties
-broken on the key so a limited answer is the same answer twice.
+broken on the key so a limited answer is the same answer twice. Keys are compared as plain
+strings, never by locale.
 
 Time in state is measured from the last **move**. A values-only commit leaves the clock
 running, because the instance has not gone anywhere. This is the same measurement a

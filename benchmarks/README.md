@@ -8,7 +8,7 @@ npm run bench -- fan-out       one suite
 npm run bench -- --save        run, then record what ran as the new baseline
 ```
 
-Five suites. Four drive the runtime through its public API only, the same way the
+Eight suites. Seven drive the runtime through its public API only, the same way the
 conformance runner does, with synchronous handlers that do nothing, because the figures are
 meant to be what Ekman costs rather than what a handler costs.
 
@@ -19,6 +19,9 @@ meant to be what Ekman costs rather than what a handler costs.
 | `constraints` | The same workload under no constraints, a transition graph, guards, and invariants |
 | `overflow` | A burst larger than the inbox: how much load is shed, and how fast the answer comes back |
 | `edge-check` | The constraint check on its own, with no commit under it |
+| `eviction-churn` | Sends to new keys against a full memory budget, at two budget sizes |
+| `long-history` | One key, 100,000 commits: the last 20,000 against the first 20,000 |
+| `query` | 5,000 keys in a file store, half of them resident: milliseconds per query |
 
 `edge-check` is the exception: it calls the constraint checker directly rather than through
 a runtime. That is a deliberate cost, taken because the other suites cannot resolve a
@@ -106,11 +109,15 @@ leaving you to infer it: it reports the bound it can support and states that it 
 measure the check. That is what `edge-check` exists for, and why its figures are per-check
 rather than per-commit.
 
-**Most measure the runtime with no store configured.** Apart from `long-history` and
-`eviction-churn`, every suite builds `new Ekman({ entities })` and nothing else. Those two
-use the in-memory store, because what they measure only exists with one. Either way there is
-no durability, no network, and no fsync in any figure here. What they report is what Ekman
-adds to a handler, not what a system built on it will do.
+**Most measure the runtime with no store configured.** Apart from `long-history`,
+`eviction-churn` and `query`, every suite builds `new Ekman({ entities })` and nothing else.
+The first two use the in-memory store, because what they measure only exists with one, and
+there is no durability, no network, and no fsync in any of their figures. What they report
+is what Ekman adds to a handler, not what a system built on it will do.
+
+`query` is the exception. It uses the file store in a temporary directory, because the cost
+it measures is the reads a query makes, and its figures move with the disk and the
+filesystem under them as much as with the code.
 
 ## What each suite is telling you
 
@@ -154,6 +161,13 @@ first 20,000 and the last 20,000. The figure to read is the last window as a sha
 first. Near 100% means a commit costs the same however much history the key has behind it.
 The two rates on their own would each look fine in a runtime where the second was a fraction
 of the first. It uses three timed rounds rather than seven, since a round is the whole run.
+
+**`query`.** 5,000 keys of five events each in a file store, under a memory budget sized
+for half of them, so half are resident and half are behind a snapshot on disk. Two queries
+are timed: one for a state 50 instances are in, one for the ten oldest of everything. Both
+are dominated by opening files, one per stored instance the runtime could not answer from
+memory, so the figures say more about how many files a query opens than about how fast any
+of them is parsed. The suite checks the count each query returns.
 
 **`overflow`.** The shed rates are deterministic, which is why their spread is zero and why
 the suite marks them `neither` rather than claiming a direction. A larger inbox sheds less
