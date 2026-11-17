@@ -690,8 +690,10 @@ export class FileStore implements Store {
    * The descriptor a key's log is appended through, opening it if it is not open.
    *
    * Opened for append, so every write lands at the end of the file whatever else has
-   * happened to it. Using one moves it to the back of the queue, and opening one past the
-   * limit closes whichever has waited longest.
+   * happened to it. Using one moves it to the back of the queue, and opening one at the
+   * limit closes whichever has waited longest first. First, so the store never holds one
+   * descriptor more than its limit, and a process with none to spare can still open the
+   * log it needs.
    */
   #descriptor(key: string): number {
     const held = this.#open.get(key);
@@ -702,17 +704,17 @@ export class FileStore implements Store {
     }
 
     const { dir, log } = this.#pathsOf(key);
-    const descriptor = this.#inside(dir, () =>
-      openSync(log, "a", this.#mode.file)
-    );
-    this.#open.set(key, descriptor);
-
-    if (this.#open.size > this.#maxOpenLogs) {
+    if (this.#open.size >= this.#maxOpenLogs) {
       for (const coldest of this.#open.keys()) {
         this.#release(coldest);
         break;
       }
     }
+
+    const descriptor = this.#inside(dir, () =>
+      openSync(log, "a", this.#mode.file)
+    );
+    this.#open.set(key, descriptor);
     return descriptor;
   }
 
@@ -785,10 +787,17 @@ export class FileStore implements Store {
     this.#folding ??= setImmediate(() => this.#foldOversized()).unref();
   }
 
-  /** Compact one log, returning the failure if it could not be done. */
-  #fold(key: string): EkmanError | undefined {
+  /**
+   * Compact one log, returning the failure if it could not be done.
+   *
+   * What it gave back is added to `swept` when a sweep is the one asking.
+   */
+  #fold(key: string, swept?: Swept): EkmanError | undefined {
     try {
-      this.#compactLog(key, this.#bytes?.get(key) ?? 0);
+      const freed = this.#compactLog(key, this.#bytes?.get(key) ?? 0);
+      if (swept !== undefined) {
+        tally(swept, freed);
+      }
     } catch (error) {
       return toStoreError(
         error,
@@ -808,7 +817,7 @@ export class FileStore implements Store {
    * Returns the failure, if a log could not be compacted. With nothing queued it changes
    * nothing, so an earlier failure stays on record until a compaction succeeds.
    */
-  #foldOversized(): EkmanError | undefined {
+  #foldOversized(swept?: Swept): EkmanError | undefined {
     clearImmediate(this.#folding);
     this.#folding = undefined;
     if (this.#oversized.size === 0) {
@@ -818,7 +827,7 @@ export class FileStore implements Store {
     let failure: EkmanError | undefined;
     for (const key of this.#oversized) {
       this.#oversized.delete(key);
-      failure = this.#fold(key) ?? failure;
+      failure = this.#fold(key, swept) ?? failure;
     }
     this.#compactionError = failure;
     return failure;
@@ -1001,45 +1010,40 @@ export class FileStore implements Store {
   }
 
   #sweep(): StoreCompaction {
+    // Seeded first, and even when there is nothing to do. `withinBudget` is then answered
+    // from the real numbers and not from an empty table that would read as comfortably
+    // inside a budget the store has never measured itself against, and what the folds
+    // below give back can be measured at all.
+    const bytes = this.#seeded();
+    const swept: Swept = { logs: 0, reclaimed: 0 };
+
     // Whatever is already past its own limit goes first, so the budget is measured against
-    // what is left after the compaction this store owed anyway.
-    const failure = this.#foldOversized();
+    // what is left after the compaction this store owed anyway. It is still this sweep
+    // that did the work, so it is counted in what the sweep reports.
+    const failure = this.#foldOversized(swept);
     if (failure !== undefined) {
       throw failure;
     }
 
-    // Seeded even when there is nothing to do, so `withinBudget` is answered from the real
-    // numbers rather than from an empty table that would read as comfortably inside a
-    // budget the store has never measured itself against.
-    const bytes = this.#seeded();
-
     if (this.#retention.policy !== "compact") {
-      return this.#compaction(0, 0);
+      return this.#compaction(swept);
     }
 
     // Both key and size taken from one snapshot of the table, because compacting rewrites
     // entries as it goes and re-reading a size mid-walk would measure the wrong log.
     const largestFirst = [...bytes.entries()].sort(([, a], [, b]) => b - a);
 
-    let logs = 0;
-    let reclaimed = 0;
-
     for (const [key, size] of largestFirst) {
       if (this.#total <= this.#retention.totalBytes) {
         break;
       }
-
-      const freed = this.#compactLog(key, size);
-      if (freed > 0) {
-        logs += 1;
-        reclaimed += freed;
-      }
+      tally(swept, this.#compactLog(key, size));
     }
 
-    return this.#compaction(logs, reclaimed);
+    return this.#compaction(swept);
   }
 
-  #compaction(logs: number, reclaimed: number): StoreCompaction {
+  #compaction({ logs, reclaimed }: Swept): StoreCompaction {
     return Object.freeze({
       logs,
       reclaimed,
@@ -1200,19 +1204,21 @@ export class FileStore implements Store {
       .join("");
 
     // Closed first: the rewrite puts a new file under the name, and a descriptor held
-    // open would go on appending to the old one. Opened again straight away if it was
-    // open, so the cost of that lands here and not on the next commit.
+    // open would go on appending to the old one. Opened again if it was open, so the cost
+    // of that lands here and not on the next commit, and last, so a log that cannot be
+    // opened again has already had its new size written down.
     const wasOpen = this.#open.has(key);
     this.#release(key);
     this.#writeWhole(this.#logPath(key), rewritten);
-    if (wasOpen) {
-      this.#descriptor(key);
-    }
     this.#tails.delete(key);
     const length = Buffer.byteLength(rewritten, "utf8");
     this.#logBytes.set(key, length);
     this.#resize(key, size, length);
-    return before - this.#total;
+    const freed = before - this.#total;
+    if (wasOpen) {
+      this.#descriptor(key);
+    }
+    return freed;
   }
 
   /** Note that a log went from one size to another, keeping the total in step. */
@@ -1675,6 +1681,20 @@ interface KeyPaths {
  * The longest encoded name, in bytes. The longest suffix added to it is 14 bytes, and a
  * path component is limited to 255 on the filesystems this runs on.
  */
+/** What a sweep has done so far: how many logs it folded, and the bytes that gave back. */
+interface Swept {
+  logs: number;
+  reclaimed: number;
+}
+
+/** Count one fold, if it gave anything back. */
+function tally(swept: Swept, freed: number): void {
+  if (freed > 0) {
+    swept.logs += 1;
+    swept.reclaimed += freed;
+  }
+}
+
 const MAX_NAME_BYTES = 240;
 const TEMPORARY_SUFFIX = ".tmp";
 /** Names that are a path to a directory and never the name of one inside the store. */

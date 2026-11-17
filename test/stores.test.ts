@@ -1896,6 +1896,33 @@ describe("the file store's commit path", () => {
       await store.close();
     });
 
+    it.skipIf(CANNOT_DENY)(
+      "makes room before it opens a log, so it never needs one descriptor past its limit",
+      async () => {
+        const dir = freshDir();
+        const store = fileStore(dir, { maxOpenLogs: 1 });
+        await store.append("orders:a", event("orders:a", 0), EMPTY_SEQ);
+        await store.append("orders:b", event("orders:b", 0), EMPTY_SEQ);
+        expect(store.openLogs).toBe(1);
+
+        chmodSync(logPathOf(dir, "orders:a"), 0o400);
+        try {
+          const refused = await store
+            .append("orders:a", event("orders:a", 1), 0)
+            .catch((error: EkmanError) => error.code);
+          expect(refused).toBe("STORE_UNAVAILABLE");
+          // `b` had already been closed when opening `a` was tried and failed.
+          expect(store.openLogs).toBe(0);
+        } finally {
+          chmodSync(logPathOf(dir, "orders:a"), 0o600);
+        }
+
+        await store.append("orders:a", event("orders:a", 1), 0);
+        expect(lineCount(dir, "orders:a")).toBe(2);
+        await store.close();
+      }
+    );
+
     it.each([0, -1, 1.5, "8"])("refuses a maxOpenLogs of %s", (maxOpenLogs) => {
       expect(() =>
         fileStore(freshDir(), { maxOpenLogs: maxOpenLogs as number })
@@ -2026,16 +2053,45 @@ describe("the file store's commit path", () => {
       expect(lineCount(dir, "orders:1")).toBe(0);
     });
 
-    it("is compacted first by a sweep, whatever the policy", async () => {
+    it("is compacted first by a sweep, whatever the policy, and counted in what it reports", async () => {
       const dir = freshDir();
       const store = fileStore(dir, { retention: { perLogBytes: LIMIT } });
       await append(store, 0, 4);
+      const before = onDisk(dir, "orders:1");
 
-      await store.compact();
+      const swept = await store.compact();
 
       expect(existsSync(snapshotPathOf(dir, "orders:1"))).toBe(true);
+      expect(swept.logs).toBe(1);
+      expect(swept.reclaimed).toBe(before - onDisk(dir, "orders:1"));
+      expect(swept.reclaimed).toBeGreaterThan(0);
       await store.close();
     });
+
+    it.skipIf(CANNOT_DENY)(
+      "has the new size written down even when the compacted log cannot be opened again",
+      async () => {
+        const dir = freshDir();
+        const first = fileStore(dir);
+        await first.append("orders:1", event("orders:1", 0), EMPTY_SEQ);
+        await first.close();
+        // The log exists and can be written to. What replaces it will be read-only.
+        const store = fileStore(dir, {
+          mode: { file: 0o400 },
+          retention: { perLogBytes: LIMIT },
+        });
+        await append(store, 1, 4);
+        expect(store.usage.bytes).toBe(onDisk(dir, "orders:1"));
+
+        await turn();
+
+        expect(store.lastHousekeepingError?.code).toBe("STORE_UNAVAILABLE");
+        expect(lineCount(dir, "orders:1")).toBe(0);
+        expect(store.usage.bytes).toBe(onDisk(dir, "orders:1"));
+        expect(store.openLogs).toBe(0);
+        await store.close();
+      }
+    );
 
     it("is not queued again after being forgotten", async () => {
       const dir = freshDir();
