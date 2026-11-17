@@ -37,7 +37,9 @@ keeps of a key's history depends on whether anything else holds it:
 
 - **With a store**, the stream lives in the store and `history()` reads it from there. An
   instance keeps none of its own transitions in memory, so a key that commits for the life of
-  a process costs the same resident memory on its millionth commit as on its first.
+  a process costs the same resident memory on its millionth commit as on its first. A
+  `"memory"` layer in a store stack is the exception to watch: it is a store, so it keeps
+  every event it is sent, and the budget does not count it.
 - **With no store**, the runtime's copy is the only one, so each instance keeps its most recent
   1,000 events and drops older ones. `history()` then reports `history-capped` beside
   `no-durable-store`. Current state, values and sequence are never affected. If you need the

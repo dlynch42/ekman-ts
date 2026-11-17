@@ -888,6 +888,11 @@ export class FileStore implements Store {
 
       const { dir, snapshot: path } = this.#pathsOf(key);
       this.#inside(dir, () => this.#writeWhole(path, JSON.stringify(snapshot)));
+      // A snapshot past the last event in the log moves the key on, so a sequence
+      // remembered from before it is read again.
+      if ((this.#seq.get(key) ?? snapshot.seq) < snapshot.seq) {
+        this.#seq.delete(key);
+      }
       this.#accountSnapshot(key);
     });
   }

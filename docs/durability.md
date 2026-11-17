@@ -35,9 +35,46 @@ store: ["memory", "file"],
 ```
 
 Layers are listed fastest first. **Exactly one layer is the commit authority** and owns the
-truth: the last durable one. The rest are caches, written after the fact, and a cache that fails
-to write is reported through [telemetry](./telemetry.md) as `store.cacheFailed` without failing
-the commit.
+truth: the last durable one. The rest are caches.
+
+A commit goes to the authority, and resolves there. The caches are written afterwards, in order
+per key, and no commit, `history()` or `close()` ever waits for one.
+
+When an instance that is not resident is loaded, the caches are asked first, fastest first, and
+the first that holds the key answers. If none does, the authority answers and the caches are
+filled from it, so the next load of that key is a cache's. This is the one read a cache serves.
+`history()` and `query()` always read the authority, because a cache holds the state of a key
+and not necessarily its whole stream.
+
+A cache is only read while it holds exactly what the authority accepted for a key, or nothing:
+
+- A cache write that fails is reported through [telemetry](./telemetry.md) as
+  `store.cacheFailed`, without failing the commit, and the key is deleted from that cache. Its
+  next read is a miss, and the cache is filled again from the authority.
+- If the key cannot be deleted either, that cache is neither read nor written for that key again,
+  until a `forget` of the key succeeds there.
+- A cache that fails to answer is treated as a miss and reported the same way.
+- A cache that starts empty, as a memory layer does after every restart, is filled as instances
+  are loaded. Nothing fails while it catches up.
+
+Two things follow from a cache being read first:
+
+- **A cache layer has to be able to stay honest.** One that does not declare a conditional
+  append and `forget` is refused at startup with `INVALID_CONFIG`.
+- **Nothing else may write the authority.** A cache cannot know what another process committed,
+  so a stack with a cache layer is refused under `coordination: "multi"`. If something outside
+  the runtime does move a key, the cache can answer one load with the older state. The commit
+  built on it is refused by the authority with `STORE_CONFLICT`, the key is cleared from the
+  caches, and the next trigger loads from the authority.
+
+A `"memory"` cache keeps every event it is sent, for every key, for the life of the process, and
+none of that is counted by the [memory budget](./memory.md). It trades memory for skipping a disk
+read when an evicted instance comes back. If the budget is the point, leave it out and use
+`store: "file"` alone.
+
+An `instance.restored` event says what the layer that answered held: `from: "snapshot"` when a
+cache was filled from the authority and has had few events since, whatever the authority's own
+log looks like.
 
 ## Capabilities, and configurations that are refused
 

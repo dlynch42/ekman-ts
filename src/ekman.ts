@@ -1,5 +1,6 @@
 import type { AuditSink } from "./audit";
 import { assertAuditSink, deliverTo } from "./audit";
+import { Caches } from "./caches";
 import type { CommittedRecord, RuntimeDeps } from "./config";
 import { assertKnownKeys, resolveInboxConfig } from "./config";
 import type { CompiledTemporal } from "./constraints";
@@ -82,6 +83,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   /** Where every resident instance sits. Read by temporal constraints and by queries. */
   readonly #temporal = new TemporalIndex();
   readonly #stack: ResolvedStack;
+  readonly #caches: Caches;
   readonly #memory: ResolvedMemoryConfig;
   readonly #audit: readonly AuditSink[];
   /** What is resident and what it costs, in least-recently-used order. */
@@ -127,12 +129,27 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       assertAuditSink(sink);
     }
 
+    this.#caches = new Caches(this.#stack.caches, {
+      now: () => this.#now(),
+      failed: (failure) =>
+        this.#emit({
+          type: "store.cacheFailed",
+          key: failure.key,
+          entity: parseKey(failure.key).entity,
+          store: failure.store,
+          error: failure.error,
+          seq: failure.seq,
+          at: telemetryNow(),
+        }),
+    });
+
     this.#runtime = {
       now: () => this.#now(),
       telemetry: config.telemetry,
       onUnhandled: (error) => this.#onUnhandled(error),
       inbox: resolveInboxConfig(config.inbox),
       stack: this.#stack,
+      caches: this.#caches,
       memory: this.#memory,
       audit: (event) => this.#fanOut(event),
       committed: (record, moved) => this.#committed(record, moved),
@@ -288,7 +305,8 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * The delete itself waits for the record's queued writes, because a refusal written
    * without being awaited would otherwise land afterwards and recreate the stream. It then
    * clears every layer, not only the authority: a cache still holding the stream would
-   * serve it back on the next load.
+   * serve it back on the next load. A cache that cannot be cleared fails the call, and is
+   * not read or written for the key again until a later forget of it succeeds.
    */
   async forget(key: string): Promise<void> {
     if (this.#closing.signal.aborted) {
@@ -332,9 +350,10 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       async () => {
         await instance?.flushed();
 
-        await allSettledOrThrow(
-          this.#stack.layers.map((layer) => layer.forget?.(parsed))
-        );
+        await allSettledOrThrow([
+          this.#caches.forget(parsed),
+          this.#stack.authority?.forget?.(parsed),
+        ]);
       }
     );
 
@@ -1044,8 +1063,6 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     for (const sink of this.#audit) {
       setImmediate(() => this.#deliver(sink, event));
     }
-
-    this.#writeCaches(event);
   }
 
   #deliver(sink: AuditSink, event: EkmanEvent): void {
@@ -1064,29 +1081,6 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
         }
       })
       .catch(this.#onUnhandled);
-  }
-
-  /**
-   * Mirror an event into the cache layers.
-   *
-   * After the authority, never awaited, and a failure is reported rather than raised. The
-   * commit is already durable by this point, so a stale cache is a performance problem.
-   * Treating it as a commit failure would turn it into a correctness one.
-   */
-  #writeCaches(event: EkmanEvent): void {
-    for (const cache of this.#stack.caches) {
-      cache.append(event.key, event, previousSeq(event)).catch((error) => {
-        this.#emit({
-          type: "store.cacheFailed",
-          key: event.key,
-          entity: parseKey(event.key).entity,
-          store: cache.name,
-          error: (error as Error).message,
-          seq: event.seq,
-          at: telemetryNow(),
-        });
-      });
-    }
   }
 
   #startSweeping(sweepMs: number | undefined): void {
@@ -1680,15 +1674,4 @@ function noop(): void {
 
 function defaultOnUnhandled(error: unknown): void {
   console.error("[ekman] unhandled failure from post()", error);
-}
-
-/**
- * What a cache append is conditional on.
- *
- * A commit is conditional on the sequence before it, so a cache that has fallen behind
- * refuses the write rather than accepting a hole. Anything else carries the current
- * sequence, because it does not advance one.
- */
-function previousSeq(event: EkmanEvent): number {
-  return event.type === "transition" ? event.seq - 1 : event.seq;
 }

@@ -75,12 +75,12 @@ export class MemoryStore implements Store {
   }
 
   load(key: string): Promise<LoadResult | undefined> {
-    const events = this.#events.get(key);
-    if (events === undefined) {
+    const snapshot = this.#snapshots.get(key);
+    const events = this.#events.get(key) ?? NO_EVENTS;
+    if (events.length === 0 && snapshot === undefined) {
       return Promise.resolve(undefined);
     }
 
-    const snapshot = this.#snapshots.get(key);
     // Everything after the snapshot. A snapshot at seq N means every commit up to N is
     // already folded into it, so replaying them again would be work with no effect.
     const after =
@@ -106,6 +106,12 @@ export class MemoryStore implements Store {
     if (existing === undefined || existing.seq < snapshot.seq) {
       this.#snapshots.set(key, snapshot);
     }
+    // A snapshot past the last event this store holds says the key is further on than its
+    // stream shows, which is how a store that was handed a state and not a history is told
+    // where the next append goes.
+    if (snapshot.seq > (this.#seq.get(key) ?? EMPTY_SEQ)) {
+      this.#seq.set(key, snapshot.seq);
+    }
     return Promise.resolve();
   }
 
@@ -122,13 +128,14 @@ export class MemoryStore implements Store {
     return Promise.resolve();
   }
 
-  /** Keys this store holds anything for. */
+  /** Keys this store holds anything for, whether a stream, a snapshot or both. */
   get keys(): readonly string[] {
-    return [...this.#events.keys()];
+    return [...new Set([...this.#events.keys(), ...this.#snapshots.keys()])];
   }
 }
 
 const OPTION_KEYS = ["name", "authority"] as const;
+const NO_EVENTS: readonly EkmanEvent[] = Object.freeze([]);
 
 export function memoryStore(
   options: { name?: string; authority?: boolean } = {}

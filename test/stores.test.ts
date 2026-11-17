@@ -1584,6 +1584,41 @@ describe("a log whose last append did not finish", () => {
   );
 });
 
+describe("the memory store's key list", () => {
+  it("includes a key it holds only a snapshot of, once", async () => {
+    const store = memoryStore();
+    const snapshot: StoreSnapshot = {
+      key: "orders:1",
+      entity: "orders",
+      state: "a",
+      values: {},
+      seq: 0,
+      at: 0,
+      enteredAt: 0,
+    };
+    await store.snapshot("orders:1", snapshot);
+    await store.snapshot("orders:2", { ...snapshot, key: "orders:2" });
+    await store.append(
+      "orders:2",
+      {
+        type: "transition",
+        key: "orders:2",
+        from: "a",
+        to: "a",
+        seq: 1,
+        at: 0,
+        cause: { type: "tick", id: "t1" },
+        values: {},
+      },
+      0
+    );
+
+    expect([...store.keys].sort()).toEqual(["orders:1", "orders:2"]);
+    await store.forget("orders:1");
+    expect(store.keys).toEqual(["orders:2"]);
+  });
+});
+
 describe("a scan told which keys to leave out", () => {
   const stores: [string, () => Store][] = [
     ["memory", () => memoryStore()],

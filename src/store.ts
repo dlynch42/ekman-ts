@@ -311,6 +311,16 @@ export function latestSeq(events: readonly EkmanEvent[]): number {
   return seq;
 }
 
+/**
+ * The sequence an append of this event is conditional on.
+ *
+ * A commit is conditional on the sequence before it. Anything else carries the current
+ * sequence, because it does not advance one.
+ */
+export function previousSeq(event: EkmanEvent): number {
+  return event.type === "transition" ? event.seq - 1 : event.seq;
+}
+
 /** The entity name a key addresses: its first segment. */
 export function entityOf(key: string): string {
   const separator = key.indexOf(":");

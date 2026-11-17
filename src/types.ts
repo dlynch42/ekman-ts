@@ -393,10 +393,11 @@ export interface EkmanConfig<
    * Where commits go. Omitted means memory only, which is a valid documented mode rather
    * than a degraded one: nothing survives the process, and nothing pretends to.
    *
-   * A list is a layered stack, read fastest first. Exactly one layer is the commit
-   * authority: the last durable one, or the last one when none is durable, unless a layer
-   * claims it with `authority: true`. Every other layer is a cache, written after the fact
-   * and never able to fail a commit.
+   * A list is a layered stack, fastest first. Exactly one layer is the commit authority:
+   * the last durable one, or the last one when none is durable, unless a layer claims it
+   * with `authority: true`. Every other layer is a cache: written after the authority and
+   * never able to fail a commit, and read before it when an instance is loaded. `history`
+   * and `query` read the authority only.
    *
    * ```ts
    * store: "file"                                  // durable, in .ekman/logs
