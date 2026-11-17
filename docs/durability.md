@@ -38,11 +38,15 @@ Layers are listed fastest first. **Exactly one layer is the commit authority** a
 truth: the last durable one. The rest are caches.
 
 A commit goes to the authority, and resolves there. The caches are written afterwards, in order
-per key, and no commit, `history()` or `close()` ever waits for one.
+per key, and no commit, `history()` or `close()` ever waits for one. A cache write still queued
+when the runtime closes is dropped.
 
 When an instance that is not resident is loaded, the caches are asked first, fastest first, and
 the first that holds the key answers. If none does, the authority answers and the caches are
 filled from it, so the next load of that key is a cache's. This is the one read a cache serves.
+A load that arrives while writes for its key are still on their way to the caches does not wait
+for them either: the authority answers it, so a cache that is slow, or never answers, costs the
+key its cache and nothing else.
 `history()` and `query()` always read the authority, because a cache holds the state of a key
 and not necessarily its whole stream.
 

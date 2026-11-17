@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { CacheFailure } from "../src/caches";
 import { Caches } from "../src/caches";
-import type { ReplayedState, Store } from "../src/store";
+import type { EkmanEvent } from "../src/events";
+import type { LoadResult, ReplayedState, Store } from "../src/store";
 import { memoryStore } from "../src/stores/memory";
 
 const STATE: ReplayedState = {
@@ -71,6 +72,157 @@ describe("a cache layer nobody can vouch for", () => {
     await caches.settled("orders:2");
 
     expect(snapshot).toHaveBeenCalledTimes(2);
+  });
+});
+
+const committed = (seq: number): EkmanEvent => ({
+  type: "transition",
+  key: "orders:1",
+  from: seq === 0 ? null : "open",
+  to: "open",
+  seq,
+  at: 0,
+  cause: { type: "touch", id: `t${seq}` },
+  values: { n: seq },
+});
+
+/** One turn of the event loop, by which a queued write has reached its layer. */
+const started = (): Promise<void> =>
+  new Promise((done) => {
+    setImmediate(done);
+  });
+
+/** A cache layer whose appends wait to be let go, one at a time, in the order they came. */
+function held(): {
+  layer: Store;
+  append: ReturnType<typeof vi.fn>;
+  load: ReturnType<typeof vi.fn>;
+  snapshot: ReturnType<typeof vi.fn>;
+  forget: ReturnType<typeof vi.fn>;
+  release: (outcome?: Error) => void;
+} {
+  const inner = memoryStore({ name: "cache" });
+  const waiting: ((outcome?: Error) => void)[] = [];
+  const append = vi.fn(
+    (key: string, event: EkmanEvent, expectedSeq: number): Promise<void> =>
+      new Promise<void>((resolve, reject) => {
+        waiting.push((outcome) => {
+          if (outcome === undefined) {
+            inner.append(key, event, expectedSeq).then(resolve, reject);
+          } else {
+            reject(outcome);
+          }
+        });
+      })
+  );
+  const load = vi.fn(inner.load.bind(inner));
+  const snapshot = vi.fn(inner.snapshot.bind(inner));
+  const forget = vi.fn(inner.forget.bind(inner));
+  const layer: Store = {
+    name: inner.name,
+    capabilities: inner.capabilities,
+    append,
+    load,
+    read: inner.read.bind(inner),
+    scan: inner.scan.bind(inner),
+    snapshot,
+    forget,
+  };
+  return {
+    layer,
+    append,
+    load,
+    snapshot,
+    forget,
+    release: (outcome) => waiting.shift()?.(outcome),
+  };
+}
+
+describe("a cache layer with writes still queued", () => {
+  const answer: LoadResult = {
+    snapshot: undefined,
+    events: [committed(0)],
+    seq: 0,
+  };
+
+  it("is passed over by a load, which the authority answers without waiting", async () => {
+    const { layer, load, snapshot, release } = held();
+    const caches = new Caches([layer], {
+      now: () => 0,
+      failed: () => undefined,
+    });
+    const fromAuthority = vi.fn(() => Promise.resolve(answer));
+    caches.mirror(committed(0));
+
+    const found = await caches.read("orders:1", fromAuthority);
+
+    expect(found.current).toMatchObject({ state: "open", seq: 0 });
+    expect(fromAuthority).toHaveBeenCalledTimes(1);
+    expect(load).not.toHaveBeenCalled();
+    expect(snapshot).not.toHaveBeenCalled();
+
+    // What the authority answered is filled in behind the write that was in the way.
+    release();
+    await caches.settled("orders:1");
+    expect(snapshot).toHaveBeenCalledTimes(1);
+    expect((await layer.load("orders:1"))?.seq).toBe(0);
+  });
+
+  it("is asked again once nothing is queued", async () => {
+    const { layer, load, release } = held();
+    const caches = new Caches([layer], {
+      now: () => 0,
+      failed: () => undefined,
+    });
+    const fromAuthority = vi.fn(() => Promise.resolve(answer));
+    caches.mirror(committed(0));
+    await started();
+    release();
+    await caches.settled("orders:1");
+
+    const found = await caches.read("orders:1", fromAuthority);
+
+    expect(found.current).toMatchObject({ state: "open", seq: 0 });
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(fromAuthority).not.toHaveBeenCalled();
+  });
+});
+
+describe("cache layers that are closing", () => {
+  it("are not sent what was still queued for them", async () => {
+    const { layer, append, release } = held();
+    const caches = new Caches([layer], {
+      now: () => 0,
+      failed: () => undefined,
+    });
+    caches.mirror(committed(0));
+    caches.mirror(committed(1));
+    await started();
+    expect(append).toHaveBeenCalledTimes(1);
+
+    caches.close();
+    release();
+    await caches.settled("orders:1");
+
+    expect(append).toHaveBeenCalledTimes(1);
+  });
+
+  it("are not cleared up after when a write under way fails", async () => {
+    const { layer, forget, release } = held();
+    const failures: CacheFailure[] = [];
+    const caches = new Caches([layer], {
+      now: () => 0,
+      failed: (failure) => failures.push(failure),
+    });
+    caches.mirror(committed(0));
+    await started();
+
+    caches.close();
+    release(new Error("closed underneath"));
+    await caches.settled("orders:1");
+
+    expect(failures).toEqual([]);
+    expect(forget).not.toHaveBeenCalled();
   });
 });
 

@@ -575,7 +575,8 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    *
    * Two kinds of store write are not waited for, by design: the snapshot an eviction
    * leaves behind and an append to a cache layer. Both are optimizations whose loss costs
-   * replay time or a cache miss, never committed state.
+   * replay time or a cache miss, never committed state. A cache write still queued when
+   * the layers are closed is dropped, and never run against a layer that has been closed.
    *
    * The wait is bounded. A handler that never settles would otherwise hold shutdown open
    * forever, so after `timeoutMs` the layers are closed regardless and `runtime.closed`
@@ -627,6 +628,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       at: telemetryNow(),
     });
 
+    this.#caches.close();
     await Promise.all(this.#stack.layers.map((layer) => layer.close?.()));
   }
 

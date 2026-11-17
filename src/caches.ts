@@ -38,7 +38,7 @@ type Standing = "dropped" | "distrusted";
  *
  * All of it runs on a chain per key, apart from the store-write chain a commit waits on.
  * Order within a key holds, so a fill is never overtaken by the append that follows it,
- * and no commit ever waits for a cache.
+ * and neither a commit nor a load ever waits for a cache.
  *
  * A layer that is behind the authority can still answer a read if something outside this
  * runtime moved the key. The authority's conditional append refuses the commit built on
@@ -51,6 +51,8 @@ export class Caches {
   /** Tail of each key's chain, kept only while something is queued on it. */
   readonly #chains = new Map<string, Promise<void>>();
   readonly #standing = new Map<Store, Map<string, Standing>>();
+  /** Whether the layers are closing. An object, so it reads as something that changes. */
+  readonly #lifetime: { closed: boolean } = { closed: false };
 
   constructor(
     layers: readonly Store[],
@@ -78,18 +80,36 @@ export class Caches {
   }
 
   /**
+   * Stop writing to the layers, because they are about to be closed.
+   *
+   * Whatever is still queued is skipped when its turn comes, and a write already under way
+   * that fails afterwards is not cleared up after. Running either against a closed layer
+   * would open it again behind the back of whoever closed it.
+   */
+  close(): void {
+    this.#lifetime.closed = true;
+  }
+
+  /**
    * Load a key from the first cache that holds it, or from the authority.
    *
-   * Waits for the key's queued writes first, so a cache is never read while it is behind
-   * what this runtime has already sent it. A cache that throws, and one whose answer does
-   * not replay to a state, are misses: only the authority may say a key is new. Every
-   * layer that missed is filled from the answer.
+   * A cache is never read while it is behind what this runtime has already sent it. So
+   * while anything is still queued for the key, the caches are passed over and the
+   * authority answers. Waiting would hand a load to the slowest cache, and a cache write
+   * that never settles would hold the key for good. The answer is queued as a fill behind
+   * that work, so the layers end up holding it.
+   *
+   * A cache that throws, and one whose answer does not replay to a state, are misses:
+   * only the authority may say a key is new. Every layer that missed is filled from the
+   * answer.
    */
   async read(
     key: string,
     fromAuthority: () => Promise<LoadResult | undefined>
   ): Promise<Loaded> {
-    await this.settled(key);
+    if (this.#chains.has(key)) {
+      return this.#readAuthority(key, fromAuthority, this.#layers);
+    }
 
     const missed: Store[] = [];
     for (const layer of this.#layers) {
@@ -109,9 +129,18 @@ export class Caches {
       missed.push(layer);
     }
 
+    return this.#readAuthority(key, fromAuthority, missed);
+  }
+
+  /** Load a key from the authority, and fill the given layers with what it answered. */
+  async #readAuthority(
+    key: string,
+    fromAuthority: () => Promise<LoadResult | undefined>,
+    fill: readonly Store[]
+  ): Promise<Loaded> {
     const loaded = await fromAuthority();
     const current = loaded === undefined ? undefined : replay(loaded);
-    this.#fill(key, current, missed);
+    this.#fill(key, current, fill);
     return { loaded, current };
   }
 
@@ -228,13 +257,21 @@ export class Caches {
     );
   }
 
-  /** Report a failed write, then delete the key from the layer it failed on. */
+  /**
+   * Report a failed write, then delete the key from the layer it failed on.
+   *
+   * Not once the layers are closing: a write that was under way when its layer was closed
+   * fails for that reason alone, and deleting from a closed layer is more work against it.
+   */
   #clear(
     layer: Store,
     key: string,
     seq: number,
     error: unknown
-  ): Promise<void> {
+  ): Promise<void> | undefined {
+    if (this.#lifetime.closed) {
+      return;
+    }
     this.#report(layer, key, seq, error);
     return this.#delete(layer, key, seq);
   }
@@ -267,12 +304,18 @@ export class Caches {
     });
   }
 
-  /** Run one step against several layers at once. The step must not reject. */
+  /**
+   * Run one step against several layers at once. The step must not reject.
+   *
+   * Nothing is run once the layers are closing.
+   */
   async #each(
     layers: readonly Store[],
     step: (layer: Store) => Promise<void> | undefined
   ): Promise<void> {
-    await Promise.all(layers.map(step));
+    if (!this.#lifetime.closed) {
+      await Promise.all(layers.map(step));
+    }
   }
 
   /**

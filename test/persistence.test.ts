@@ -549,6 +549,64 @@ describe("reading through a cache layer", () => {
   });
 });
 
+describe("a cache layer that is slow, or never answers", () => {
+  const stack = () => ({
+    cache: memoryStore({ name: "cache" }),
+    truth: memoryStore({ name: "truth", authority: true }),
+  });
+
+  it("does not hold up the next load of a key it never finished writing", async () => {
+    const { cache: inner, truth } = stack();
+    const cache = wrap(inner, {
+      append: () => new Promise<void>(() => undefined),
+    });
+    const asked = vi.spyOn(inner, "load");
+    const ekman = new Ekman({
+      entities: [orders],
+      store: [cache, truth],
+      memory: { maxBytes: 0 },
+    });
+
+    await ekman.entities.orders.send("1", { type: "touch" });
+    await settle();
+    expect(ekman.residentKeys).toEqual([]);
+    const sent = await ekman.entities.orders.send("1", { type: "close" });
+
+    expect(sent).toMatchObject({ state: "closed", seq: 2 });
+    expect(asked).not.toHaveBeenCalled();
+    await ekman.close();
+  });
+
+  it("is sent nothing more once the runtime has closed", async () => {
+    const { cache: inner, truth } = stack();
+    const waiting: (() => void)[] = [];
+    const append = vi.fn(
+      (key: string, event: EkmanEvent, expectedSeq: number): Promise<void> =>
+        new Promise<void>((resolve, reject) => {
+          waiting.push(() => {
+            inner.append(key, event, expectedSeq).then(resolve, reject);
+          });
+        })
+    );
+    const ekman = new Ekman({
+      entities: [orders],
+      store: [wrap(inner, { append }), truth],
+    });
+    await ekman.entities.orders.send("1", { type: "touch" });
+    await ekman.entities.orders.send("1", { type: "close" });
+    await settle();
+    expect(append).toHaveBeenCalledTimes(1);
+
+    await ekman.close();
+    for (const release of waiting) {
+      release();
+    }
+    await settle();
+
+    expect(append).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("keeping a cache layer honest", () => {
   const stack = () => ({
     cache: memoryStore({ name: "cache" }),
