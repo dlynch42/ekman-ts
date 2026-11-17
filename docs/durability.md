@@ -72,6 +72,26 @@ One log per key, in a directory per entity:
 .ekman/logs/orders/orders%3Aa-1.jsonl
 ```
 
+### What a commit guarantees
+
+A commit that resolved has been written to its log through the operating system. That survives
+the process ending, by a crash or a kill. It does not survive the machine losing power before
+the system flushes its cache: there is no fsync per commit.
+
+### Open logs
+
+A log being written to is kept open, so a commit is one write. Up to 256 are open at once, and
+past that the one least recently written to is closed and opened again when it is next needed.
+Change the number for a process with a tight descriptor limit, and read how many are open now:
+
+```ts
+const store = fileStore("/var/lib/app", { maxOpenLogs: 64 });
+store.openLogs; // never more than 64
+```
+
+`ekman.close()` closes them. The files belong to the store while it runs: removing one from
+outside leaves the store writing to a file nobody can reach, so delete through `forget`.
+
 ### File names
 
 A file is named for its key, with every byte percent-escaped except lowercase ASCII letters,
@@ -113,6 +133,13 @@ Each log compacts once it passes 5MB. The events already folded into a snapshot 
 current state and replay are untouched and only `history()` shortens. When it does, `history()`
 reports itself incomplete rather than presenting a truncated stream as a whole one.
 
+A log that passes its limit is compacted shortly after the commit that crossed it, on a later
+turn of the event loop, and not inside that commit: folding a log means rewriting it, and the
+sender who happened to cross the limit should not wait for that. A caller that never gives the
+event loop a turn, such as a loop of awaited sends and nothing else, gets a backstop instead: a
+log that reaches twice its limit is compacted in the commit that got it there. So a log can run
+to twice its limit, and no further. `ekman.close()` does any compaction still waiting.
+
 The snapshot and the shortened log are each written under a temporary name and renamed into
 place, snapshot first, so a crash mid-compaction leaves the old files or the new ones.
 Refusals and violations are never folded. A log that holds nothing else is left alone until
@@ -126,7 +153,7 @@ where the files are, and the original error is on `cause`.
 
 A commit is reported as failed only if its line did not reach the log. Accounting and
 compaction run after the write, and a failure there does not fail the commit. It is kept on
-the store instead, until the next pass succeeds:
+the store instead, until the next pass of the same kind succeeds:
 
 ```ts
 const store = fileStore("/var/lib/app");

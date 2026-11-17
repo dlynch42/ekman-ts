@@ -16,6 +16,7 @@ import { NAME as CONSTRAINTS, run as constraints } from "./constraints";
 import { NAME as EDGE_CHECK, run as edgeCheck } from "./edge-check";
 import { NAME as EVICTION_CHURN, run as evictionChurn } from "./eviction-churn";
 import { NAME as FAN_OUT, run as fanOut } from "./fan-out";
+import { NAME as FILE_COMMIT, run as fileCommit } from "./file-commit";
 import {
   BASELINE_PATH,
   banner,
@@ -38,6 +39,7 @@ const SUITES: ReadonlyMap<string, () => Promise<SuiteResult>> = new Map([
   [EDGE_CHECK, edgeCheck],
   [EVICTION_CHURN, evictionChurn],
   [FAN_OUT, fanOut],
+  [FILE_COMMIT, fileCommit],
   [LONG_HISTORY, longHistory],
   [OVERFLOW, overflow],
   [QUERY, query],

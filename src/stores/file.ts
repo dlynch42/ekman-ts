@@ -1,7 +1,9 @@
 import {
-  appendFileSync,
+  closeSync,
   existsSync,
+  fstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
   renameSync,
@@ -10,6 +12,7 @@ import {
   statSync,
   truncateSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { assertKnownKeys } from "../config";
@@ -147,9 +150,27 @@ export interface FileStoreOptions {
   readonly authority?: boolean;
   readonly retention?: RetentionConfig;
   readonly mode?: FileModeConfig;
+  /**
+   * How many logs are held open for appending at once. Defaults to 256.
+   *
+   * A log that is open takes one write per commit, where opening and closing it each time
+   * costs more than the write does. Past this many, the log least recently written to is
+   * closed, and opened again the next time it is needed. Lower it for a process with a
+   * tight descriptor limit.
+   */
+  readonly maxOpenLogs?: number;
 }
 
-const OPTION_KEYS = ["name", "authority", "retention", "mode"] as const;
+const OPTION_KEYS = [
+  "name",
+  "authority",
+  "retention",
+  "mode",
+  "maxOpenLogs",
+] as const;
+const DEFAULT_MAX_OPEN_LOGS = 256;
+/** How far past its limit a log may get while its compaction waits for a turn. */
+const OVERDUE_FACTOR = 2;
 const RETENTION_KEYS = ["perLogBytes", "totalBytes", "policy"] as const;
 const MODE_KEYS = ["file", "dir"] as const;
 
@@ -238,6 +259,17 @@ function resolveMode(config: FileModeConfig | undefined): ResolvedMode {
   }
 
   return resolved;
+}
+
+function resolveMaxOpenLogs(configured: number | undefined): number {
+  const limit = configured ?? DEFAULT_MAX_OPEN_LOGS;
+  if (!(Number.isInteger(limit) && limit > 0)) {
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      `file store maxOpenLogs must be a positive integer, received ${JSON.stringify(configured)}.`
+    );
+  }
+  return limit;
 }
 
 const PERCENT = 0x25;
@@ -379,10 +411,19 @@ function toStoreError(
  * during an incident is worth more than a compact binary format. One file per key rather
  * than one shared log, so a key's stream is contiguous and `load` never scans other keys.
  *
- * Writes are synchronous. That is not laziness: `appendFileSync` is what makes the
- * conditional append actually atomic against a concurrent caller in this process, because
- * nothing can interleave between the check and the write. An async write would need a
- * per-key queue to get the same guarantee, and would still not extend it across processes.
+ * Writes are synchronous. That is not laziness: checking the sequence and writing the line
+ * in one synchronous block is what makes the conditional append actually atomic against a
+ * concurrent caller in this process, because nothing can interleave between the two. An
+ * async write would need a per-key queue to get the same guarantee, and would still not
+ * extend it across processes.
+ *
+ * A resolved append has been handed to the operating system. That survives this process
+ * ending, and it does not survive the machine losing power before the system flushes its
+ * cache: there is no fsync per commit.
+ *
+ * Logs being written to are kept open, up to `maxOpenLogs`, so a commit is one write. The
+ * files belong to the store while it runs. Removing one from outside leaves the store
+ * writing to a file nobody can reach, so delete through `forget`.
  *
  * Which is why `multiWriter` is false. Two processes pointed at one directory will both
  * believe their conditional appends held. The runtime refuses configurations that need
@@ -397,9 +438,10 @@ function toStoreError(
  * are renamed the first time their entity's directory is used.
  *
  * A filesystem failure reaches the caller as `STORE_UNAVAILABLE`, naming the store and the
- * key. Once a line is in the log the append has succeeded: accounting and compaction run
- * after it, and a failure there is kept on `lastHousekeepingError` instead of being
- * reported as a write that never happened.
+ * key. Once a line is in the log the append has succeeded: accounting runs after it, and a
+ * log past its limit is compacted on a later turn of the event loop, never inside the
+ * commit that crossed it. A failure in either is kept on `lastHousekeepingError` instead
+ * of being reported as a write that never happened.
  */
 export class FileStore implements Store {
   readonly name: string;
@@ -427,6 +469,27 @@ export class FileStore implements Store {
 
   readonly #retention: ResolvedRetention;
   readonly #mode: ResolvedMode;
+  readonly #maxOpenLogs: number;
+
+  /** Entity directories known to exist, so a commit does not ask the filesystem again. */
+  readonly #dirs = new Set<string>();
+  /**
+   * Logs open for appending, least recently written first.
+   *
+   * Anything that replaces or removes a log closes its descriptor first, since a
+   * descriptor follows the file it was opened on and not the name.
+   */
+  readonly #open = new Map<string, number>();
+  /**
+   * Each log's size as far as this store knows, for the per-log limit.
+   *
+   * Read off the descriptor on a key's first append in this process and kept by addition
+   * after that. Apart from `#bytes`, which stays unset until something needs the total.
+   */
+  readonly #logBytes = new Map<string, number>();
+  /** Logs past their limit, waiting for the compaction that was put off. */
+  readonly #oversized = new Set<string>();
+  #folding: NodeJS.Immediate | undefined;
 
   /** Where each key's files are, worked out once per key. */
   readonly #paths = new Map<string, KeyPaths>();
@@ -479,7 +542,8 @@ export class FileStore implements Store {
    */
   readonly #uncompactable = new Set<string>();
 
-  #housekeepingError: EkmanError | undefined;
+  #accountingError: EkmanError | undefined;
+  #compactionError: EkmanError | undefined;
 
   constructor(options?: FileStoreOptions);
   constructor(dir: string, options?: FileStoreOptions);
@@ -492,6 +556,7 @@ export class FileStore implements Store {
     assertKnownKeys("the file store's options", options, OPTION_KEYS);
     this.#retention = resolveRetention(options.retention);
     this.#mode = resolveMode(options.mode);
+    this.#maxOpenLogs = resolveMaxOpenLogs(options.maxOpenLogs);
 
     // No directory given means the caller does not care where, not that they do not care
     // whether. Durability was opted into by choosing this store at all; the path is the
@@ -525,10 +590,20 @@ export class FileStore implements Store {
    *
    * Those passes run after the line is in the log, so their failure is never the append's:
    * the event is durable and the sequence has moved. It is kept here for an operator to
-   * read, and cleared by the next pass that succeeds.
+   * read. Each kind is cleared by the next pass of its own kind that succeeds, and a
+   * compaction failure is the one reported when both have failed.
    */
   get lastHousekeepingError(): EkmanError | undefined {
-    return this.#housekeepingError;
+    return this.#compactionError ?? this.#accountingError;
+  }
+
+  /**
+   * How many logs are open for appending right now. Never more than `maxOpenLogs`.
+   *
+   * A diagnostic, for checking a process against its descriptor limit.
+   */
+  get openLogs(): number {
+    return this.#open.size;
   }
 
   append(key: string, event: EkmanEvent, expectedSeq: number): Promise<void> {
@@ -552,8 +627,8 @@ export class FileStore implements Store {
       throw conflict(this.name, key, expectedSeq, current);
     }
 
-    const line = `${JSON.stringify(event)}\n`;
-    const width = Buffer.byteLength(line, "utf8");
+    const line = Buffer.from(`${JSON.stringify(event)}\n`, "utf8");
+    const width = line.length;
 
     // Refused before the write, and only for a key this store has never seen. An instance
     // that already exists keeps committing: shedding new work is recoverable, and stopping
@@ -563,7 +638,7 @@ export class FileStore implements Store {
       throw refusal;
     }
 
-    this.#write(key, line);
+    const descriptor = this.#write(key, line);
     const tail = this.#tails.get(key);
     if (tail !== undefined) {
       this.#tails.set(key, { ...tail, size: tail.size + width });
@@ -575,35 +650,178 @@ export class FileStore implements Store {
 
     try {
       this.#account(key, width);
-      this.#compactIfOversized(key);
-      this.#housekeepingError = undefined;
+      this.#measure(key, descriptor, width);
+      this.#accountingError = undefined;
     } catch (error) {
-      this.#housekeepingError = toStoreError(
+      this.#accountingError = toStoreError(
         error,
         this.name,
-        `account for or compact the log of ${JSON.stringify(key)} after appending to it`,
+        `account for the log of ${JSON.stringify(key)} after appending to it`,
         key
       );
     }
   }
 
   /**
-   * Put one line at the end of a key's log.
+   * Put one line at the end of a key's log, and return the descriptor it went through.
    *
    * A write that fails may have left part of a line behind. Dropping the cached sequence
    * makes the next append read the log again, and reading is what trims a torn tail, so
    * nothing is ever concatenated onto the fragment.
    */
-  #write(key: string, line: string): void {
+  #write(key: string, line: Buffer): number {
     try {
-      const { dir, log } = this.#pathsOf(key);
-      mkdirSync(dir, { recursive: true, mode: this.#mode.dir });
-      appendFileSync(log, line, { encoding: "utf8", mode: this.#mode.file });
+      const descriptor = this.#descriptor(key);
+      let written = 0;
+      while (written < line.length) {
+        written += writeSync(descriptor, line, written);
+      }
+      return descriptor;
     } catch (error) {
       this.#seq.delete(key);
       this.#tails.delete(key);
+      this.#logBytes.delete(key);
+      this.#release(key);
       throw error;
     }
+  }
+
+  /**
+   * The descriptor a key's log is appended through, opening it if it is not open.
+   *
+   * Opened for append, so every write lands at the end of the file whatever else has
+   * happened to it. Using one moves it to the back of the queue, and opening one past the
+   * limit closes whichever has waited longest.
+   */
+  #descriptor(key: string): number {
+    const held = this.#open.get(key);
+    if (held !== undefined) {
+      this.#open.delete(key);
+      this.#open.set(key, held);
+      return held;
+    }
+
+    const { dir, log } = this.#pathsOf(key);
+    const descriptor = this.#inside(dir, () =>
+      openSync(log, "a", this.#mode.file)
+    );
+    this.#open.set(key, descriptor);
+
+    if (this.#open.size > this.#maxOpenLogs) {
+      for (const coldest of this.#open.keys()) {
+        this.#release(coldest);
+        break;
+      }
+    }
+    return descriptor;
+  }
+
+  /** Close a key's log if it is open. The next append opens it again. */
+  #release(key: string): void {
+    const held = this.#open.get(key);
+    if (held !== undefined) {
+      this.#open.delete(key);
+      closeSync(held);
+    }
+  }
+
+  /**
+   * Do something that needs an entity's directory to exist.
+   *
+   * The directory is created once and remembered. If it has gone since, the work fails as
+   * a missing path, and it is created again and the work tried once more.
+   */
+  #inside<T>(dir: string, work: () => T): T {
+    if (this.#dirs.has(dir)) {
+      try {
+        return work();
+      } catch (error) {
+        if ((error as { code?: unknown }).code !== "ENOENT") {
+          throw error;
+        }
+        this.#dirs.delete(dir);
+      }
+    }
+
+    mkdirSync(dir, { recursive: true, mode: this.#mode.dir });
+    this.#dirs.add(dir);
+    return work();
+  }
+
+  /**
+   * Keep a log's size current, and queue it for compaction once it is past its limit.
+   *
+   * The compaction itself is put off to a later turn of the event loop. Folding a log
+   * means reading, replaying and rewriting all of it, and the sender whose commit happened
+   * to cross the limit should not be the one who waits for that.
+   *
+   * A later turn only comes if the caller lets one happen, and a loop of awaited sends to a
+   * synchronous store never does. So the limit has a backstop: a log that reaches twice
+   * its limit while still waiting is folded here, in the commit that got it there. That
+   * bounds a log at twice its limit however the caller is written.
+   */
+  #measure(key: string, descriptor: number, width: number): void {
+    const limit = this.#retention.perLogBytes;
+    if (limit === 0) {
+      return;
+    }
+
+    const known = this.#logBytes.get(key);
+    const size =
+      known === undefined ? fstatSync(descriptor).size : known + width;
+    this.#logBytes.set(key, size);
+
+    if (size <= limit || this.#uncompactable.has(key)) {
+      return;
+    }
+    if (size > limit * OVERDUE_FACTOR) {
+      this.#oversized.delete(key);
+      this.#compactionError = this.#fold(key);
+      return;
+    }
+
+    this.#oversized.add(key);
+    // Unreferenced, so a process with nothing else to do is not kept alive to tidy up.
+    this.#folding ??= setImmediate(() => this.#foldOversized()).unref();
+  }
+
+  /** Compact one log, returning the failure if it could not be done. */
+  #fold(key: string): EkmanError | undefined {
+    try {
+      this.#compactLog(key, this.#bytes?.get(key) ?? 0);
+    } catch (error) {
+      return toStoreError(
+        error,
+        this.name,
+        `compact the log of ${JSON.stringify(key)}`,
+        key
+      );
+    }
+  }
+
+  /**
+   * Compact every log that passed its limit since the last time this ran.
+   *
+   * Appends are synchronous, so none is ever in progress when this runs. One that landed
+   * after its log was queued is simply part of what gets folded.
+   *
+   * Returns the failure, if a log could not be compacted. With nothing queued it changes
+   * nothing, so an earlier failure stays on record until a compaction succeeds.
+   */
+  #foldOversized(): EkmanError | undefined {
+    clearImmediate(this.#folding);
+    this.#folding = undefined;
+    if (this.#oversized.size === 0) {
+      return;
+    }
+
+    let failure: EkmanError | undefined;
+    for (const key of this.#oversized) {
+      this.#oversized.delete(key);
+      failure = this.#fold(key) ?? failure;
+    }
+    this.#compactionError = failure;
+    return failure;
   }
 
   /** What this store is holding, and what it is allowed to hold. */
@@ -660,8 +878,7 @@ export class FileStore implements Store {
       }
 
       const { dir, snapshot: path } = this.#pathsOf(key);
-      mkdirSync(dir, { recursive: true, mode: this.#mode.dir });
-      this.#writeWhole(path, JSON.stringify(snapshot));
+      this.#inside(dir, () => this.#writeWhole(path, JSON.stringify(snapshot)));
       this.#accountSnapshot(key);
     });
   }
@@ -678,6 +895,7 @@ export class FileStore implements Store {
 
   forget(key: string): Promise<void> {
     return this.#settle(`forget ${JSON.stringify(key)}`, key, () => {
+      this.#release(key);
       // `force` so forgetting a key this store never held is not an error. A sweep that
       // dies halfway and is retried should behave the same the second time.
       rmSync(this.#logPath(key), { force: true });
@@ -688,6 +906,8 @@ export class FileStore implements Store {
       this.#seq.delete(key);
       this.#uncompactable.delete(key);
       this.#tails.delete(key);
+      this.#logBytes.delete(key);
+      this.#oversized.delete(key);
       this.#paths.delete(key);
 
       // Zero when nothing is counting yet, which makes this a no-op rather than a special
@@ -781,6 +1001,13 @@ export class FileStore implements Store {
   }
 
   #sweep(): StoreCompaction {
+    // Whatever is already past its own limit goes first, so the budget is measured against
+    // what is left after the compaction this store owed anyway.
+    const failure = this.#foldOversized();
+    if (failure !== undefined) {
+      throw failure;
+    }
+
     // Seeded even when there is nothing to do, so `withinBudget` is answered from the real
     // numbers rather than from an empty table that would read as comfortably inside a
     // budget the store has never measured itself against.
@@ -899,18 +1126,19 @@ export class FileStore implements Store {
    * reports itself incomplete afterwards, which is the honest half of the trade and the
    * reason `HistoryResult.complete` exists.
    */
-  #compactIfOversized(key: string): void {
-    const limit = this.#retention.perLogBytes;
-    if (limit === 0 || this.#uncompactable.has(key)) {
-      return;
-    }
-
-    const size = this.#bytes?.get(key) ?? statSync(this.#logPath(key)).size;
-    if (size <= limit) {
-      return;
-    }
-
-    this.#compactLog(key, size);
+  /**
+   * Release what the store holds open, after doing the compaction it had put off.
+   *
+   * Nothing is left scheduled afterwards. The store still works: an append after this
+   * opens its log again.
+   */
+  close(): Promise<void> {
+    return this.#settle("close its logs", undefined, () => {
+      this.#foldOversized();
+      for (const key of [...this.#open.keys()]) {
+        this.#release(key);
+      }
+    });
   }
 
   /**
@@ -971,9 +1199,19 @@ export class FileStore implements Store {
       .map((event) => `${JSON.stringify(event)}\n`)
       .join("");
 
+    // Closed first: the rewrite puts a new file under the name, and a descriptor held
+    // open would go on appending to the old one. Opened again straight away if it was
+    // open, so the cost of that lands here and not on the next commit.
+    const wasOpen = this.#open.has(key);
+    this.#release(key);
     this.#writeWhole(this.#logPath(key), rewritten);
+    if (wasOpen) {
+      this.#descriptor(key);
+    }
     this.#tails.delete(key);
-    this.#resize(key, size, Buffer.byteLength(rewritten, "utf8"));
+    const length = Buffer.byteLength(rewritten, "utf8");
+    this.#logBytes.set(key, length);
+    this.#resize(key, size, length);
     return before - this.#total;
   }
 
@@ -1211,7 +1449,7 @@ export class FileStore implements Store {
    * The log, up to the last line that was written whole.
    *
    * Read as bytes and cut at the final newline, because an append that did not finish
-   * leaves a partial line behind: a full disk makes `appendFileSync` write a short count,
+   * leaves a partial line behind: a full disk makes a write come up short,
    * and so does losing the process between the write and the flush. That fragment is not
    * parseable, and parsing it would throw on every later load, so a torn tail would cost
    * the key everything rather than the one event that never landed.
@@ -1241,6 +1479,7 @@ export class FileStore implements Store {
     if (lastNewline !== bytes.length - 1) {
       truncateSync(path, lastNewline + 1);
       this.#tails.delete(key);
+      this.#logBytes.delete(key);
     }
 
     return bytes.subarray(0, lastNewline + 1);

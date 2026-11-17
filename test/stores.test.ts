@@ -92,6 +92,15 @@ const permissionsOf = (path: string): number => statSync(path).mode % 0o1000;
  */
 const CANNOT_DENY = process.platform === "win32" || process.getuid?.() === 0;
 
+/**
+ * Give the event loop one turn, which is when a file store compacts a log that passed its
+ * limit.
+ */
+const turn = (): Promise<void> =>
+  new Promise((done) => {
+    setImmediate(done);
+  });
+
 const temporaryDirs: string[] = [];
 
 function freshDir(): string {
@@ -913,6 +922,7 @@ describe("retention", () => {
       const store = fileStore(dir, { retention: { perLogBytes: 512 } });
 
       await fill(store, "orders:1", 12);
+      await turn();
 
       // The state is whatever the last event said, regardless of what was folded away.
       const loaded = await store.load("orders:1");
@@ -992,6 +1002,7 @@ describe("retention", () => {
         EMPTY_SEQ
       );
       await fill(store, "orders:1", 10);
+      await turn();
 
       const events = await store.read("orders:1");
 
@@ -1265,6 +1276,7 @@ describe("retention", () => {
       await store.append("orders:1", move("orders:1", 0, {}), EMPTY_SEQ);
       await store.append("orders:1", refuse(1), 0);
       await store.append("orders:1", refuse(2), 0);
+      await turn();
       const path = logPathOf(dir, "orders:1");
       expect((await store.load("orders:1"))?.snapshot?.seq).toBe(0);
       const { ino } = statSync(path);
@@ -1274,10 +1286,12 @@ describe("retention", () => {
         await store.append("orders:1", refuse(at), 0);
       }
 
+      await turn();
       expect(statSync(path).ino).toBe(ino);
       expect(await store.read("orders:1")).toHaveLength(12);
 
       await store.append("orders:1", move("orders:1", 1, {}), 0);
+      await turn();
       expect((await store.load("orders:1"))?.snapshot?.seq).toBe(1);
       expect(statSync(path).ino).not.toBe(ino);
     });
@@ -1552,6 +1566,8 @@ describe("a log whose last append did not finish", () => {
       await store.append("orders:1", event("orders:1", 0), EMPTY_SEQ);
       const path = logPathOf(dir, "orders:1");
 
+      // Closed, so the next append has to open the log and is refused.
+      await store.close();
       chmodSync(path, 0o400);
       const failed = await store
         .append("orders:1", event("orders:1", 1), 0)
@@ -1811,6 +1827,7 @@ describe("loading a key that has a snapshot", () => {
     // Past the limit on the fifth line, so the log is folded into a snapshot at 4.
     await store.append(KEY, event(3), 2);
     await store.append(KEY, event(4), 3);
+    await turn();
     await store.append(KEY, event(5), 4);
 
     const loaded = await store.load(KEY);
@@ -1820,6 +1837,282 @@ describe("loading a key that has a snapshot", () => {
       seq: 5,
       values: { n: 5 },
     });
+  });
+});
+
+describe("the file store's commit path", () => {
+  const event = (key: string, seq: number): TransitionEvent => ({
+    type: "transition",
+    key,
+    from: seq === 0 ? null : "a",
+    to: "a",
+    seq,
+    at: 0,
+    cause: { type: "tick", id: `t${seq}` },
+    values: { n: seq },
+  });
+  const WIDTH = Buffer.byteLength(
+    `${JSON.stringify(event("orders:1", 0))}\n`,
+    "utf8"
+  );
+  const lineCount = (dir: string, key: string): number =>
+    readFileSync(logPathOf(dir, key), "utf8").split("\n").filter(Boolean)
+      .length;
+
+  describe("open logs", () => {
+    it("never holds more open than it was told to", async () => {
+      const dir = freshDir();
+      const store = fileStore(dir, { maxOpenLogs: 16 });
+      let most = 0;
+
+      for (let n = 0; n < 300; n += 1) {
+        // biome-ignore lint/performance/noAwaitInLoops: one key at a time, so the count is read after each
+        await store.append(`orders:${n}`, event(`orders:${n}`, 0), EMPTY_SEQ);
+        most = Math.max(most, store.openLogs);
+      }
+
+      expect(most).toBe(16);
+      expect(store.keys).toHaveLength(300);
+      // The first key's log was closed long ago, and is opened again without being asked.
+      await store.append("orders:0", event("orders:0", 1), 0);
+      expect(lineCount(dir, "orders:0")).toBe(2);
+      expect(store.openLogs).toBe(16);
+      await store.close();
+    });
+
+    it("closes the log that has waited longest, not the one just used", async () => {
+      const dir = freshDir();
+      const store = fileStore(dir, { maxOpenLogs: 2 });
+      await store.append("orders:a", event("orders:a", 0), EMPTY_SEQ);
+      await store.append("orders:b", event("orders:b", 0), EMPTY_SEQ);
+      await store.append("orders:a", event("orders:a", 1), 0);
+      await store.append("orders:c", event("orders:c", 0), EMPTY_SEQ);
+
+      // `b` was the one closed, so removing its file and appending makes a new one. Had
+      // it still been open, the append would have gone to the file that was removed.
+      rmSync(logPathOf(dir, "orders:b"));
+      await store.append("orders:b", event("orders:b", 1), 0);
+      expect(lineCount(dir, "orders:b")).toBe(1);
+      await store.close();
+    });
+
+    it.each([0, -1, 1.5, "8"])("refuses a maxOpenLogs of %s", (maxOpenLogs) => {
+      expect(() =>
+        fileStore(freshDir(), { maxOpenLogs: maxOpenLogs as number })
+      ).toThrowError(
+        expect.objectContaining({
+          code: "INVALID_CONFIG",
+          message: expect.stringContaining("positive integer"),
+        })
+      );
+    });
+
+    it("starts a fresh file for a key that was forgotten", async () => {
+      const dir = freshDir();
+      const store = fileStore(dir);
+      await store.append("orders:1", event("orders:1", 0), EMPTY_SEQ);
+      await store.append("orders:1", event("orders:1", 1), 0);
+
+      await store.forget("orders:1");
+      expect(store.openLogs).toBe(0);
+      await store.append("orders:1", event("orders:1", 0), EMPTY_SEQ);
+
+      expect(lineCount(dir, "orders:1")).toBe(1);
+      expect((await store.load("orders:1"))?.seq).toBe(0);
+      await store.close();
+    });
+
+    it("closes everything on close, and opens again when written to", async () => {
+      const dir = freshDir();
+      const store = fileStore(dir);
+      await store.append("orders:1", event("orders:1", 0), EMPTY_SEQ);
+      await store.append("orders:2", event("orders:2", 0), EMPTY_SEQ);
+      expect(store.openLogs).toBe(2);
+
+      await store.close();
+      expect(store.openLogs).toBe(0);
+
+      await store.append("orders:1", event("orders:1", 1), 0);
+      expect(store.openLogs).toBe(1);
+      expect(lineCount(dir, "orders:1")).toBe(2);
+      await store.close();
+      await store.close();
+    });
+
+    it("makes an entity's directory again if it has gone", async () => {
+      const dir = freshDir();
+      const store = fileStore(dir);
+      await store.append("orders:1", event("orders:1", 0), EMPTY_SEQ);
+      await store.close();
+
+      rmSync(join(dir, "orders"), { recursive: true });
+      await store.append("orders:2", event("orders:2", 0), EMPTY_SEQ);
+
+      expect(lineCount(dir, "orders:2")).toBe(1);
+      await store.close();
+    });
+  });
+
+  describe("a log that passes its limit", () => {
+    const LIMIT = WIDTH * 4;
+
+    /** Append events `from` to `to` in order, with no turn of the event loop between. */
+    async function append(
+      store: FileStore,
+      from: number,
+      to: number
+    ): Promise<void> {
+      for (let seq = from; seq <= to; seq += 1) {
+        // biome-ignore lint/performance/noAwaitInLoops: a log is written in order
+        await store.append("orders:1", event("orders:1", seq), seq - 1);
+      }
+    }
+
+    it("is compacted after the commit that crossed it, not inside it", async () => {
+      const dir = freshDir();
+      const store = fileStore(dir, { retention: { perLogBytes: LIMIT } });
+
+      await append(store, 0, 4);
+      expect(existsSync(snapshotPathOf(dir, "orders:1"))).toBe(false);
+      expect(lineCount(dir, "orders:1")).toBe(5);
+
+      await turn();
+      expect((await store.load("orders:1"))?.snapshot?.seq).toBe(4);
+      expect(lineCount(dir, "orders:1")).toBe(0);
+      await store.close();
+    });
+
+    it("keeps an append that landed while the compaction was waiting", async () => {
+      const dir = freshDir();
+      const store = fileStore(dir, { retention: { perLogBytes: LIMIT } });
+
+      await append(store, 0, 5);
+      await turn();
+      await append(store, 6, 6);
+
+      const loaded = await store.load("orders:1");
+      expect(loaded?.snapshot?.seq).toBe(5);
+      expect(loaded?.events.map((found) => found.seq)).toEqual([6]);
+      expect(lineCount(dir, "orders:1")).toBe(1);
+      await store.close();
+    });
+
+    it("is compacted inside a commit once it reaches twice its limit with no turn given", async () => {
+      const dir = freshDir();
+      const store = fileStore(dir, { retention: { perLogBytes: LIMIT } });
+      let longest = 0;
+
+      for (let seq = 0; seq < 40; seq += 1) {
+        // biome-ignore lint/performance/noAwaitInLoops: the point is a loop that never yields
+        await store.append("orders:1", event("orders:1", seq), seq - 1);
+        longest = Math.max(longest, lineCount(dir, "orders:1"));
+      }
+
+      // The limit is four lines, so the ninth is the first past twice that, and the commit
+      // that writes it is the one that folds the log.
+      expect(longest).toBeLessThanOrEqual(9);
+      expect((await store.load("orders:1"))?.seq).toBe(39);
+      await store.close();
+    });
+
+    it("is compacted by close, which leaves nothing scheduled", async () => {
+      const dir = freshDir();
+      const store = fileStore(dir, { retention: { perLogBytes: LIMIT } });
+      await append(store, 0, 4);
+
+      await store.close();
+
+      expect(existsSync(snapshotPathOf(dir, "orders:1"))).toBe(true);
+      expect(lineCount(dir, "orders:1")).toBe(0);
+    });
+
+    it("is compacted first by a sweep, whatever the policy", async () => {
+      const dir = freshDir();
+      const store = fileStore(dir, { retention: { perLogBytes: LIMIT } });
+      await append(store, 0, 4);
+
+      await store.compact();
+
+      expect(existsSync(snapshotPathOf(dir, "orders:1"))).toBe(true);
+      await store.close();
+    });
+
+    it("is not queued again after being forgotten", async () => {
+      const dir = freshDir();
+      const store = fileStore(dir, { retention: { perLogBytes: LIMIT } });
+      await append(store, 0, 4);
+
+      await store.forget("orders:1");
+      await turn();
+
+      expect(store.lastHousekeepingError).toBeUndefined();
+      expect(existsSync(snapshotPathOf(dir, "orders:1"))).toBe(false);
+      await store.close();
+    });
+
+    it.skipIf(CANNOT_DENY)(
+      "keeps the failure of a compaction that could not be done, and fails the sweep that tries again",
+      async () => {
+        const dir = freshDir();
+        const store = fileStore(dir, { retention: { perLogBytes: LIMIT } });
+        await append(store, 0, 4);
+        chmodSync(join(dir, "orders"), 0o500);
+
+        try {
+          await turn();
+          expect(store.lastHousekeepingError).toMatchObject({
+            code: "STORE_UNAVAILABLE",
+            key: "orders:1",
+            message: expect.stringContaining("compact the log"),
+          });
+
+          await append(store, 5, 5);
+          await expect(store.compact()).rejects.toMatchObject({
+            code: "STORE_UNAVAILABLE",
+            key: "orders:1",
+          });
+          // A sweep with nothing waiting says nothing about the failure before it.
+          await store.compact();
+          expect(store.lastHousekeepingError).toBeDefined();
+        } finally {
+          chmodSync(join(dir, "orders"), 0o700);
+        }
+
+        await append(store, 6, 6);
+        await turn();
+        expect(store.lastHousekeepingError).toBeUndefined();
+        expect((await store.load("orders:1"))?.snapshot?.seq).toBe(6);
+        await store.close();
+      }
+    );
+
+    it.skipIf(CANNOT_DENY)(
+      "keeps a landed append when the accounting after it fails",
+      async () => {
+        const dir = freshDir();
+        const store = fileStore(dir, {
+          retention: { totalBytes: 1024 * 1024 },
+        });
+        // Writable and searchable, not listable, so the first sum of the tree fails.
+        chmodSync(dir, 0o300);
+
+        try {
+          await store.append("orders:1", event("orders:1", 0), EMPTY_SEQ);
+          expect(store.lastHousekeepingError).toMatchObject({
+            code: "STORE_UNAVAILABLE",
+            key: "orders:1",
+            message: expect.stringContaining("account for the log"),
+          });
+        } finally {
+          chmodSync(dir, 0o700);
+        }
+
+        await store.append("orders:1", event("orders:1", 1), 0);
+        expect(store.lastHousekeepingError).toBeUndefined();
+        expect(store.usage.bytes).toBe(onDisk(dir, "orders:1"));
+        await store.close();
+      }
+    );
   });
 });
 
@@ -1916,7 +2209,7 @@ describe("a file store whose filesystem fails", () => {
   });
 
   it.skipIf(CANNOT_DENY)(
-    "keeps a landed append when the compaction after it fails",
+    "keeps a landed append when the compaction that follows it fails",
     async () => {
       const dir = freshDir();
       const store = fileStore(dir, { retention: { perLogBytes: 1 } });
@@ -1932,6 +2225,7 @@ describe("a file store whose filesystem fails", () => {
       try {
         await store.append("orders:1", init("orders:1"), EMPTY_SEQ);
         await store.append("orders:1", step(1), 0);
+        await turn();
 
         expect(store.lastHousekeepingError).toMatchObject({
           code: "STORE_UNAVAILABLE",
@@ -1944,6 +2238,7 @@ describe("a file store whose filesystem fails", () => {
       }
 
       await store.append("orders:1", step(2), 1);
+      await turn();
       expect(store.lastHousekeepingError).toBeUndefined();
       expect((await store.load("orders:1"))?.snapshot?.seq).toBe(2);
     }

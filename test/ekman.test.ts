@@ -1852,6 +1852,10 @@ describe("history after compaction", () => {
       // biome-ignore lint/performance/noAwaitInLoops: each commit has to land before the next
       await ekman.entities.tickets.send("t1", { type: "update" });
     }
+    // A log past its limit is compacted on the next turn of the event loop.
+    await new Promise((done) => {
+      setImmediate(done);
+    });
 
     const { events, complete, reasons } =
       await ekman.entities.tickets.history("t1");
@@ -1887,6 +1891,10 @@ describe("history after compaction", () => {
       // biome-ignore lint/performance/noAwaitInLoops: each commit has to land before the next
       await ekman.entities.tickets.send("t1", { type: "update" });
     }
+    // A log past its limit is compacted on the next turn of the event loop.
+    await new Promise((done) => {
+      setImmediate(done);
+    });
 
     const { events, complete, reasons } =
       await ekman.entities.tickets.history("t1");
