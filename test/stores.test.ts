@@ -19,6 +19,7 @@ import type { EkmanEvent, TransitionEvent } from "../src/events";
 import {
   defaultLogDir,
   defaultStoreDir,
+  Ekman,
   EMPTY_SEQ,
   entityOf,
   projectRoot,
@@ -36,14 +37,37 @@ const NEEDS_BUDGET = /needs a totalBytes to act on/;
 const NEEDS_BYTE_COUNT = /non-negative integer/;
 const WHEN_FULL = /retention totalBytes/;
 const NOT_A_POLICY = /is not recognized/;
+const PLAIN_IN_A_NAME = /[a-z0-9_-]/;
+const UNKNOWN_OPTION = /has an unrecognized option/;
+const PERMISSION_BITS = /permission bits between 0 and 0o777/;
+const TWO_FILES = /holds two files for "orders:Abc"/;
+const OWNER_ONLY_FILE = 0o600;
+const OWNER_ONLY_DIR = 0o700;
+const GROUP_READABLE_FILE = 0o640;
+const GROUP_READABLE_DIR = 0o750;
+const PERMISSION_RANGE = 0o1000;
 
-/** Where a key's log lives: sharded by entity, filename still the encoded key. */
+/**
+ * The name the file store gives a key or an entity, restated here so the tests pin the
+ * layout instead of asking the store what it did.
+ */
+const nameOf = (text: string): string =>
+  [...Buffer.from(text, "utf8")]
+    .map((byte) => {
+      const character = String.fromCharCode(byte);
+      return PLAIN_IN_A_NAME.test(character)
+        ? character
+        : `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
+    })
+    .join("");
+
+/** Where a key's log lives: sharded by entity, named for the key. */
 const logPathOf = (dir: string, key: string): string =>
-  join(dir, entityOf(key), `${encodeURIComponent(key)}.jsonl`);
+  join(dir, nameOf(entityOf(key)), `${nameOf(key)}.jsonl`);
 
 /** The snapshot beside it, which the byte total counts too. */
 const snapshotPathOf = (dir: string, key: string): string =>
-  join(dir, entityOf(key), `${encodeURIComponent(key)}.snapshot.json`);
+  join(dir, nameOf(entityOf(key)), `${nameOf(key)}.snapshot.json`);
 
 /** What a key actually occupies: both files, which is what a budget has to measure. */
 const onDisk = (dir: string, key: string): number => {
@@ -375,6 +399,358 @@ describe("the file store on disk", () => {
     const found = await store.scan({ entity: "carts", now: 0 });
     expect(found.matches).toEqual([]);
     expect(found.complete).toBe(true);
+  });
+});
+
+describe("how the file store names its files", () => {
+  const created = (key: string): TransitionEvent => ({
+    type: "transition",
+    key,
+    from: null,
+    to: "a",
+    seq: 0,
+    at: 0,
+    cause: { type: "init", id: "t0" },
+    values: { owner: key },
+  });
+
+  /** Write a log the way a version before case-safe names would have. */
+  const writeEarlier = (dir: string, key: string): string => {
+    const entity = join(dir, encodeURIComponent(entityOf(key)));
+    mkdirSync(entity, { recursive: true });
+    const path = join(entity, `${encodeURIComponent(key)}.jsonl`);
+    writeFileSync(path, `${JSON.stringify(created(key))}\n`);
+    return path;
+  };
+
+  it("keeps two keys that differ only in case in two files", async () => {
+    const dir = freshDir();
+    const store = fileStore(dir);
+
+    await store.append("orders:ABC", created("orders:ABC"), EMPTY_SEQ);
+    await store.append("orders:abc", created("orders:abc"), EMPTY_SEQ);
+
+    const names = readdirSync(join(dir, "orders"));
+    expect(names).toHaveLength(2);
+    expect(new Set(names.map((name) => name.toLowerCase())).size).toBe(2);
+
+    const reopened = fileStore(dir);
+    expect((await reopened.load("orders:ABC"))?.events[0]).toMatchObject({
+      values: { owner: "orders:ABC" },
+    });
+    expect((await reopened.load("orders:abc"))?.events[0]).toMatchObject({
+      values: { owner: "orders:abc" },
+    });
+
+    await reopened.forget("orders:abc");
+    expect(await reopened.load("orders:ABC")).toBeDefined();
+  });
+
+  it("lists exactly the keys it was given, whatever they contain", async () => {
+    const dir = freshDir();
+    const store = fileStore(dir);
+    const keys = [
+      "orders:Tenant-A:42",
+      "orders:%41",
+      "orders:ünïcode",
+      "orders:a.b",
+      "orders:..x",
+      "orders:a_b-c",
+      "Orders:1",
+    ];
+
+    await Promise.all(
+      keys.map((key) => store.append(key, created(key), EMPTY_SEQ))
+    );
+
+    expect(fileStore(dir).keys).toEqual([...keys].sort());
+    expect(
+      (await fileStore(dir).scan({ entity: "orders", now: 0 })).matches
+    ).toHaveLength(6);
+  });
+
+  it("never names a file outside its directory, whatever the key", async () => {
+    const dir = freshDir();
+    const store = fileStore(join(dir, "logs"));
+
+    await store.append("..:x", created("..:x"), EMPTY_SEQ);
+    await store.append(".:x", created(".:x"), EMPTY_SEQ);
+
+    expect(readdirSync(dir)).toEqual(["logs"]);
+    expect(readdirSync(join(dir, "logs")).sort()).toEqual(["%2E", "%2E%2E"]);
+    expect(store.keys).toEqual(["..:x", ".:x"]);
+  });
+
+  it("stores a key that is not well-formed text without failing on its name", async () => {
+    const store = fileStore(freshDir());
+    const key = "orders:\ud83d";
+
+    await store.append(key, created(key), EMPTY_SEQ);
+
+    expect((await store.load(key))?.seq).toBe(0);
+  });
+
+  it("refuses a key whose name would not fit in a filename", async () => {
+    const dir = freshDir();
+    const store = fileStore(dir);
+    const key = `orders:${"A".repeat(80)}`;
+    const refused = (attempt: Promise<unknown>) =>
+      attempt.then(
+        () => "resolved",
+        (reason: EkmanError) => reason.code
+      );
+
+    expect(await refused(store.append(key, created(key), EMPTY_SEQ))).toBe(
+      "INVALID_KEY"
+    );
+    expect(await refused(store.load(key))).toBe("INVALID_KEY");
+    expect(await refused(store.read(key))).toBe("INVALID_KEY");
+    expect(await refused(store.forget(key))).toBe("INVALID_KEY");
+    expect(
+      await refused(
+        store.snapshot(key, {
+          key,
+          entity: "orders",
+          state: "a",
+          values: {},
+          seq: 0,
+          at: 0,
+          enteredAt: 0,
+        })
+      )
+    ).toBe("INVALID_KEY");
+    expect(readdirSync(dir)).toEqual([]);
+
+    const error = await store.load(key).catch((err: EkmanError) => err);
+    expect((error as EkmanError).key).toBe(key);
+    expect((error as EkmanError).message).toContain("limit is 240");
+  });
+
+  describe("reading what an earlier version wrote", () => {
+    it("renames a log and its snapshot to the current scheme and keeps both", async () => {
+      const dir = freshDir();
+      const earlier = writeEarlier(dir, "orders:Abc");
+      writeFileSync(
+        earlier.replace(".jsonl", ".snapshot.json"),
+        JSON.stringify({
+          key: "orders:Abc",
+          entity: "orders",
+          state: "a",
+          values: { owner: "orders:Abc" },
+          seq: 0,
+          at: 0,
+          enteredAt: 0,
+        })
+      );
+
+      const store = fileStore(dir);
+      const loaded = await store.load("orders:Abc");
+
+      expect(loaded?.seq).toBe(0);
+      expect(loaded?.snapshot?.values).toEqual({ owner: "orders:Abc" });
+      expect(readdirSync(join(dir, "orders")).sort()).toEqual([
+        "orders%3A%41bc.jsonl",
+        "orders%3A%41bc.snapshot.json",
+      ]);
+
+      await store.append(
+        "orders:Abc",
+        { ...created("orders:Abc"), from: "a", seq: 1 },
+        0
+      );
+      expect((await fileStore(dir).read("orders:Abc")).length).toBe(2);
+    });
+
+    it("does not hand one key the file an earlier version wrote for its case variant", async () => {
+      const dir = freshDir();
+      writeEarlier(dir, "orders:Abc");
+      const store = fileStore(dir);
+
+      // Asked for first, and where case is ignored its own name opens the other's file.
+      expect(await store.load("orders:abc")).toBeUndefined();
+
+      await store.append("orders:abc", created("orders:abc"), EMPTY_SEQ);
+      expect((await store.load("orders:Abc"))?.events[0]).toMatchObject({
+        values: { owner: "orders:Abc" },
+      });
+      expect((await store.load("orders:abc"))?.events).toHaveLength(1);
+    });
+
+    it("moves an entity whose directory name changed, and removes the old directory", async () => {
+      const dir = freshDir();
+      writeEarlier(dir, "Orders:1");
+      writeEarlier(dir, "a.b:1");
+
+      const store = fileStore(dir);
+
+      expect(store.keys).toEqual(["Orders:1", "a.b:1"]);
+      expect(readdirSync(dir).sort()).toEqual(["%4Frders", "a%2Eb"]);
+      expect((await store.load("Orders:1"))?.seq).toBe(0);
+    });
+
+    it("finds an entity's earlier directory when asked for one of its keys", async () => {
+      const dir = freshDir();
+      writeEarlier(dir, "Orders:1");
+
+      expect((await fileStore(dir).load("Orders:1"))?.seq).toBe(0);
+      expect(
+        (await fileStore(dir).scan({ entity: "Orders", now: 0 })).matches
+      ).toHaveLength(1);
+    });
+
+    it("leaves a directory in place while anything else is still in it", async () => {
+      const dir = freshDir();
+      writeEarlier(dir, "a.b:1");
+      writeFileSync(join(dir, "a.b", "notes.txt"), "not a log");
+
+      expect((await fileStore(dir).load("a.b:1"))?.seq).toBe(0);
+      expect(readdirSync(join(dir, "a.b"))).toEqual(["notes.txt"]);
+    });
+
+    it("refuses to choose when a key has a file under each scheme", async () => {
+      const dir = freshDir();
+      const earlier = writeEarlier(dir, "orders:Abc");
+      const current = logPathOf(dir, "orders:Abc");
+      writeFileSync(current, `${JSON.stringify(created("orders:Abc"))}\n`);
+      const store = fileStore(dir);
+
+      const error = await store.load("orders:Abc").catch((err) => err);
+
+      expect(error.code).toBe("STORE_UNAVAILABLE");
+      expect(error.key).toBe("orders:Abc");
+      expect(error.message).toMatch(TWO_FILES);
+      expect(error.message).not.toContain(dir);
+      expect(existsSync(earlier)).toBe(true);
+      expect(existsSync(current)).toBe(true);
+
+      // Not remembered as done: the next attempt checks again, and succeeds once the
+      // duplicate is gone.
+      rmSync(earlier);
+      expect((await store.load("orders:Abc"))?.seq).toBe(0);
+    });
+
+    it("leaves alone a file whose home is the same path in another case", async () => {
+      const dir = freshDir();
+      mkdirSync(join(dir, "Orders"));
+      const path = join(dir, "Orders", "orders%3Ab.jsonl");
+      writeFileSync(path, `${JSON.stringify(created("orders:b"))}\n`);
+
+      expect(await fileStore(dir).load("Orders:1")).toBeUndefined();
+      expect(existsSync(path)).toBe(true);
+    });
+
+    it("ignores names it did not give", async () => {
+      const dir = freshDir();
+      const store = fileStore(dir);
+      await store.append("orders:1", created("orders:1"), EMPTY_SEQ);
+
+      const strays = [
+        "README.jsonl",
+        "100%zz.jsonl",
+        "orders%3a2.jsonl",
+        "invoices%3A1.jsonl",
+        "café.jsonl",
+        "orders%3A1.jsonl.tmp",
+      ];
+      for (const stray of strays) {
+        writeFileSync(join(dir, "orders", stray), "{}\n");
+      }
+
+      const reopened = fileStore(dir);
+      expect(reopened.keys).toEqual(["orders:1"]);
+      expect(
+        (await reopened.scan({ entity: "orders", now: 0 })).matches
+      ).toHaveLength(1);
+      expect(readdirSync(join(dir, "orders")).sort()).toEqual(
+        [...strays, "orders%3A1.jsonl"].sort()
+      );
+    });
+  });
+
+  describe("permissions", () => {
+    const bitsOf = (path: string): number =>
+      statSync(path).mode % PERMISSION_RANGE;
+
+    it.skipIf(process.platform === "win32")(
+      "creates files and directories for their owner only",
+      async () => {
+        const dir = join(freshDir(), "logs");
+        const store = fileStore(dir);
+
+        await store.append("orders:1", created("orders:1"), EMPTY_SEQ);
+        await store.snapshot("orders:1", {
+          key: "orders:1",
+          entity: "orders",
+          state: "a",
+          values: {},
+          seq: 0,
+          at: 0,
+          enteredAt: 0,
+        });
+
+        expect(bitsOf(dir)).toBe(OWNER_ONLY_DIR);
+        expect(bitsOf(join(dir, "orders"))).toBe(OWNER_ONLY_DIR);
+        expect(bitsOf(logPathOf(dir, "orders:1"))).toBe(OWNER_ONLY_FILE);
+        expect(bitsOf(snapshotPathOf(dir, "orders:1"))).toBe(OWNER_ONLY_FILE);
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "uses the modes it was given",
+      async () => {
+        const dir = join(freshDir(), "logs");
+        const store = fileStore(dir, {
+          mode: { file: GROUP_READABLE_FILE, dir: GROUP_READABLE_DIR },
+        });
+
+        await store.append("orders:1", created("orders:1"), EMPTY_SEQ);
+
+        expect(bitsOf(join(dir, "orders"))).toBe(GROUP_READABLE_DIR);
+        expect(bitsOf(logPathOf(dir, "orders:1"))).toBe(GROUP_READABLE_FILE);
+      }
+    );
+
+    it.each([-1, 0o1000, 1.5, Number.NaN])(
+      "refuses %s as permission bits",
+      (bits) => {
+        expect(() => fileStore(freshDir(), { mode: { file: bits } })).toThrow(
+          PERMISSION_BITS
+        );
+        expect(() => fileStore(freshDir(), { mode: { dir: bits } })).toThrow(
+          PERMISSION_BITS
+        );
+      }
+    );
+  });
+
+  describe("options it does not have", () => {
+    it.each([
+      ["at the top level", { retenton: {} }],
+      ["under retention", { retention: { perLogByte: 1 } }],
+      ["under mode", { mode: { files: 0o600 } }],
+    ])("are refused %s", (_where, options) => {
+      const attempt = () => fileStore(freshDir(), options as object);
+
+      expect(attempt).toThrow(UNKNOWN_OPTION);
+      expect(attempt).toThrow(
+        expect.objectContaining({ code: "INVALID_CONFIG" })
+      );
+    });
+
+    it("are refused by the memory store too", () => {
+      expect(() => memoryStore({ nmae: "cache" } as object)).toThrow(
+        UNKNOWN_OPTION
+      );
+    });
+
+    it("are refused through the runtime's store config", () => {
+      expect(
+        () =>
+          new Ekman({
+            store: { kind: "file", dir: freshDir(), retenton: {} } as never,
+          })
+      ).toThrow(UNKNOWN_OPTION);
+    });
   });
 });
 

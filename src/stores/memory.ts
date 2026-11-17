@@ -1,3 +1,4 @@
+import { assertKnownKeys } from "../config";
 import { EkmanError } from "../errors";
 import type { EkmanEvent } from "../events";
 import type {
@@ -45,6 +46,7 @@ export class MemoryStore implements Store {
   readonly #snapshots = new Map<string, StoreSnapshot>();
 
   constructor(options: { name?: string; authority?: boolean } = {}) {
+    assertKnownKeys("the memory store's options", options, OPTION_KEYS);
     this.name = options.name ?? "memory";
     if (options.authority !== undefined) {
       this.authority = options.authority;
@@ -125,6 +127,8 @@ export class MemoryStore implements Store {
     return [...this.#events.keys()];
   }
 }
+
+const OPTION_KEYS = ["name", "authority"] as const;
 
 export function memoryStore(
   options: { name?: string; authority?: boolean } = {}

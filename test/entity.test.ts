@@ -179,6 +179,11 @@ describe("defineEntity validation", () => {
     ["empty", ""],
     ["containing a separator", "or:ders"],
     ["containing a space", "my orders"],
+    ["that is the parent directory", ".."],
+    ["that is the current directory", "."],
+    ["containing a control character", "or\u0001ders"],
+    ["containing half of a surrogate pair", "orders\ud83d"],
+    ["that is not a string", 42 as unknown as string],
   ])("rejects an entity name %s", (_why, name) => {
     expect(
       code(() => defineEntity(name, { initial: "a", states: { a: noop } }))

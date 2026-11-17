@@ -66,11 +66,43 @@ so the same service finds the same state however it was launched. A deployment w
 `package.json` beside it, such as a bundled single-file build, should name the path explicitly
 rather than take the default.
 
-One log per key:
+One log per key, in a directory per entity:
 
 ```
 .ekman/logs/orders/orders%3Aa-1.jsonl
 ```
+
+### File names
+
+A file is named for its key, with every byte percent-escaped except lowercase ASCII letters,
+digits, `-` and `_`. Uppercase letters are escaped as well: `orders:ABC` is stored as
+`orders%3A%41%42%43.jsonl`. Keys are case-sensitive and many filesystems are not (macOS and
+Windows by default, and most network shares), so two keys that differ only in case have to
+differ in more than case on disk to stay two instances. The key itself is unchanged inside the
+file, and it is the key, never the file name, that appears in history and queries.
+
+Versions before this escaped less, leaving uppercase letters and `.` as they were. Files named
+that way are renamed the first time the store uses their entity's directory, with no step for
+you to run. If a key has a file under both schemes, which takes moving between versions and
+back to produce, the store refuses that entity's directory with `STORE_UNAVAILABLE` and changes
+neither file.
+
+A name has to fit in one path component, so the file store refuses a key whose escaped name is
+longer than 240 bytes with `INVALID_KEY`. A key of lowercase letters and digits reaches that at
+240 characters; each uppercase letter, `:` or `.` counts as three, and other characters as three
+or more.
+
+### Permissions
+
+The store creates its directories as `0o700` and its files as `0o600`: readable by the user
+the process runs as and nobody else. To share them with a group, say so:
+
+```ts
+store: { kind: "file", mode: { file: 0o640, dir: 0o750 } }
+```
+
+The mode is applied when something is created. Files that already exist keep the permissions
+they have until a snapshot or a compaction replaces them.
 
 ### Compaction
 

@@ -15,6 +15,12 @@ A key is `<entity>:<segment>[:<segment>]*`, and its first segment names the enti
 human-readable on purpose: `deployments:abc123` is what you type into a query, what appears in
 history, and what you page someone with at 3am.
 
+A segment is non-empty and contains no `:`, no whitespace and no control character. It cannot be
+`.` or `..`, though `a.b` and `..x` are fine. A key is at most 512 characters, and it is never
+normalized: `orders:ABC` and `orders:abc` are two instances. An entity's name is the first
+segment of its keys, so it follows the same rules. Anything else is refused with `INVALID_KEY`
+at `send()`.
+
 One key owns one instance's state, its values, its inbox ordering, its resident memory, its
 place in persistence, its sequence numbering, and its history. Nothing is shared across keys,
 which is why nothing has to be locked across them.

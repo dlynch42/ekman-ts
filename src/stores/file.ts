@@ -5,14 +5,17 @@ import {
   readdirSync,
   readFileSync,
   renameSync,
+  rmdirSync,
   rmSync,
   statSync,
   truncateSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { assertKnownKeys } from "../config";
 import { EkmanError, isEkmanError } from "../errors";
 import type { EkmanEvent } from "../events";
+import { KEY_SEPARATOR } from "../key";
 import type {
   LoadResult,
   ScanCriteria,
@@ -123,13 +126,32 @@ export interface RetentionConfig {
   readonly policy?: RetentionPolicy;
 }
 
+/**
+ * Permission bits for what the store creates.
+ *
+ * Owner-only unless told otherwise, because a log holds every value an instance ever
+ * committed. Applied when a file or directory is created, so anything already on disk
+ * keeps the bits it has until compaction or a snapshot replaces it.
+ */
+export interface FileModeConfig {
+  /** Logs and snapshots. Defaults to `0o600`. */
+  readonly file?: number;
+  /** The store's directory and the one under it per entity. Defaults to `0o700`. */
+  readonly dir?: number;
+}
+
 export interface FileStoreOptions {
   /** Names the layer. Appears in telemetry and in the runtime's refusal messages. */
   readonly name?: string;
   /** Claim the commit authority, rather than letting the stack pick. */
   readonly authority?: boolean;
   readonly retention?: RetentionConfig;
+  readonly mode?: FileModeConfig;
 }
+
+const OPTION_KEYS = ["name", "authority", "retention", "mode"] as const;
+const RETENTION_KEYS = ["perLogBytes", "totalBytes", "policy"] as const;
+const MODE_KEYS = ["file", "dir"] as const;
 
 /** 5MB, roughly fifteen to twenty thousand events at a typical line length. */
 const DEFAULT_PER_LOG_BYTES = 5 * 1024 * 1024;
@@ -147,6 +169,7 @@ interface ResolvedRetention {
 function resolveRetention(
   config: RetentionConfig | undefined
 ): ResolvedRetention {
+  assertKnownKeys("file store retention", config, RETENTION_KEYS);
   const perLogBytes = config?.perLogBytes ?? DEFAULT_PER_LOG_BYTES;
   const totalBytes = config?.totalBytes ?? Number.POSITIVE_INFINITY;
   const policy = config?.policy ?? "none";
@@ -187,6 +210,138 @@ function resolveRetention(
   }
 
   return { perLogBytes, totalBytes, policy, bounded };
+}
+
+const DEFAULT_FILE_MODE = 0o600;
+const DEFAULT_DIR_MODE = 0o700;
+const ALL_PERMISSION_BITS = 0o777;
+
+interface ResolvedMode {
+  readonly file: number;
+  readonly dir: number;
+}
+
+function resolveMode(config: FileModeConfig | undefined): ResolvedMode {
+  assertKnownKeys("file store mode", config, MODE_KEYS);
+  const resolved = {
+    file: config?.file ?? DEFAULT_FILE_MODE,
+    dir: config?.dir ?? DEFAULT_DIR_MODE,
+  };
+
+  for (const [which, bits] of Object.entries(resolved)) {
+    if (!(Number.isInteger(bits) && bits >= 0 && bits <= ALL_PERMISSION_BITS)) {
+      throw new EkmanError(
+        "INVALID_CONFIG",
+        `file store mode.${which} must be permission bits between 0 and 0o777, received ${JSON.stringify(bits)}.`
+      );
+    }
+  }
+
+  return resolved;
+}
+
+const PERCENT = 0x25;
+const BYTE_VALUES = 256;
+const HEX_RADIX = 16;
+const HEX_WIDTH = 2;
+
+/** One entry per byte value: the byte itself where it is plain, its escape elsewhere. */
+function nameTable(plain: string): readonly string[] {
+  return Array.from({ length: BYTE_VALUES }, (_, byte) => {
+    const character = String.fromCharCode(byte);
+    return plain.includes(character)
+      ? character
+      : `%${byte.toString(HEX_RADIX).toUpperCase().padStart(HEX_WIDTH, "0")}`;
+  });
+}
+
+const LOWER_AND_DIGITS = "abcdefghijklmnopqrstuvwxyz0123456789";
+const CURRENT_NAMES = nameTable(`${LOWER_AND_DIGITS}-_`);
+const EARLIER_NAMES = nameTable(
+  `${LOWER_AND_DIGITS}${LOWER_AND_DIGITS.toUpperCase()}-_.!~*'()`
+);
+
+function encodeWith(text: string, table: readonly string[]): string {
+  let name = "";
+  for (const byte of Buffer.from(text, "utf8")) {
+    name += table[byte];
+  }
+  return name;
+}
+
+/**
+ * The name a key or an entity is stored under.
+ *
+ * Every byte of its UTF-8 form is percent-escaped unless it is a lowercase ASCII letter, a
+ * digit, `-` or `_`. Uppercase letters are escaped too, and that is the point: keys are
+ * case-sensitive and many filesystems are not, so `orders:ABC` and `orders:abc` have to
+ * differ in more than case to be two files. Here they differ in a digit, `%41` against
+ * `a`, and the escapes themselves are always written in uppercase hex, so no two keys
+ * fold to one name.
+ *
+ * Nothing it produces contains a `.` or a separator, so a name is never a path.
+ */
+function encodeName(text: string): string {
+  return encodeWith(text, CURRENT_NAMES);
+}
+
+/**
+ * The name the same text had before uppercase letters were escaped.
+ *
+ * Only ever used to recognize what an earlier version left on disk.
+ */
+function earlierName(text: string): string {
+  return encodeWith(text, EARLIER_NAMES);
+}
+
+/**
+ * The key or entity a stored name stands for, or undefined when the store did not write
+ * it.
+ *
+ * Both naming schemes are percent escapes, so one decoder reads either. A name counts as
+ * the store's own only if encoding the result gives the name back under one scheme or the
+ * other, which is what keeps a stray file from being read as a key.
+ */
+function decodeName(name: string): string | undefined {
+  const bytes: number[] = [];
+  for (let index = 0; index < name.length; index += 1) {
+    const code = name.charCodeAt(index);
+    if (code === PERCENT) {
+      bytes.push(
+        Number.parseInt(name.slice(index + 1, index + 1 + HEX_WIDTH), HEX_RADIX)
+      );
+      index += HEX_WIDTH;
+    } else {
+      bytes.push(code);
+    }
+  }
+
+  const text = Buffer.from(bytes).toString("utf8");
+  return encodeName(text) === name || earlierName(text) === name
+    ? text
+    : undefined;
+}
+
+/**
+ * The key a file in an entity's directory is named for, or undefined when the name is not
+ * one the store gives a key there.
+ *
+ * It has to decode to a key, and that key's entity has to be the one the directory is
+ * for. The directory is compared without regard to case, since a filesystem that ignores
+ * case hands back one directory for two entities that differ only by it.
+ */
+function keyNamed(directory: string, stem: string): string | undefined {
+  const key = decodeName(stem);
+  if (key === undefined || !key.includes(KEY_SEPARATOR)) {
+    return;
+  }
+
+  const entity = entityOf(key);
+  const found = directory.toLowerCase();
+  return found === encodeName(entity).toLowerCase() ||
+    found === earlierName(entity).toLowerCase()
+    ? key
+    : undefined;
 }
 
 /**
@@ -237,6 +392,10 @@ function toStoreError(
  * so a flat directory would mean listing every other entity's files to answer about one.
  * Given no directory, the store takes `.ekman/logs` under the calling project's root.
  *
+ * A file is named for its key, escaped so that two keys differing only in case are two
+ * files on a filesystem that ignores case. Logs written under the earlier naming scheme
+ * are renamed the first time their entity's directory is used.
+ *
  * A filesystem failure reaches the caller as `STORE_UNAVAILABLE`, naming the store and the
  * key. Once a line is in the log the append has succeeded: accounting and compaction run
  * after it, and a failure there is kept on `lastHousekeepingError` instead of being
@@ -267,6 +426,12 @@ export class FileStore implements Store {
   readonly #seq = new Map<string, number>();
 
   readonly #retention: ResolvedRetention;
+  readonly #mode: ResolvedMode;
+
+  /** Where each key's files are, worked out once per key. */
+  readonly #paths = new Map<string, KeyPaths>();
+  /** Directory names already checked for files an earlier version left behind. */
+  readonly #adopted = new Set<string>();
 
   /**
    * Bytes per log, and their total.
@@ -311,7 +476,9 @@ export class FileStore implements Store {
   ) {
     const named = typeof dirOrOptions === "string";
     const options = (named ? maybeOptions : dirOrOptions) ?? {};
+    assertKnownKeys("the file store's options", options, OPTION_KEYS);
     this.#retention = resolveRetention(options.retention);
+    this.#mode = resolveMode(options.mode);
 
     // No directory given means the caller does not care where, not that they do not care
     // whether. Durability was opted into by choosing this store at all; the path is the
@@ -326,7 +493,7 @@ export class FileStore implements Store {
     // Eagerly, not at first append: a root that cannot be created is a configuration that
     // cannot work, and startup is the only useful moment to find that out.
     try {
-      mkdirSync(this.dir, { recursive: true });
+      mkdirSync(this.dir, { recursive: true, mode: this.#mode.dir });
     } catch (error) {
       const { code } = error as { code?: unknown };
       // biome-ignore lint/style/useErrorCause: EkmanError takes `cause` in its options bag and forwards it to the Error constructor
@@ -412,8 +579,9 @@ export class FileStore implements Store {
    */
   #write(key: string, line: string): void {
     try {
-      mkdirSync(this.#entityDir(key), { recursive: true });
-      appendFileSync(this.#logPath(key), line, "utf8");
+      const { dir, log } = this.#pathsOf(key);
+      mkdirSync(dir, { recursive: true, mode: this.#mode.dir });
+      appendFileSync(log, line, { encoding: "utf8", mode: this.#mode.file });
     } catch (error) {
       this.#seq.delete(key);
       throw error;
@@ -463,8 +631,9 @@ export class FileStore implements Store {
         return;
       }
 
-      mkdirSync(this.#entityDir(key), { recursive: true });
-      this.#writeWhole(this.#snapshotPath(key), JSON.stringify(snapshot));
+      const { dir, snapshot: path } = this.#pathsOf(key);
+      mkdirSync(dir, { recursive: true, mode: this.#mode.dir });
+      this.#writeWhole(path, JSON.stringify(snapshot));
       this.#accountSnapshot(key);
     });
   }
@@ -490,6 +659,7 @@ export class FileStore implements Store {
       // would be appended at the old number and refused as a conflict.
       this.#seq.delete(key);
       this.#uncompactable.delete(key);
+      this.#paths.delete(key);
 
       // Zero when nothing is counting yet, which makes this a no-op rather than a special
       // case: an unseeded store has a total of zero to take it off. Both files come off,
@@ -538,9 +708,8 @@ export class FileStore implements Store {
    * within a filesystem.
    *
    * The temporary file is always created here and never reused. One a crash left behind
-   * is removed first, so its contents and its permissions go with it. A file that replaces
-   * another is created with the permissions the other had, so a log somebody restricted
-   * is not widened by being rewritten.
+   * is removed first, so its contents and its permissions go with it, and what replaces
+   * the destination always has the configured mode.
    */
   #writeWhole(path: string, contents: string): void {
     const temp = `${path}.tmp`;
@@ -549,9 +718,7 @@ export class FileStore implements Store {
       writeFileSync(temp, contents, {
         encoding: "utf8",
         flag: "wx",
-        mode: existsSync(path)
-          ? statSync(path).mode % PERMISSION_SPAN
-          : undefined,
+        mode: this.#mode.file,
       });
       renameSync(temp, path);
     } catch (error) {
@@ -831,33 +998,135 @@ export class FileStore implements Store {
     );
   }
 
-  /** The keys under one entity, or under all of them when no entity is named. */
+  /**
+   * The keys under one entity, or under all of them when no entity is named.
+   *
+   * Read back from the file names, which is exact: a name decodes to the one key it was
+   * made from. Anything the store did not name is left out, since an application is free
+   * to keep its own files alongside and a stray one must not be mistaken for a key or
+   * stop the walk.
+   */
   #keysOf(entity?: string): readonly string[] {
-    const entities =
-      entity === undefined
-        ? // Only directories. Anything else here belongs to whoever put it there: an
-          // application is free to keep its own files alongside, and a stray one must not
-          // be mistaken for an entity or stop the walk.
-          readdirSync(this.dir, { withFileTypes: true })
-            .filter((entry) => entry.isDirectory())
-            .map((entry) => entry.name)
-        : [encodeURIComponent(entity)];
-
     const keys: string[] = [];
-    for (const encoded of entities) {
-      const dir = join(this.dir, encoded);
+    for (const name of this.#directoriesOf(entity)) {
+      const dir = join(this.dir, name);
       if (!existsSync(dir)) {
-        // An entity nothing has been written for yet, which is the normal early state.
         continue;
       }
-      for (const name of readdirSync(dir)) {
-        if (name.endsWith(LOG_SUFFIX)) {
-          keys.push(decodeURIComponent(name.slice(0, -LOG_SUFFIX.length)));
+      for (const file of readdirSync(dir)) {
+        const key = file.endsWith(LOG_SUFFIX)
+          ? keyNamed(name, file.slice(0, -LOG_SUFFIX.length))
+          : undefined;
+        if (key !== undefined) {
+          keys.push(key);
         }
       }
     }
 
     return keys.sort();
+  }
+
+  /**
+   * The directory names to list for one entity, or for all of them, once anything an
+   * earlier version left in them has been renamed.
+   *
+   * For all of them the root is listed twice, because adopting moves files into
+   * directories that may not have existed a moment ago and removes the ones it emptied.
+   */
+  #directoriesOf(entity?: string): readonly string[] {
+    if (entity !== undefined) {
+      return [this.#adopt(entity)];
+    }
+
+    for (const name of this.#directories()) {
+      this.#adoptDirectory(name);
+    }
+    return this.#directories();
+  }
+
+  #directories(): readonly string[] {
+    return readdirSync(this.dir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+  }
+
+  /**
+   * Make an entity's directory safe to address by name, and return that name.
+   *
+   * Both the current name and the earlier one are checked. On a filesystem that ignores
+   * case the current name of one entity can open a directory an earlier version made for
+   * another, so files are placed by what their own names decode to, never by which
+   * directory they were found in.
+   */
+  #adopt(entity: string): string {
+    const current = encodeName(entity);
+    this.#adoptDirectory(current);
+    this.#adoptDirectory(earlierName(entity));
+    return current;
+  }
+
+  /**
+   * Rename whatever an earlier version left in one directory, once per process.
+   *
+   * Done for the whole directory before any key in it is looked up by name. Looking up
+   * first is what would go wrong: where case is ignored, the current name of `orders:abc`
+   * opens the file an earlier version wrote for `orders:Abc`.
+   */
+  #adoptDirectory(name: string): void {
+    if (this.#adopted.has(name)) {
+      return;
+    }
+
+    const dir = join(this.dir, name);
+    if (existsSync(dir)) {
+      const moved = readdirSync(dir).filter((file) => this.#rehome(name, file));
+      if (moved.length > 0 && readdirSync(dir).length === 0) {
+        rmdirSync(dir);
+      }
+    }
+    this.#adopted.add(name);
+  }
+
+  /**
+   * Move one file to where its key belongs under the current naming scheme, reporting
+   * whether it moved.
+   *
+   * A file already in place, and a file the store did not name, are left alone. So is one
+   * whose destination is the same path in another case, which is the same file wherever
+   * that can happen.
+   */
+  #rehome(directory: string, file: string): boolean {
+    const suffix = [SNAPSHOT_SUFFIX, LOG_SUFFIX].find((ending) =>
+      file.endsWith(ending)
+    );
+    const key =
+      suffix === undefined
+        ? undefined
+        : keyNamed(directory, file.slice(0, -suffix.length));
+    if (key === undefined) {
+      return false;
+    }
+
+    const home = encodeName(entityOf(key));
+    const from = join(directory, file);
+    const to = join(home, `${encodeName(key)}${suffix}`);
+    if (from.toLowerCase() === to.toLowerCase()) {
+      return false;
+    }
+
+    if (existsSync(join(this.dir, to))) {
+      throw new EkmanError(
+        "STORE_UNAVAILABLE",
+        `the ${this.name} store holds two files for ${JSON.stringify(key)}, one of them named ` +
+          "under an earlier scheme. Neither was changed. Keep the one that is current and " +
+          "remove the other.",
+        { key }
+      );
+    }
+
+    mkdirSync(join(this.dir, home), { recursive: true, mode: this.#mode.dir });
+    renameSync(join(this.dir, from), join(this.dir, to));
+    return true;
   }
 
   /**
@@ -953,42 +1222,68 @@ export class FileStore implements Store {
   }
 
   /**
-   * The directory holding one entity's logs.
+   * Where a key's files are.
    *
-   * Created on write rather than up front, because an entity's directory cannot be known
-   * to be needed until a key belonging to it arrives.
+   * The entity's directory is created on write rather than here, because it cannot be
+   * known to be needed until something is written. The key stays readable inside the
+   * file: the name is a storage-layout detail and must never become the identity anyone
+   * reads.
+   *
+   * A name has to fit in one path component with its suffix, so a key whose name does not
+   * is refused, and that is `INVALID_KEY` because no retry can make it fit.
    */
-  #entityDir(key: string): string {
-    return join(this.dir, encodeURIComponent(entityOf(key)));
+  #pathsOf(key: string): KeyPaths {
+    const known = this.#paths.get(key);
+    if (known !== undefined) {
+      return known;
+    }
+
+    const name = encodeName(key);
+    if (name.length > MAX_NAME_BYTES) {
+      throw new EkmanError(
+        "INVALID_KEY",
+        `the ${this.name} store names a file after each key, and this key's name is ${name.length} bytes ` +
+          `where the limit is ${MAX_NAME_BYTES}. Uppercase letters and anything outside ASCII ` +
+          "letters, digits, - and _ take three bytes or more each.",
+        { key }
+      );
+    }
+
+    const dir = join(this.dir, this.#adopt(entityOf(key)));
+    const paths = {
+      dir,
+      log: join(dir, `${name}${LOG_SUFFIX}`),
+      snapshot: join(dir, `${name}${SNAPSHOT_SUFFIX}`),
+    };
+    this.#paths.set(key, paths);
+    return paths;
   }
 
-  /**
-   * Keys contain `:`, which is not a filename on every platform, so the name is
-   * percent-encoded. The key itself stays human-readable inside the file: the encoding is
-   * a storage-layout detail and must never become the identity anyone reads.
-   */
   #logPath(key: string): string {
-    return join(
-      this.#entityDir(key),
-      `${encodeURIComponent(key)}${LOG_SUFFIX}`
-    );
+    return this.#pathsOf(key).log;
   }
 
   #snapshotPath(key: string): string {
-    return join(
-      this.#entityDir(key),
-      `${encodeURIComponent(key)}${SNAPSHOT_SUFFIX}`
-    );
+    return this.#pathsOf(key).snapshot;
   }
 }
 
+interface KeyPaths {
+  readonly dir: string;
+  readonly log: string;
+  readonly snapshot: string;
+}
+
+/**
+ * The longest encoded name, in bytes. The longest suffix added to it is 14 bytes, and a
+ * path component is limited to 255 on the filesystems this runs on.
+ */
+const MAX_NAME_BYTES = 240;
 const LOGS_DIR_NAME = "logs";
 const LOG_SUFFIX = ".jsonl";
 const SNAPSHOT_SUFFIX = ".snapshot.json";
 /** The record separator, as a byte, because torn tails are found by byte offset. */
 const NEWLINE = 0x0a;
-/** A file mode modulo this is its permission bits: who may read, write and run it. */
-const PERMISSION_SPAN = 0o1000;
 
 export function fileStore(options?: FileStoreOptions): FileStore;
 export function fileStore(dir: string, options?: FileStoreOptions): FileStore;

@@ -21,7 +21,7 @@ answer, and it is one call.
 
 | Field | Type | What it does |
 |---|---|---|
-| `entity` | `string` | Required. Which entity to search. |
+| `entity` | `string` | Required. Which entity to search. One that is not registered is refused with `UNKNOWN_ENTITY`. |
 | `state` | `string` | Only instances currently in this state. |
 | `olderThan` | `number` \| `string` | Time in state, as milliseconds or a duration string such as `"5m"`, `"2h"`, `"30d"`. |
 | `limit` | `number` | Cap the answer. Truncation is reported, never silent. |

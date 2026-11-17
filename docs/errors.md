@@ -31,8 +31,8 @@ still true.
 
 | Code | Means | HTTP |
 |---|---|---|
-| `INVALID_KEY` | The key is malformed. | 400 |
-| `UNKNOWN_ENTITY` | The key's first segment names no registered entity. | 404 |
+| `INVALID_KEY` | The key is malformed, or is too long for the store to name a file after. | 400 |
+| `UNKNOWN_ENTITY` | The key's first segment, or a query's `entity`, names no registered entity. | 404 |
 | `UNKNOWN_STATE` | The current state has no handler and the unknown policy is `reject`. | 409 |
 | `UNKNOWN_TRIGGER` | The trigger's type is not in the entity's declared trigger list. | 422 |
 | `CONSTRAINT_VIOLATED` | A result did not satisfy a constraint whose policy is `reject`. | 409 |

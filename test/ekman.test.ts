@@ -101,6 +101,29 @@ describe("addressing", () => {
     );
   });
 
+  it("refuses an unregistered entity before any store is asked about it", async () => {
+    const ekman = new Ekman({ entities: [orders] });
+
+    expect(await code(ekman.history("invoices:1"))).toBe("UNKNOWN_ENTITY");
+    expect(await code(ekman.forget("invoices:1"))).toBe("UNKNOWN_ENTITY");
+    expect(await code(ekman.query({ entity: "invoices" }))).toBe(
+      "UNKNOWN_ENTITY"
+    );
+  });
+
+  it("names the key that asked, or the query when no key did", async () => {
+    const ekman = new Ekman({ entities: [orders] });
+
+    const byKey = await ekman.history("invoices:1").catch((err) => err);
+    expect(byKey.key).toBe("invoices:1");
+    expect(byKey.message).toContain('key "invoices:1" names entity "invoices"');
+
+    const byQuery = await ekman.query({ entity: "invoices" }).catch((e) => e);
+    expect(byQuery.key).toBeUndefined();
+    expect(byQuery.message).toContain('the query names entity "invoices"');
+    expect(byQuery.message).toContain("Registered: orders");
+  });
+
   it("never throws synchronously, so every caller can rely on catch", () => {
     const ekman = new Ekman({ entities: [orders] });
     const promise = ekman.send("nope", { type: "approve" });

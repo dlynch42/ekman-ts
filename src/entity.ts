@@ -2,7 +2,7 @@ import { assertKnownKeys } from "./config";
 import type { CompiledTemporal } from "./constraints";
 import { compileConstraints } from "./constraints";
 import { EkmanError } from "./errors";
-import { buildKey } from "./key";
+import { buildKey, KEY_SEPARATOR, segmentFault } from "./key";
 import type { ExecutionPolicy } from "./policy";
 import { assertPolicyKeys, POLICY_KEYS } from "./policy";
 import { States } from "./states";
@@ -18,8 +18,6 @@ import type {
 } from "./types";
 import { ERROR_FALLBACK } from "./types";
 import { sealInitialValues } from "./values";
-
-const WHITESPACE = /\s/;
 
 /**
  * Define an entity: its states, handlers, and policies for one domain.
@@ -198,16 +196,16 @@ export function statesFromEntries<
  * the same rules a segment does.
  */
 function assertEntityName(name: string): void {
-  if (typeof name !== "string" || name.length === 0) {
-    throw new EkmanError(
-      "INVALID_KEY",
-      "entity name must be a non-empty string"
-    );
+  if (typeof name !== "string") {
+    throw new EkmanError("INVALID_KEY", "entity name must be a string");
   }
-  if (name.includes(":") || WHITESPACE.test(name)) {
+  const fault = name.includes(KEY_SEPARATOR)
+    ? `contains "${KEY_SEPARATOR}"`
+    : segmentFault(name);
+  if (fault !== undefined) {
     throw new EkmanError(
       "INVALID_KEY",
-      `entity name ${JSON.stringify(name)} must not contain ":" or whitespace, ` +
+      `entity name ${JSON.stringify(name)} ${fault}, and it has to be a valid key segment ` +
         "because it is the first segment of every key it addresses"
     );
   }

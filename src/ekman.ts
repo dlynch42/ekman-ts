@@ -179,6 +179,31 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   }
 
   /**
+   * The definition registered under an entity name, or an `UNKNOWN_ENTITY` refusal.
+   *
+   * Everything that takes a key or an entity name from a caller goes through this before
+   * it reaches a store, so a name nobody registered is never looked up, listed or deleted
+   * on disk.
+   *
+   * @param entity the name to resolve
+   * @param key the key that named it, when one did, for the error
+   */
+  #definitionFor(entity: string, key?: string): AnyDefinition {
+    const definition = this.#definitions.get(entity);
+    if (definition === undefined) {
+      const subject =
+        key === undefined ? "the query" : `key ${JSON.stringify(key)}`;
+      throw new EkmanError(
+        "UNKNOWN_ENTITY",
+        `${subject} names entity ${JSON.stringify(entity)}, which is not registered. ` +
+          `Registered: ${this.entityNames.join(", ") || "(none)"}`,
+        key === undefined ? {} : { key }
+      );
+    }
+    return definition;
+  }
+
+  /**
    * Deliver a trigger to the instance at `key`.
    *
    * Resolves at commit with the committed state, values and sequence. Rejects with an
@@ -197,17 +222,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       );
     }
 
-    const parsed = parseKey(key);
-    const definition = this.#definitions.get(parsed.entity);
-
-    if (definition === undefined) {
-      throw new EkmanError(
-        "UNKNOWN_ENTITY",
-        `key ${JSON.stringify(key)} names entity "${parsed.entity}", which is not registered. ` +
-          `Registered: ${this.entityNames.join(", ") || "(none)"}`,
-        { key }
-      );
-    }
+    const definition = this.#definitionFor(parseKey(key).entity, key);
 
     const normalized = this.#normalizeTrigger(trigger, key);
     const instance = this.#resolveInstance(key, definition, normalized);
@@ -284,7 +299,8 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       );
     }
 
-    const parsed = parseKey(key).key;
+    const { key: parsed, entity } = parseKey(key);
+    this.#definitionFor(entity, key);
     const instance = this.#instances.get(parsed);
 
     // Checked before anything is deleted, so a store that cannot delete leaves the runtime
@@ -348,7 +364,8 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   async history<S extends string = string, V extends Values = Values>(
     key: string
   ): Promise<HistoryResult<S, V>> {
-    const parsed = parseKey(key).key;
+    const { key: parsed, entity } = parseKey(key);
+    this.#definitionFor(entity, key);
     const instance = this.#instances.get(parsed);
     const { authority } = this.#stack;
 
@@ -402,6 +419,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * must never do.
    */
   async query(criteria: QueryCriteria): Promise<QueryResult> {
+    this.#definitionFor(criteria.entity);
     const at = this.#now();
     const olderThanMs =
       criteria.olderThan === undefined
