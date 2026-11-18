@@ -13,6 +13,7 @@ import { fail, stay, transitionTo } from "../src/results";
 import type { Store } from "../src/store";
 import { memoryStore } from "../src/stores/memory";
 import type { TelemetryEvent } from "../src/telemetry";
+import { frozenClock } from "./deps";
 
 const NON_NEGATIVE_INTEGER = /non-negative integer/;
 const NOT_BUILT = /was not built by defineEntity/;
@@ -948,17 +949,6 @@ describe("remaining edges", () => {
     }
   });
 });
-
-/** A clock frozen until something moves it, which is what elapsed time needs. */
-const frozenClock = (start = 0) => {
-  let t = start;
-  return {
-    now: () => t,
-    advance: (ms: number) => {
-      t += ms;
-    },
-  };
-};
 
 const stalling = defineEntity("stalling", {
   initial: "deploying",

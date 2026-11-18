@@ -13,6 +13,7 @@ import { EMPTY_SEQ, entityOf, latestSeq, replay, scanKeys } from "../src/store";
 import { fileStore } from "../src/stores/file";
 import { MemoryStore, memoryStore } from "../src/stores/memory";
 import type { TelemetryEvent } from "../src/telemetry";
+import { frozenClock } from "./deps";
 
 const orders = defineEntity("orders", {
   initial: "open",
@@ -1567,6 +1568,641 @@ describe("values restored from a store", () => {
       .catch((error: EkmanError) => error.code);
 
     expect(tampering).toBe("HANDLER_FAILED");
+    await second.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+/** Escalates when told it has been deploying too long, and can be sent back to try again. */
+const stalling = defineEntity("stalling", {
+  initial: "deploying",
+  states: {
+    deploying: (_i, trigger) =>
+      trigger.type === "constraint.temporal"
+        ? transitionTo("stalled")
+        : stay({ touched: true }),
+    stalled: (_i, trigger) =>
+      trigger.type === "redeploy" ? transitionTo("deploying") : stay(),
+  },
+  constraints: {
+    temporal: [{ name: "too-slow", in: "deploying", within: 100 }],
+  },
+});
+
+/** Records that it has been waiting too long and does nothing about it. */
+const watched = defineEntity("watched", {
+  initial: "waiting",
+  states: { waiting: () => stay({ touched: true }) },
+  constraints: {
+    temporal: [
+      { name: "too-slow", in: "waiting", within: 100, policy: "warn" },
+      { name: "far-too-slow", in: "waiting", within: 500, policy: "warn" },
+    ],
+  },
+});
+
+const shape = (events: readonly EkmanEvent[]): string[] =>
+  events.map((event) => `${event.type}@${event.seq}`);
+
+const violations = (events: readonly EkmanEvent[]): EkmanEvent[] =>
+  events.filter((event) => event.type === "violation");
+
+describe("time-in-state bounds for instances a store holds", () => {
+  it("escalates an instance that was evicted, by loading it", async () => {
+    const clock = frozenClock();
+    const seen: TelemetryEvent[] = [];
+    const ekman = new Ekman({
+      entities: [stalling],
+      store: memoryStore(),
+      memory: { maxBytes: 0 },
+      now: clock.now,
+      telemetry: { "*": (event) => seen.push(event) },
+    });
+
+    await ekman.entities.stalling.send("a", { type: "start" });
+    expect(ekman.residentKeys).toEqual([]);
+
+    clock.advance(100);
+    expect(await ekman.sweep()).toBe(1);
+
+    const { events } = await ekman.entities.stalling.history("a");
+    expect(shape(events)).toEqual([
+      "transition@0",
+      "transition@1",
+      "violation@1",
+      "transition@2",
+    ]);
+    expect(events.at(-1)).toMatchObject({ from: "deploying", to: "stalled" });
+    expect(
+      seen.filter((event) => event.type === "instance.restored")
+    ).toHaveLength(1);
+    // It came back for its escalation and left again.
+    expect(ekman.residentKeys).toEqual([]);
+    await ekman.close();
+  });
+
+  it("escalates stored instances in key order", async () => {
+    const clock = frozenClock();
+    const seen: TelemetryEvent[] = [];
+    const ekman = new Ekman({
+      entities: [stalling],
+      store: memoryStore(),
+      memory: { maxBytes: 0 },
+      now: clock.now,
+      telemetry: { "constraint.escalated": (event) => seen.push(event) },
+    });
+    await ekman.entities.stalling.send("c", { type: "start" });
+    await ekman.entities.stalling.send("a", { type: "start" });
+    await ekman.entities.stalling.send("b", { type: "start" });
+
+    clock.advance(100);
+    expect(await ekman.sweep()).toBe(3);
+    expect(seen.map((event) => "key" in event && event.key)).toEqual([
+      "stalling:a",
+      "stalling:b",
+      "stalling:c",
+    ]);
+    await ekman.close();
+  });
+
+  it("leaves an instance that is not yet past its bound in the store", async () => {
+    const clock = frozenClock();
+    const seen: TelemetryEvent[] = [];
+    const ekman = new Ekman({
+      entities: [stalling],
+      store: memoryStore(),
+      memory: { maxBytes: 0 },
+      now: clock.now,
+      telemetry: { "instance.restored": (event) => seen.push(event) },
+    });
+
+    await ekman.entities.stalling.send("a", { type: "start" });
+    clock.advance(99);
+
+    expect(await ekman.sweep()).toBe(0);
+    expect(seen).toEqual([]);
+    await ekman.close();
+  });
+
+  it("fires once for a stay in a state, across a restart", async () => {
+    const clock = frozenClock();
+    const store = memoryStore();
+    const first = new Ekman({
+      entities: [watched],
+      store,
+      now: clock.now,
+    });
+    await first.entities.watched.send("a", { type: "start" });
+    clock.advance(100);
+    expect(await first.sweep()).toBe(1);
+    await first.close();
+
+    const second = new Ekman({ entities: [watched], store, now: clock.now });
+    clock.advance(100);
+    expect(await second.sweep()).toBe(0);
+
+    const { events } = await second.entities.watched.history("a");
+    expect(violations(events)).toHaveLength(1);
+    await second.close();
+  });
+
+  it("fires once when the eviction snapshot was taken before the bound fired", async () => {
+    const clock = frozenClock();
+    const store = memoryStore();
+    const ekman = new Ekman({
+      entities: [watched],
+      store,
+      memory: { maxBytes: 0 },
+      now: clock.now,
+    });
+    await ekman.entities.watched.send("a", { type: "start" });
+    clock.advance(100);
+    expect(await ekman.sweep()).toBe(1);
+
+    // The snapshot from the first eviction is at the same sequence as the violation, so
+    // the store keeps it and the latch is rebuilt from the violation itself.
+    expect((await store.load("watched:a"))?.snapshot?.temporal).toBeUndefined();
+
+    await ekman.entities.watched.send("b", { type: "start" });
+    clock.advance(100);
+    expect(await ekman.sweep()).toBe(1);
+
+    const { events } = await ekman.entities.watched.history("a");
+    expect(violations(events)).toHaveLength(1);
+    await ekman.close();
+  });
+
+  it("does not load an instance again until one of its bounds has something to say", async () => {
+    const clock = frozenClock();
+    const seen: TelemetryEvent[] = [];
+    const ekman = new Ekman({
+      entities: [watched],
+      store: memoryStore(),
+      memory: { maxBytes: 0 },
+      now: clock.now,
+      telemetry: { "instance.restored": (event) => seen.push(event) },
+    });
+    await ekman.entities.watched.send("a", { type: "start" });
+
+    clock.advance(100);
+    expect(await ekman.sweep()).toBe(1);
+    expect(seen).toHaveLength(1);
+
+    clock.advance(100);
+    expect(await ekman.sweep()).toBe(0);
+    expect(await ekman.sweep()).toBe(0);
+    expect(seen).toHaveLength(1);
+
+    // The second bound comes due, so the instance is worth loading again.
+    clock.advance(300);
+    expect(await ekman.sweep()).toBe(1);
+    expect(seen).toHaveLength(2);
+
+    clock.advance(1000);
+    expect(await ekman.sweep()).toBe(0);
+    expect(seen).toHaveLength(2);
+    await ekman.close();
+  });
+
+  it("loads an instance again once it has committed, whatever was noted about it", async () => {
+    const clock = frozenClock();
+    const seen: TelemetryEvent[] = [];
+    const ekman = new Ekman({
+      entities: [watched],
+      store: memoryStore(),
+      memory: { maxBytes: 0 },
+      now: clock.now,
+      telemetry: { "instance.restored": (event) => seen.push(event) },
+    });
+    await ekman.entities.watched.send("a", { type: "start" });
+    clock.advance(100);
+    await ekman.sweep();
+
+    await ekman.entities.watched.send("a", { type: "poke" });
+    seen.length = 0;
+
+    expect(await ekman.sweep()).toBe(0);
+    expect(seen).toHaveLength(1);
+    await ekman.close();
+  });
+
+  it("fires again after the instance has left the state and come back", async () => {
+    const clock = frozenClock();
+    const store = memoryStore();
+    const first = new Ekman({ entities: [stalling], store, now: clock.now });
+    await first.entities.stalling.send("a", { type: "start" });
+    clock.advance(100);
+    expect(await first.sweep()).toBe(1);
+    await first.entities.stalling.send("a", { type: "redeploy" });
+    await first.close();
+
+    const second = new Ekman({ entities: [stalling], store, now: clock.now });
+    clock.advance(100);
+    expect(await second.sweep()).toBe(1);
+
+    const { events } = await second.entities.stalling.history("a");
+    expect(violations(events)).toHaveLength(2);
+    await second.close();
+  });
+
+  it("does not fire again for a handler that declined the escalation", async () => {
+    const patient = defineEntity("patient", {
+      initial: "waiting",
+      states: { waiting: () => stay({ touched: true }) },
+      constraints: {
+        temporal: [{ name: "too-slow", in: "waiting", within: 100 }],
+      },
+    });
+    const clock = frozenClock();
+    const store = memoryStore();
+    const first = new Ekman({ entities: [patient], store, now: clock.now });
+    await first.entities.patient.send("a", { type: "start" });
+    clock.advance(100);
+    expect(await first.sweep()).toBe(1);
+    await first.close();
+
+    const second = new Ekman({
+      entities: [patient],
+      store,
+      memory: { maxBytes: 0 },
+      now: clock.now,
+    });
+    clock.advance(100);
+    expect(await second.sweep()).toBe(0);
+    // Loaded by an unrelated trigger, evicted with a snapshot, and still not owed anything.
+    await second.entities.patient.send("a", { type: "poke" });
+    expect((await store.load("patient:a"))?.snapshot?.temporal).toEqual({
+      fired: ["too-slow"],
+      owed: {},
+    });
+    expect(await second.sweep()).toBe(0);
+
+    const { events } = await second.entities.patient.history("a");
+    expect(violations(events)).toHaveLength(1);
+    await second.close();
+  });
+
+  it("delivers an escalation that was turned away before the restart, under the same id", async () => {
+    let hang = true;
+    const slow = defineEntity("slow", {
+      initial: "deploying",
+      states: {
+        deploying: {
+          timeoutMs: 10,
+          handler: async (_i, trigger) => {
+            if (trigger.type === "constraint.temporal" && hang) {
+              await new Promise((done) => setTimeout(done, 40));
+            }
+            return trigger.type === "constraint.temporal"
+              ? transitionTo("stalled")
+              : stay();
+          },
+        },
+        stalled: () => stay(),
+      },
+      constraints: {
+        temporal: [{ name: "too-slow", in: "deploying", within: 100 }],
+      },
+    });
+    const clock = frozenClock();
+    const store = memoryStore();
+    const unhandled: unknown[] = [];
+    const first = new Ekman({
+      entities: [slow],
+      store,
+      memory: { maxBytes: 0 },
+      now: clock.now,
+      onUnhandled: (error) => unhandled.push(error),
+    });
+    await first.entities.slow.send("a", { type: "start" });
+    clock.advance(100);
+    expect(await first.sweep()).toBe(1);
+    expect((unhandled[0] as EkmanError).code).toBe("HANDLER_TIMEOUT");
+    await first.close();
+
+    hang = false;
+    const second = new Ekman({ entities: [slow], store, now: clock.now });
+    expect(await second.sweep()).toBe(1);
+
+    const { events } = await second.entities.slow.history("a");
+    const [violation] = violations(events);
+    expect(violations(events)).toHaveLength(1);
+    expect(events.at(-1)).toMatchObject({
+      type: "transition",
+      to: "stalled",
+      cause: violation?.cause,
+    });
+    await second.close();
+  });
+
+  it("reports a load the memory budget refused, and tries again on the next pass", async () => {
+    const clock = frozenClock();
+    const store = memoryStore();
+    const first = new Ekman({ entities: [stalling], store, now: clock.now });
+    await first.entities.stalling.send("a", { type: "start" });
+    await first.close();
+
+    const unhandled: [unknown, unknown][] = [];
+    const second = new Ekman({
+      entities: [stalling, orders],
+      store,
+      memory: { maxBytes: 1, eviction: { policy: "reject" } },
+      now: clock.now,
+      onUnhandled: (failure, about) => unhandled.push([failure, about]),
+    });
+    await second.entities.orders.send("1", { type: "poke" });
+    clock.advance(100);
+
+    expect(await second.sweep()).toBe(0);
+    const [[error, context] = []] = unhandled;
+    expect(error).toMatchObject({ code: "MEMORY_EXHAUSTED" });
+    expect(context).toEqual({ source: "sweep", key: "stalling:a" });
+    expect(violations(await store.read("stalling:a"))).toEqual([]);
+
+    expect(await second.sweep()).toBe(0);
+    expect(unhandled).toHaveLength(2);
+    await second.close();
+  });
+
+  it("never creates an instance the store turns out not to hold", async () => {
+    const inner = memoryStore();
+    const ghost = {
+      key: "stalling:ghost",
+      entity: "stalling",
+      state: "deploying",
+      seq: 1,
+      enteredAt: 0,
+    };
+    const store: Store = {
+      ...wrap(inner, {}),
+      scan: () =>
+        Promise.resolve({ matches: [ghost], unsupported: [], complete: true }),
+    };
+    const clock = frozenClock(1000);
+    const ekman = new Ekman({ entities: [stalling], store, now: clock.now });
+
+    expect(await ekman.sweep()).toBe(0);
+    expect(ekman.residentKeys).toEqual([]);
+    expect(await inner.load("stalling:ghost")).toBeUndefined();
+    await ekman.close();
+  });
+
+  it("reports a load that failed and leaves nothing resident", async () => {
+    const inner = memoryStore();
+    const clock = frozenClock();
+    const first = new Ekman({
+      entities: [stalling],
+      store: inner,
+      now: clock.now,
+    });
+    await first.entities.stalling.send("a", { type: "start" });
+    await first.close();
+
+    // The scan answers and every load after it fails.
+    let failing = false;
+    const store: Store = {
+      ...wrap(inner, {
+        load: (key) =>
+          failing
+            ? Promise.reject(new EkmanError("STORE_UNAVAILABLE", "disk gone"))
+            : inner.load(key),
+      }),
+      scan: async (criteria) => {
+        const result = await inner.scan(criteria);
+        failing = true;
+        return result;
+      },
+    };
+    const unhandled: unknown[] = [];
+    const second = new Ekman({
+      entities: [stalling],
+      store,
+      now: clock.now,
+      onUnhandled: (_error, context) => unhandled.push(context),
+    });
+    clock.advance(100);
+
+    expect(await second.sweep()).toBe(0);
+    expect(unhandled).toEqual([{ source: "sweep", key: "stalling:a" }]);
+    expect(second.residentKeys).toEqual([]);
+    await second.close();
+  });
+
+  it("loads nothing once the runtime has begun to close", async () => {
+    const inner = memoryStore();
+    const clock = frozenClock();
+    const first = new Ekman({
+      entities: [stalling],
+      store: inner,
+      now: clock.now,
+    });
+    await first.entities.stalling.send("a", { type: "start" });
+    await first.close();
+
+    let scanned: () => void = () => undefined;
+    const held = new Promise<void>((done) => {
+      scanned = done;
+    });
+    const store: Store = {
+      ...wrap(inner, {}),
+      scan: (criteria) => held.then(() => inner.scan(criteria)),
+    };
+    const seen: TelemetryEvent[] = [];
+    const second = new Ekman({
+      entities: [stalling],
+      store,
+      now: clock.now,
+      telemetry: { "instance.restored": (event) => seen.push(event) },
+    });
+    clock.advance(100);
+
+    const swept = second.sweep();
+    const closed = second.close();
+    scanned();
+
+    expect(await swept).toBe(0);
+    await closed;
+    expect(seen).toEqual([]);
+    expect(violations(await inner.read("stalling:a"))).toEqual([]);
+  });
+
+  it("reports a store that could not be scanned and carries on", async () => {
+    const store: Store = {
+      ...wrap(memoryStore(), {}),
+      scan: () => Promise.reject(new EkmanError("STORE_UNAVAILABLE", "no")),
+    };
+    const unhandled: unknown[] = [];
+    const ekman = new Ekman({
+      entities: [stalling],
+      store,
+      onUnhandled: (_error, context) => unhandled.push(context),
+    });
+
+    expect(await ekman.sweep()).toBe(0);
+    expect(unhandled).toEqual([{ source: "sweep" }]);
+    await ekman.close();
+  });
+
+  it("applies the state and the age itself when the store could not", async () => {
+    const inner = memoryStore();
+    const clock = frozenClock();
+    const first = new Ekman({
+      entities: [stalling],
+      store: inner,
+      now: clock.now,
+    });
+    await first.entities.stalling.send("old", { type: "start" });
+    clock.advance(100);
+    await first.entities.stalling.send("new", { type: "start" });
+    await first.close();
+
+    const seen: TelemetryEvent[] = [];
+    const store: Store = {
+      ...wrap(inner, {}),
+      scan: async ({ entity, now }) => ({
+        ...(await inner.scan({ entity, now })),
+        unsupported: ["state", "olderThan"],
+      }),
+    };
+    const second = new Ekman({
+      entities: [stalling],
+      store,
+      now: clock.now,
+      telemetry: { "instance.restored": (event) => seen.push(event) },
+    });
+
+    expect(await second.sweep()).toBe(1);
+    expect(seen.map((event) => "key" in event && event.key)).toEqual([
+      "stalling:old",
+    ]);
+    await second.close();
+  });
+
+  /** A store whose deletions wait to be let through. */
+  function slowToForget(inner: MemoryStore): {
+    store: Store;
+    finish: () => void;
+  } {
+    let finish: () => void = () => undefined;
+    const held = new Promise<void>((done) => {
+      finish = done;
+    });
+    return {
+      store: wrap(inner, {
+        forget: (key) => held.then(() => inner.forget(key)),
+      }),
+      finish: () => finish(),
+    };
+  }
+
+  it("waits for a deletion under way, and does not bring the instance back", async () => {
+    const inner = memoryStore();
+    const { store, finish } = slowToForget(inner);
+    const clock = frozenClock();
+    const ekman = new Ekman({
+      entities: [stalling],
+      store,
+      memory: { maxBytes: 0 },
+      now: clock.now,
+    });
+    await ekman.entities.stalling.send("a", { type: "start" });
+    clock.advance(100);
+
+    const forgotten = ekman.forget("stalling:a");
+    const swept = ekman.sweep();
+    await settle();
+    finish();
+
+    expect(await swept).toBe(0);
+    await forgotten;
+    expect(await inner.load("stalling:a")).toBeUndefined();
+    expect(ekman.residentKeys).toEqual([]);
+    await ekman.close();
+  });
+
+  it("leaves an instance that a trigger loaded while the pass was waiting", async () => {
+    const inner = memoryStore();
+    const { store, finish } = slowToForget(inner);
+    const clock = frozenClock();
+    const ekman = new Ekman({ entities: [stalling], store, now: clock.now });
+    await ekman.entities.stalling.send("a", { type: "start" });
+    await ekman.close();
+
+    const second = new Ekman({ entities: [stalling], store, now: clock.now });
+    clock.advance(100);
+    const forgotten = second.forget("stalling:a");
+    const swept = second.sweep();
+    await settle();
+    const sent = second.entities.stalling.send("a", { type: "start" });
+    finish();
+
+    expect(await swept).toBe(0);
+    await forgotten;
+    expect(await sent).toMatchObject({ state: "deploying", seq: 1 });
+    await second.close();
+  });
+
+  it("fills a cache layer with what has fired, so a load it answers does not fire again", async () => {
+    const authority = memoryStore({ name: "truth", authority: true });
+    const clock = frozenClock();
+    const first = new Ekman({
+      entities: [watched],
+      store: authority,
+      now: clock.now,
+    });
+    await first.entities.watched.send("a", { type: "start" });
+    clock.advance(100);
+    expect(await first.sweep()).toBe(1);
+    await first.close();
+
+    const cache = memoryStore({ name: "cache" });
+    const second = new Ekman({
+      entities: [watched],
+      store: [cache, authority],
+      now: clock.now,
+    });
+    await second.entities.watched.send("a", { type: "poke" });
+    await second.close();
+    expect((await cache.load("watched:a"))?.snapshot?.temporal).toEqual({
+      fired: ["too-slow"],
+      owed: {},
+    });
+
+    const third = new Ekman({
+      entities: [watched],
+      store: [cache, authority],
+      now: clock.now,
+    });
+    clock.advance(100);
+    expect(await third.sweep()).toBe(0);
+    await third.close();
+  });
+
+  it("keeps what has fired through a compaction", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ekman-latch-"));
+    const options = {
+      retention: { perLogBytes: 0, totalBytes: 1, policy: "compact" as const },
+    };
+    const clock = frozenClock();
+    const first = new Ekman({
+      entities: [watched],
+      store: fileStore(dir, options),
+      now: clock.now,
+    });
+    await first.entities.watched.send("a", { type: "start" });
+    clock.advance(100);
+    expect(await first.sweep()).toBe(1);
+    await first.entities.watched.send("a", { type: "poke" });
+    expect((await first.sweepStorage()).logs).toBe(1);
+    await first.close();
+
+    const second = new Ekman({
+      entities: [watched],
+      store: fileStore(dir, options),
+      now: clock.now,
+    });
+    clock.advance(100);
+    expect(await second.sweep()).toBe(0);
     await second.close();
     rmSync(dir, { recursive: true, force: true });
   });

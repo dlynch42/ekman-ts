@@ -49,3 +49,14 @@ export function testDeps(
     }),
   };
 }
+
+/** A clock frozen until something moves it, which is what elapsed time needs. */
+export const frozenClock = (start = 0) => {
+  let t = start;
+  return {
+    now: () => t,
+    advance: (ms: number) => {
+      t += ms;
+    },
+  };
+};

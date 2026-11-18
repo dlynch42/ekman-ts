@@ -24,10 +24,12 @@ export type {
 } from "../store";
 export {
   EMPTY_SEQ,
+  isAfterSnapshot,
   latestSeq,
   previousSeq,
   replay,
   scanKeys,
 } from "../store";
+export type { TemporalLatch } from "../temporal";
 export type { ContractHarness, ContractMatchers } from "./contract";
 export { storeContract } from "./contract";

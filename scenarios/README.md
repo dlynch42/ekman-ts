@@ -852,6 +852,7 @@ Anything that cannot be made deterministic must not be asserted.
    | `04x` | queries by state and time in state |
    | `05x` | history as the whole per-key stream |
    | `06x` | deleting an instance outright |
+   | `07x` | temporal constraints over a store |
 
 3. Assert the narrowest thing that proves the requirement. Over-asserting makes the suite
    brittle for the next port.

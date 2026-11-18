@@ -131,6 +131,7 @@ export type {
   TriggerRef,
 } from "./telemetry";
 export { TELEMETRY_FALLBACK } from "./telemetry";
+export type { TemporalLatch } from "./temporal";
 export type {
   AnyEntityDefinition,
   CloseOptions,

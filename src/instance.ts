@@ -19,8 +19,9 @@ import { assertCommittable, CommitToken, fenceViolation } from "./fence";
 import { Inbox } from "./inbox";
 import { accountValueBytes, byteLength } from "./memory";
 import type { NodeId, States } from "./states";
-import type { ReplayedState, Store, StoreSnapshot } from "./store";
+import type { LoadResult, ReplayedState, Store, StoreSnapshot } from "./store";
 import { EMPTY_SEQ, replay } from "./store";
+import type { TemporalLatch } from "./temporal";
 import type { InstanceSnapshot, Values } from "./types";
 import { freezeValues } from "./values";
 
@@ -99,7 +100,7 @@ export class InstanceRecord<
    * the id rather than recording a second one, and the commit that finally answers it
    * carries the cause the violation named. Cleared with `#firedTemporal`.
    */
-  readonly #undeliveredTemporal = new Map<string, string>();
+  readonly #undeliveredTemporal = new Map<string, EventCause>();
   #stateEntry = 0;
 
   /**
@@ -160,6 +161,11 @@ export class InstanceRecord<
     deps: RuntimeDeps;
     /** Called when this key goes idle, which is when eviction may consider it. */
     onIdle?: () => void;
+    /**
+     * Load the key if the store holds it, and do not create it if the store does not.
+     * For a reader such as a sweep, which must never bring an instance into being.
+     */
+    loadOnly?: boolean;
   }) {
     this.key = args.key;
     this.entity = args.entity;
@@ -202,6 +208,7 @@ export class InstanceRecord<
       initialValues: args.initialValues,
       at: args.at,
       cause: args.cause,
+      loadOnly: args.loadOnly === true,
     };
   }
 
@@ -323,14 +330,45 @@ export class InstanceRecord<
 
   /** The trigger id of an escalation still owed to this constraint, if one was turned away. */
   undelivered(constraint: string): string | undefined {
-    return this.#undeliveredTemporal.get(constraint);
+    return this.#undeliveredTemporal.get(constraint)?.id;
   }
 
   /** Record an escalation as owed, unless the entry it was raised for is no longer current. */
-  markUndelivered(constraint: string, triggerId: string, entry: number): void {
+  markUndelivered(constraint: string, cause: EventCause, entry: number): void {
     if (entry === this.#stateEntry) {
-      this.#undeliveredTemporal.set(constraint, triggerId);
+      this.#undeliveredTemporal.set(constraint, cause);
     }
+  }
+
+  /**
+   * Take up what a store recorded about this stay in a state.
+   *
+   * Replaces whatever the record held, because the store's stream is the one account of
+   * the key that outlives an eviction or a restart.
+   */
+  #adoptLatch(latch: TemporalLatch | undefined): void {
+    this.#firedTemporal.clear();
+    this.#undeliveredTemporal.clear();
+    for (const name of latch?.fired ?? []) {
+      this.#firedTemporal.add(name);
+    }
+    for (const [name, cause] of Object.entries(latch?.owed ?? {})) {
+      this.#undeliveredTemporal.set(name, cause);
+    }
+  }
+
+  /** What this record's bounds have said about the current stay, or undefined if nothing. */
+  #latch(): TemporalLatch | undefined {
+    if (
+      this.#firedTemporal.size === 0 &&
+      this.#undeliveredTemporal.size === 0
+    ) {
+      return;
+    }
+    return {
+      fired: [...this.#firedTemporal],
+      owed: Object.fromEntries(this.#undeliveredTemporal),
+    };
   }
 
   #rearmTemporal(): void {
@@ -445,6 +483,7 @@ export class InstanceRecord<
 
   /** The picture a store persists so a reload does not replay from the beginning. */
   storeSnapshot(at: number): StoreSnapshot<S, V> {
+    const temporal = this.#latch();
     return Object.freeze({
       key: this.key,
       entity: this.entity,
@@ -453,6 +492,7 @@ export class InstanceRecord<
       seq: this.#seq,
       enteredAt: this.#enteredAt,
       at,
+      ...(temporal === undefined ? {} : { temporal }),
     });
   }
 
@@ -676,6 +716,7 @@ export class InstanceRecord<
         initialValues: this.#initialValues,
         at: this.#enteredAt,
         cause: RELOAD_CAUSE,
+        loadOnly: false,
       };
       this.#pending = pending;
       this.#hydration = this.#hydrating(pending, authority);
@@ -688,6 +729,7 @@ export class InstanceRecord<
       current.enteredAt !== this.#enteredAt
     ) {
       this.#rearmTemporal();
+      this.#adoptLatch(current.temporal);
     }
 
     this.#setState(current.state);
@@ -706,7 +748,7 @@ export class InstanceRecord<
         at: current.enteredAt,
         cause: RELOAD_CAUSE,
         from: loaded.snapshot === undefined ? "replay" : "snapshot",
-        replayed: loaded.events.length,
+        replayed: replayedCount(loaded),
       })
     );
   }
@@ -719,6 +761,15 @@ export class InstanceRecord<
     const current = found.current as ReplayedState<S, V> | undefined;
 
     if (loaded === undefined || current === undefined) {
+      if (pending.loadOnly && this.inbox.idle) {
+        // Nothing stored and nobody waiting to send, so there is no instance to make. The
+        // record stays unloaded for its creator to release. Should a trigger arrive
+        // first, it starts over and initializes the key as it would any other.
+        this.#pending = { ...pending, loadOnly: false };
+        this.#hydration = undefined;
+        return;
+      }
+
       // Genuinely new. Initialization is a commit at sequence 0, and it has to be durable
       // before anything is dispatched against it.
       const event = this.#initEvent(pending.at, pending.cause);
@@ -741,6 +792,7 @@ export class InstanceRecord<
     this.#seq = current.seq;
     this.#enteredAt = current.enteredAt;
     this.#bytes = this.#measure();
+    this.#adoptLatch(current.temporal);
 
     this.#restored(
       restoredEvent({
@@ -749,7 +801,7 @@ export class InstanceRecord<
         at: pending.at,
         cause: pending.cause,
         from: loaded.snapshot === undefined ? "replay" : "snapshot",
-        replayed: loaded.events.length,
+        replayed: replayedCount(loaded),
       })
     );
 
@@ -864,6 +916,8 @@ interface PendingInit<S extends string, V extends Values> {
   readonly initialValues: Readonly<V>;
   readonly at: number;
   readonly cause: EventCause;
+  /** Whether a key the store does not hold is left alone rather than initialized. */
+  readonly loadOnly: boolean;
 }
 
 /**
@@ -876,6 +930,20 @@ const RELOAD_CAUSE: EventCause = Object.freeze({
   type: "reload",
   id: "store-conflict",
 });
+
+/**
+ * How many events a load replayed on top of its snapshot.
+ *
+ * A refusal or a violation at the snapshot's own sequence comes back with the load and
+ * is not counted: nothing is rebuilt from it.
+ */
+function replayedCount(loaded: LoadResult): number {
+  const { snapshot, events } = loaded;
+  if (snapshot === undefined) {
+    return events.length;
+  }
+  return events.filter((event) => event.seq > snapshot.seq).length;
+}
 
 function ignore(): void {
   // Deliberately empty: this exists to keep the write chain from rejecting.

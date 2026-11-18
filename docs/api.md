@@ -74,7 +74,7 @@ not useful, so a call made while one is running returns 0 immediately rather tha
 | `history(key)` | `Promise<HistoryResult>` | The per-key ordered stream, read through the commit authority. Rejects with `UNKNOWN_ENTITY` for an entity that is not registered. |
 | `query(criteria)` | `Promise<QueryResult>` | Instances by entity, state and time in state. Rejects with `UNKNOWN_ENTITY` for an entity that is not registered. |
 | `forget(key)` | `Promise<void>` | Delete an instance outright, from memory and every store layer. Rejects with `UNKNOWN_ENTITY` for an entity that is not registered. |
-| `sweep()` | `Promise<number>` | Evaluate every time-in-state constraint once and deliver whatever escalations are due. Returns how many fired. |
+| `sweep()` | `Promise<number>` | Evaluate every time-in-state constraint once, for resident instances and for those a store holds, and deliver whatever escalations are due. Returns how many fired. |
 | `sweepStorage()` | `Promise<StorageSweep>` | Run the store's retention pass. Returns `{ logs, reclaimed, overBudget }`. |
 | `close(options?)` | `Promise<void>` | Refuse new triggers, let in-flight work land up to `timeoutMs` (30 seconds by default), then close the store layers. See [below](#shutting-down). |
 | `define(definition)` | `EntityHandle` | Register an already-defined entity after construction. |

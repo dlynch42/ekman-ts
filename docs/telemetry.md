@@ -124,7 +124,7 @@ rejection with no context. The second argument says where it came from:
 | `post` | A fire-and-forget send was refused, or its handler failed. Includes a `post()` after `close()`. | yes |
 | `telemetry` | A telemetry handler threw or rejected. | when the event has one |
 | `escalation` | A time-in-state bound fired and its trigger was refused. | yes |
-| `sweep` | An automatic time-in-state sweep failed. | no |
+| `sweep` | An automatic time-in-state sweep failed, or a sweep could not scan the store or load an instance it found there. | when it was loading one |
 | `storage-sweep` | An automatic storage sweep failed. | no |
 | `snapshot` | The snapshot written when an instance is evicted failed. The events are already stored, so this costs replay time and no state. | yes |
 | `persist` | A refusal or a violation could not be written to the store. | yes |

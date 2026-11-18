@@ -1,5 +1,6 @@
 import type { ErrorCode } from "./errors";
 import { isEkmanError } from "./errors";
+import type { EkmanEvent, EventCause } from "./events";
 
 /**
  * The index of who is sitting where, and since when.
@@ -72,7 +73,10 @@ export class TemporalIndex {
     return states === undefined ? [] : [...states.keys()];
   }
 
-  /** How many keys are indexed. Resident instances only, by construction. */
+  /**
+   * How many keys are indexed. Resident instances only, by construction: an instance a
+   * store holds and this runtime does not is found by scanning the store.
+   */
   get size(): number {
     return this.#placement.size;
   }
@@ -115,4 +119,88 @@ export function refusalOutcome(
   return isEkmanError(error) && TRANSIENT_REFUSALS.has(error.code)
     ? "refused-transiently"
     : "refused";
+}
+
+/**
+ * What an instance's time-in-state bounds have already said about its current stay in a
+ * state, in a form a store can hold.
+ *
+ * `fired` names the bounds that are done for this stay. `owed` names the ones whose
+ * violation is recorded and whose escalation was turned away for a reason that passes,
+ * with the cause that violation named, so whoever loads the instance next can deliver it
+ * under the same id and record nothing twice.
+ */
+export interface TemporalLatch {
+  readonly fired: readonly string[];
+  readonly owed: Readonly<Record<string, EventCause>>;
+}
+
+/**
+ * Rebuilds a latch from a stream, one event at a time, in stream order.
+ *
+ * It reaches the same answer the runtime reached while the instance was resident, from
+ * what the stream recorded: a violation under `warn` is all there was to say; one under
+ * `reject` is owed an escalation until the stream shows that trigger committing or being
+ * refused for good; a refusal that passes leaves it owed.
+ */
+export class LatchFold {
+  readonly #fired = new Set<string>();
+  readonly #owed = new Map<string, EventCause>();
+
+  constructor(seed?: TemporalLatch) {
+    for (const name of seed?.fired ?? []) {
+      this.#fired.add(name);
+    }
+    for (const [name, cause] of Object.entries(seed?.owed ?? {})) {
+      this.#owed.set(name, cause);
+    }
+  }
+
+  /** The instance moved to another state, so nothing said about the last one carries over. */
+  moved(): void {
+    this.#fired.clear();
+    this.#owed.clear();
+  }
+
+  /** Take one event recorded during the current stay in a state. */
+  apply(event: EkmanEvent): void {
+    if (event.type === "violation") {
+      if (
+        event.constraint.kind !== "temporal" ||
+        this.#fired.has(event.constraint.name)
+      ) {
+        return;
+      }
+      if (event.policy === "warn") {
+        this.#fired.add(event.constraint.name);
+      } else {
+        this.#owed.set(event.constraint.name, event.cause);
+      }
+      return;
+    }
+
+    const answered =
+      event.type === "transition" ||
+      (event.type === "rejected" && !TRANSIENT_REFUSALS.has(event.code));
+    if (answered) {
+      this.#settle(event.cause);
+    }
+  }
+
+  /** The latch as it stands, or undefined when there is nothing in it. */
+  result(): TemporalLatch | undefined {
+    if (this.#fired.size === 0 && this.#owed.size === 0) {
+      return;
+    }
+    return { fired: [...this.#fired], owed: Object.fromEntries(this.#owed) };
+  }
+
+  #settle(cause: EventCause): void {
+    for (const [name, owed] of this.#owed) {
+      if (owed.id === cause.id && owed.type === cause.type) {
+        this.#owed.delete(name);
+        this.#fired.add(name);
+      }
+    }
+  }
 }
