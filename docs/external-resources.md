@@ -49,9 +49,14 @@ window, a timeout, or a retry all leave you there.
 
 Design for it:
 
-- **Make the side effect idempotent.** Derive its identity from the key and the trigger, not
-  from a fresh random id, so a second attempt finds the first one's work and does not repeat it.
-  `ctx.key` and the trigger's `id` are stable across retries of the same trigger.
+- **Make the side effect idempotent.** Give it an identity that a second attempt will arrive at
+  again, not a fresh random id, so the second attempt finds the first one's work and does not
+  repeat it. `ctx.key` is stable. The trigger's `id` is stable across the retries of one
+  trigger, but only use it if the producer supplied it: an id the runtime assigned comes from
+  a counter that starts over with each process, so after a restart a different operation on
+  the same key can carry the same id, and the external system would treat it as a repeat. For
+  an operation whose identity has to survive a restart, have the producer send its own id on
+  the trigger.
 - **Commit what was attempted, not only what succeeded.** Moving to a `starting` state before
   the call, and to `running` after it, leaves a record that says a call may be in flight.
 - **Expect the abandoned attempt to finish.** A timed-out handler is not stopped. Its result is

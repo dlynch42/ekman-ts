@@ -83,8 +83,12 @@ Two ways to stay out of it:
 
 - **Use `stay(values)` when the state is not changing.** It updates values without asking to
   move, so the graph is not consulted.
-- **List a self-edge on purpose** when re-entering the state means something, such as resetting a
-  time-in-state bound, which is armed again on every entry.
+- **List a self-edge on purpose** when asking to enter the state again means something: the
+  state's guards are checked again, and the move is recorded as a transition.
+
+A self-transition does not restart the clock. Time in state is measured from the last move to a
+*different* state, so transitioning to the state an instance is already in neither extends a
+time-in-state bound nor arms again one that has fired.
 
 Rolling a graph out under `policy: "warn"` first shows every self-transition your handlers
 actually make before any of them is refused.
