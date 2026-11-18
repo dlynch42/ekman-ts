@@ -122,6 +122,9 @@ states: {
 
 Set `trigger` on the constraint to use a type of your own instead of the default.
 
+An entity with a [trigger union](./entities.md#typed-triggers) adds `TemporalTrigger<State>` to
+it, which types the escalation's `escalateTo` as one of the entity's states.
+
 An entity that declares `triggers` must list the type its bounds deliver, as above. A bound
 whose escalation the entity would refuse as unknown is rejected by `defineEntity`, because
 the instance it was watching would stay stuck. A bound with `policy: "warn"` delivers nothing

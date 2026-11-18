@@ -157,8 +157,11 @@ export interface EntityConfig<
   /**
    * Trigger types this entity recognizes. Omitted means every type is recognized and
    * only a state with no handler reaches the unknown policy.
+   *
+   * Checked against the trigger union when the entity has one, so a typo here is a compile
+   * error. With no union declared this is any list of strings.
    */
-  readonly triggers?: readonly string[];
+  readonly triggers?: readonly NoInfer<T>["type"][];
   /**
    * Exactly one handler per state. Exhaustive over `S`.
    *

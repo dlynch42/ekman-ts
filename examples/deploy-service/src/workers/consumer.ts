@@ -11,7 +11,8 @@
  */
 
 import { isEkmanError } from "ekman";
-import { deployments } from "../lib/runtime";
+import { deployment } from "../entities/deployment";
+import { ekman } from "../lib/runtime";
 
 interface Message {
   readonly key: string;
@@ -113,7 +114,12 @@ export async function drainOnce(): Promise<ConsumerResult> {
  */
 async function deliver(message: Message): Promise<string> {
   try {
-    const result = await deployments.send(message.key, message.trigger);
+    // By key, because a message off a queue is whatever the producer sent. The typed
+    // handle is for callers that build the trigger themselves.
+    const result = await ekman.send(
+      deployment.key(message.key),
+      message.trigger
+    );
     return `committed -> ${result.state}`;
   } catch (error) {
     if (!isEkmanError(error)) {

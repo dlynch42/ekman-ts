@@ -10,7 +10,8 @@
  * the same instant do not need anything here to make them safe.
  */
 
-import { deployments } from "../../lib/runtime";
+import { deployment } from "../../entities/deployment";
+import { deployments, ekman } from "../../lib/runtime";
 import { BadRequest, json, type Reply, type Route } from "../server";
 
 /** Required string field, or a 400 that never reaches the runtime. */
@@ -55,10 +56,12 @@ export const deploymentRoutes: readonly Route[] = [
       const body = await ctx.body();
       const type = required(body, "type");
 
-      // Anything not on the entity's declared trigger list is refused with
+      // A body from the network is not a `DeploymentTrigger` until something has checked
+      // it, so this goes in by key, which takes any trigger, rather than through the typed
+      // handle. Anything not on the entity's declared trigger list is refused with
       // UNKNOWN_TRIGGER, which the server maps to 422. A typo in a producer does not
       // silently do nothing.
-      const result = await deployments.send(ctx.params.id ?? "", {
+      const result = await ekman.send(deployment.key(ctx.params.id ?? ""), {
         ...body,
         type,
       });

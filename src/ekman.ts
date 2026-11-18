@@ -4,7 +4,7 @@ import { Caches } from "./caches";
 import { assertBuilt, constraintsOf, statesOf } from "./compiled";
 import type { CommittedRecord, RuntimeDeps } from "./config";
 import { assertKnownKeys, resolveInboxConfig } from "./config";
-import type { CompiledTemporal } from "./constraints";
+import type { CompiledTemporal, TemporalTrigger } from "./constraints";
 import type { DispatchDeps } from "./dispatch";
 import { dispatch } from "./dispatch";
 import { EkmanError } from "./errors";
@@ -1440,7 +1440,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     const owed = instance.undelivered(constraint.name);
     const id = owed ?? this.#nextTriggerId();
     const cause = { type: constraint.trigger, id };
-    const trigger = {
+    const trigger: TemporalTrigger<string, string> = {
       ...cause,
       constraint: constraint.name,
       state: constraint.in,
@@ -1448,7 +1448,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       ...(constraint.escalateTo === undefined
         ? {}
         : { escalateTo: constraint.escalateTo }),
-    } as Trigger;
+    };
 
     if (owed === undefined) {
       this.#recordTemporalViolation(instance, constraint, elapsedMs, at, cause);

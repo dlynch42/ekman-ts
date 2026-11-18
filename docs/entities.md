@@ -5,13 +5,15 @@
 ```ts
 import { defineEntity, stay, transitionTo } from "ekman";
 
-export const orders = defineEntity("orders", {
+type OrderTrigger = { type: "pay"; amount: number } | { type: "cancel" };
+
+export const orders = defineEntity.withTriggers<OrderTrigger>()("orders", {
   initial: "pending",
   values: { total: 0, receipt: "" },
   states: {
     pending: async (order, trigger) => {
       if (trigger.type !== "pay") return stay(order.values);
-      const receipt = await chargeCard(trigger.amount as number);
+      const receipt = await chargeCard(trigger.amount);
       return transitionTo("paid", { ...order.values, receipt });
     },
     paid: (order) => stay(order.values),
@@ -30,7 +32,7 @@ to bring instances of it to life.
 | `initial` | a key of `states` | yes | The state a new instance starts in. Checked against `states`, so a typo is a compile error. |
 | `states` | map of state name to handler or `{ handler, ...policy }` | yes | The state machine. Its keys are the only source of the state union. |
 | `values` | object | no | The starting values for a new instance, and the type of `instance.values` everywhere. Must be plain JSON data. They are copied and frozen at every depth, as committed values are, so a handler cannot change them in place. |
-| `triggers` | `string[]` | no | The contract with producers. Any trigger type not in this list is refused and recorded rather than ignored. |
+| `triggers` | `string[]` | no | The contract with producers. Any trigger type not in this list is refused and recorded rather than ignored. Checked against the trigger union when the entity has one. |
 | `unknown` | `"reject"` | no | What happens when the current state has no handler or the trigger type is unrecognized. `"reject"` is the only value, and also the default: there is deliberately no silent-discard setting. |
 | `policy` | `ExecutionPolicy` | no | Retries, timeout and backoff for every state in this entity. Overrides the runtime's. See [Execution](./execution.md). |
 | `onError` | map of classification to handler | no | Handlers for failures, resolved specific-then-fallback. |
@@ -45,9 +47,9 @@ Declare `values` as an inline object literal and everything infers:
 values: { total: 0, receipt: "" },
 ```
 
-If you want a named type, declare it as an `interface` extending `Record<string, unknown>` and
-assert at the declaration site. An `interface` has no implicit index signature, which is why the
-assertion is needed:
+If you want a named type, declare it as an `interface` extending `Record<string, unknown>`,
+since an `interface` has no implicit index signature of its own, and annotate a constant with
+it:
 
 ```ts
 export interface OrderValues extends Record<string, unknown> {
@@ -55,8 +57,84 @@ export interface OrderValues extends Record<string, unknown> {
   receipt: string;
 }
 
-values: { total: 0, receipt: "" } as OrderValues,
+const initialOrder: OrderValues = { total: 0, receipt: "" };
+
+export const orders = defineEntity("orders", {
+  initial: "pending",
+  values: initialOrder,
+  states: { /* ... */ },
+});
 ```
+
+`values: { total: 0, receipt: "" } satisfies OrderValues` also works. Do not write
+`as OrderValues`: an assertion is not checked for missing fields, so a field you forgot
+compiles and is `undefined` at runtime.
+
+## Typed triggers
+
+By default a trigger is `{ type: string }` plus arbitrary fields, all `unknown`. Give the entity
+a union of what it can be sent and the payloads are typed everywhere:
+
+```ts
+type OrderTrigger =
+  | { type: "pay"; amount: number }
+  | { type: "refund"; reason: string };
+
+export const orders = defineEntity.withTriggers<OrderTrigger>()("orders", {
+  initial: "pending",
+  values: { total: 0 },
+  triggers: ["pay", "refund"],
+  states: {
+    pending: (order, trigger) =>
+      trigger.type === "pay"
+        ? transitionTo("paid", { total: trigger.amount })
+        : stay(order.values),
+    paid: (order) => stay(order.values),
+  },
+});
+```
+
+The union comes first, in its own call, and the name, states and values are inferred from the
+config as usual. It cannot be inferred from a handler's parameter, so annotating `trigger`
+there does not work.
+
+What the union buys:
+
+- **Handlers narrow on `trigger.type`** and read payload fields without a cast.
+- **`entities.orders.send` checks the caller.** `send("a-1", { type: "bogus" })` and a `pay` with
+  no `amount` are compile errors.
+- **`triggers` is checked against the union,** so a typo in the list is a compile error too.
+
+Two things it does not change:
+
+- **`ekman.send(key, trigger)` takes any trigger.** It is addressed by key, so it does not know
+  which entity it is talking to. Use it for input you did not build yourself, such as a
+  request body or a queue message: the runtime still refuses a type that is not in `triggers`.
+- **The union is a compile-time claim.** A trigger sent by key with a field missing reaches the
+  handler with that field `undefined`. Validate untrusted input before it is sent, and keep a
+  guard as the backstop.
+
+### Time-in-state escalations
+
+A [time-in-state bound](./constraints.md) delivers a trigger of its own. An entity with a
+trigger union and a bound adds `TemporalTrigger` to the union:
+
+```ts
+import type { TemporalTrigger } from "ekman";
+import { DEFAULT_TEMPORAL_TRIGGER } from "ekman";
+
+type State = "pending" | "overdue";
+type InvoiceTrigger = { type: "pay"; amount: number } | TemporalTrigger<State>;
+
+// in a handler:
+if (trigger.type === DEFAULT_TEMPORAL_TRIGGER) {
+  return transitionTo(trigger.escalateTo ?? "overdue");   // a State, no cast
+}
+```
+
+It carries `constraint` (the bound's name), `state`, `sinceMs` and, when the bound names one,
+`escalateTo`. A bound that sets its own `trigger` name is written
+`TemporalTrigger<State, "invoice.stuck">`.
 
 ## Handlers
 
@@ -69,11 +147,8 @@ type Handler = (
 ```
 
 `instance.values` is the committed values as of dispatch. Trigger payload fields are `unknown`
-by design, so read them with a cast or a type guard:
-
-```ts
-const amount = trigger.amount as number;
-```
+unless the entity declares a trigger union, in which case `trigger` is that union. See
+[Typed triggers](#typed-triggers).
 
 `ctx.attempt` is 1 on the first try and increments per retry. Read it to behave differently on a
 later attempt; do not count with it, because it is runtime state and putting it in committed

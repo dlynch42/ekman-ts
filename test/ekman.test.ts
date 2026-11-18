@@ -2,6 +2,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
+import type { TemporalTrigger } from "../src/constraints";
+import { DEFAULT_TEMPORAL_TRIGGER } from "../src/constraints";
 import { Ekman } from "../src/ekman";
 import { defineEntity } from "../src/entity";
 import { EkmanError } from "../src/errors";
@@ -2455,5 +2457,46 @@ describe("audit sinks and the commit path", () => {
     expect(() => new Ekman({ audit: [sink as never] })).toThrow(
       expect.objectContaining({ code: "INVALID_CONFIG" })
     );
+  });
+});
+
+describe("typed escalation", () => {
+  it("hands a typed handler an escalation it can act on without a cast", async () => {
+    type State = "pending" | "overdue";
+    type InvoiceTrigger = { type: "issue" } | TemporalTrigger<State>;
+
+    let now = 1000;
+    const seen: InvoiceTrigger[] = [];
+    const invoices = defineEntity.withTriggers<InvoiceTrigger>()("invoices", {
+      initial: "pending",
+      states: {
+        pending: (_invoice, trigger) => {
+          seen.push(trigger);
+          return trigger.type === DEFAULT_TEMPORAL_TRIGGER &&
+            trigger.escalateTo !== undefined
+            ? transitionTo(trigger.escalateTo)
+            : stay();
+        },
+        overdue: () => stay(),
+      },
+      constraints: {
+        temporal: [{ in: "pending", within: 50, escalateTo: "overdue" }],
+      },
+    });
+
+    const ekman = new Ekman({ entities: [invoices], now: () => now });
+    await ekman.entities.invoices.send("a", { type: "issue" });
+
+    now += 100;
+    expect(await ekman.sweep()).toBe(1);
+
+    expect(ekman.entities.invoices.inspect("a")?.state).toBe("overdue");
+    expect(seen.at(-1)).toMatchObject({
+      type: "constraint.temporal",
+      constraint: "temporal:pending:50",
+      state: "pending",
+      sinceMs: 100,
+      escalateTo: "overdue",
+    });
   });
 });

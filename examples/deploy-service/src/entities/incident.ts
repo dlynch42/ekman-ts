@@ -22,55 +22,65 @@ export interface IncidentValues extends Record<string, unknown> {
   acknowledgedBy: string;
 }
 
-export const incident = defineEntity("incidents", {
-  initial: "open",
-  values: {
-    about: "",
-    reason: "",
-    acknowledgedBy: "",
-  } as IncidentValues,
+export type IncidentTrigger =
+  | { type: "open"; about: string; reason: string }
+  | { type: "acknowledge"; actor: string }
+  | { type: "resolve" };
 
-  triggers: ["open", "acknowledge", "resolve"],
+const initialValues: IncidentValues = {
+  about: "",
+  reason: "",
+  acknowledgedBy: "",
+};
 
-  states: {
-    open: (current, trigger) => {
-      if (trigger.type === "acknowledge") {
-        return transitionTo("acknowledged", {
-          ...current.values,
-          acknowledgedBy: trigger.actor as string,
-        });
-      }
-      if (trigger.type === "resolve") {
-        return transitionTo("resolved", current.values);
-      }
+export const incident = defineEntity.withTriggers<IncidentTrigger>()(
+  "incidents",
+  {
+    initial: "open",
+    values: initialValues,
 
-      // A redelivered `open`. Record the details the first time and ignore them after,
-      // so the incident keeps the reason it was actually opened for.
-      return current.values.reason === ""
-        ? stay({
+    triggers: ["open", "acknowledge", "resolve"],
+
+    states: {
+      open: (current, trigger) => {
+        if (trigger.type === "acknowledge") {
+          return transitionTo("acknowledged", {
             ...current.values,
-            about: trigger.about as string,
-            reason: trigger.reason as string,
-          })
-        : stay(current.values);
+            acknowledgedBy: trigger.actor,
+          });
+        }
+        if (trigger.type === "resolve") {
+          return transitionTo("resolved", current.values);
+        }
+
+        // A redelivered `open`. Record the details the first time and ignore them after,
+        // so the incident keeps the reason it was actually opened for.
+        return current.values.reason === ""
+          ? stay({
+              ...current.values,
+              about: trigger.about,
+              reason: trigger.reason,
+            })
+          : stay(current.values);
+      },
+
+      acknowledged: (current, trigger) =>
+        trigger.type === "resolve"
+          ? transitionTo("resolved", current.values)
+          : stay(current.values),
+
+      resolved: (current) => stay(current.values),
     },
 
-    acknowledged: (current, trigger) =>
-      trigger.type === "resolve"
-        ? transitionTo("resolved", current.values)
-        : stay(current.values),
-
-    resolved: (current) => stay(current.values),
-  },
-
-  constraints: {
-    transitions: {
-      policy: "reject",
-      allow: {
-        open: ["acknowledged", "resolved"],
-        acknowledged: ["resolved"],
-        resolved: [],
+    constraints: {
+      transitions: {
+        policy: "reject",
+        allow: {
+          open: ["acknowledged", "resolved"],
+          acknowledged: ["resolved"],
+          resolved: [],
+        },
       },
     },
-  },
-});
+  }
+);
