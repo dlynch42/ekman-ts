@@ -249,6 +249,25 @@ restored *to* without advancing it. That is what makes a gap in a stream explica
 mysterious. It is deliberately not persisted; writing a restore back to the store would turn
 every read into a write.
 
+## Writing a store adapter
+
+A store is anything that implements `Store`. Import the type, the shared helpers and the
+contract from `ekman/store`, declare your capabilities honestly, since the runtime refuses a
+configuration your declaration cannot satisfy, and run `storeContract` in your own tests:
+
+```ts
+import { describe, expect, it } from "vitest";
+import { storeContract } from "ekman/store";
+
+describe("my store", () => {
+  storeContract("mine", () => myStore(), { durable: true }, { it, expect });
+});
+```
+
+The contract takes the `it` and `expect` your suite already uses, so it depends on no test
+framework of its own. An adapter that passes can be put in a stack without reading the
+runtime.
+
 ## Next
 
 - [Memory and eviction](./memory.md) for the other budget: resident bytes rather than disk bytes.

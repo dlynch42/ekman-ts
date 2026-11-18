@@ -29,7 +29,14 @@ const ALLOWED_FILES = new Set(["package.json", "README.md", "LICENSE"]);
 const ALLOWED_DIR = "dist/";
 
 /** Entry points the exports map promises. */
-const REQUIRED = ["dist/index.js", "dist/index.cjs", "dist/index.d.ts"];
+const REQUIRED = [
+  "dist/index.js",
+  "dist/index.cjs",
+  "dist/index.d.ts",
+  "dist/stores/index.js",
+  "dist/stores/index.cjs",
+  "dist/stores/index.d.ts",
+];
 
 /** Documents that must never ship. */
 const PRIVATE_DOCS =
@@ -143,6 +150,12 @@ try {
   );
   run("node", ["probe.mjs"], { cwd: scratch, inherit: true });
 
+  copyFileSync(
+    join(import.meta.dirname, "probes", "surface.mjs"),
+    join(scratch, "surface.mjs")
+  );
+  run("node", ["surface.mjs"], { cwd: scratch, inherit: true });
+
   // CJS
 
   step("Requiring as CommonJS");
@@ -204,10 +217,13 @@ try {
       join(dir, "probe.ts"),
       `${[
         'import type { EkmanEvent, TransitionEvent } from "ekman";',
+        'import type { Store } from "ekman/store";',
+        'import { replay } from "ekman/store";',
         preamble,
         ...body,
         "",
-        "export type Probe = TransitionEvent | EkmanEvent;",
+        "export type Probe = TransitionEvent | EkmanEvent | Store;",
+        "export const replayed: typeof replay = replay;",
       ].join("\n")}\n`
     );
 

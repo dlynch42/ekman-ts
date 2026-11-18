@@ -17,6 +17,11 @@
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
     },
+    "./store": {
+      "types": "./dist/stores/index.d.ts",
+      "import": "./dist/stores/index.js",
+      "require": "./dist/stores/index.cjs"
+    },
     "./package.json": "./package.json"
   },
   "files": [

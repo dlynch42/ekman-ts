@@ -21,8 +21,6 @@
 export type { Analysis } from "./analysis";
 export { analyze } from "./analysis";
 export type { AuditSink } from "./audit";
-export { DEFAULT_AUDIT_ATTEMPTS } from "./audit";
-export type { ResolvedInboxConfig } from "./config";
 export { DEFAULT_CAPACITY, OVERFLOW_POLICIES } from "./config";
 export type {
   ConstraintCheck,
@@ -60,12 +58,7 @@ export { isTransitionEvent } from "./events";
 export type { FenceReason } from "./fence";
 export type { ParsedKey } from "./key";
 export { buildKey, KEY_SEPARATOR, parseKey } from "./key";
-export type {
-  EvictionConfig,
-  EvictionPolicy,
-  MemoryConfig,
-  ResolvedMemoryConfig,
-} from "./memory";
+export type { EvictionConfig, EvictionPolicy, MemoryConfig } from "./memory";
 export { accountBytes, EVICTION_POLICIES } from "./memory";
 export type { ObservedEdges } from "./observed";
 export { allowFrom, observeEdges } from "./observed";
@@ -85,14 +78,8 @@ export type {
   TransitionToResult,
 } from "./results";
 export { fail, stay, transitionTo } from "./results";
-export type {
-  Coordination,
-  ResolvedStack,
-  StoreKind,
-  StoreLayer,
-  StoreSpec,
-} from "./stack";
-export { createStore, resolveStack } from "./stack";
+export type { Coordination, StoreKind, StoreLayer, StoreSpec } from "./stack";
+export { createStore } from "./stack";
 export type {
   LoadResult,
   ReplayedState,
@@ -106,26 +93,16 @@ export type {
   StoreSnapshot,
   StoreUsage,
 } from "./store";
-export {
-  EMPTY_SEQ,
-  entityOf,
-  latestSeq,
-  replay,
-  scanKeys,
-} from "./store";
+// The adapter helpers below are also exported from `ekman/store`, which is where an adapter
+// should take them from. They stay here for one minor version.
+export { EMPTY_SEQ, latestSeq, replay, scanKeys } from "./store";
 export type {
   FileModeConfig,
   FileStoreOptions,
   RetentionConfig,
   RetentionPolicy,
 } from "./stores/file";
-export {
-  defaultLogDir,
-  defaultStoreDir,
-  projectRoot,
-  RETENTION_POLICIES,
-  STORE_DIR_NAME,
-} from "./stores/file";
+export { defaultLogDir, RETENTION_POLICIES } from "./stores/file";
 export type {
   AuditFailedEvent,
   CommitFencedEvent,

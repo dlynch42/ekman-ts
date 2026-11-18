@@ -15,6 +15,19 @@ if (missing.length > 0) {
   throw new Error(`require("ekman") is missing: ${missing.join(", ")}`);
 }
 
+const store = require("ekman/store");
+if (typeof store.replay !== "function") {
+  throw new Error('require("ekman/store") did not hand back replay');
+}
+
+const printed = String(new ekman.EkmanError("INVALID_KEY", "x"));
+if (
+  ekman.EkmanError.name !== "EkmanError" ||
+  !printed.startsWith("EkmanError:")
+) {
+  throw new Error(`an EkmanError prints as "${printed}"`);
+}
+
 const orders = ekman.defineEntity("orders", {
   initial: "pending",
   states: {

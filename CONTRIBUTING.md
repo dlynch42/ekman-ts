@@ -133,7 +133,7 @@ If a proposal blurs the line, expect pushback. This is not a marketing rule. It 
 
 Treat these as stable surface and don't change them casually:
 
-1. **Everything exported from `src/index.ts`.** That barrel is the entire public surface, deliberately. Removing or renaming an export is a breaking change.
+1. **Everything exported from `src/index.ts` and from `src/stores/index.ts`,** which is published as `ekman/store` for store adapters. Those two barrels are the entire public surface, deliberately. Removing or renaming an export is a breaking change.
 2. **The key format** `<entity>:<segment>...`. Keys are the public identity and appear in history, queries, telemetry, log filenames and error messages.
 3. **The error codes** in `src/errors.ts`. Callers branch on `code`, so the set and their meanings are contract. Messages are not.
 4. **The telemetry event names and shapes** in `src/telemetry.ts`. These land in other people's metrics pipelines.

@@ -278,10 +278,19 @@ Full surface in [docs/api.md](./docs/api.md). The parts you need first:
 | Errors | `EkmanError`, `ConstraintViolationError`, `isEkmanError`, `isConstraintViolation`, `ERROR_CODES`, `ERROR_FALLBACK` |
 | Events | `isTransitionEvent` |
 | Diagrams | `analyze`, `toMermaid`, `toDot`, `observeEdges`, `allowFrom` |
-| Stores | `createStore`, `resolveStack`, `replay`, `scanKeys`, `defaultLogDir` |
+| Stores | `createStore`, `defaultLogDir`, `replay`, `latestSeq`, `scanKeys`, `EMPTY_SEQ` |
+| Option lists | `OVERFLOW_POLICIES`, `EVICTION_POLICIES`, `RETENTION_POLICIES`, `DEFAULT_CAPACITY` |
 | Misc | `parseDuration`, `accountBytes`, `DEFAULT_TEMPORAL_TRIGGER`, `TELEMETRY_FALLBACK` |
 
-Plus the types for every one of them.
+That is every runtime export. The types they take and return are exported alongside them:
+the config shapes (`EkmanConfig`, `EntityConfig`, `ExecutionPolicy`, `StorageConfig`), the
+results (`CommitResult`, `QueryResult`, `StorageSweep`), every event and telemetry event, and
+`StateGraph`, the read-only view of an entity's states.
+
+Store adapters import from `ekman/store`, which carries the `Store` types, the helpers
+`replay`, `latestSeq`, `previousSeq`, `scanKeys` and `EMPTY_SEQ`, and `storeContract`, the
+test suite an adapter proves itself with. See
+[Writing a store adapter](./docs/durability.md#writing-a-store-adapter).
 
 ### Handler context
 
