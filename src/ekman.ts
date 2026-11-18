@@ -1,7 +1,7 @@
 import type { AuditSink } from "./audit";
 import { assertAuditSink, deliverTo } from "./audit";
 import { Caches } from "./caches";
-import { constraintsOf, statesOf } from "./compiled";
+import { assertBuilt, constraintsOf, statesOf } from "./compiled";
 import type { CommittedRecord, RuntimeDeps } from "./config";
 import { assertKnownKeys, resolveInboxConfig } from "./config";
 import type { CompiledTemporal } from "./constraints";
@@ -691,6 +691,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * inputs.
    */
   #register(definition: AnyDefinition): EntityHandle {
+    assertBuilt(definition);
     const existing = this.#definitions.get(definition.name);
 
     if (existing !== undefined) {

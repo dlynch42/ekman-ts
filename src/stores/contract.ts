@@ -388,6 +388,11 @@ export function storeContract(
       state: "pending",
       now: 0,
     });
+    if (!store.capabilities.scan.byState) {
+      // A store that cannot filter by state has to say so, and not answer as if it had.
+      expect(pending.unsupported.includes("state")).toBe(true);
+      return;
+    }
     expect(pending.matches.map((m) => m.key)).toEqual(["orders:1"]);
   });
 
@@ -417,6 +422,10 @@ export function storeContract(
       now: 10_000,
     });
 
+    if (!store.capabilities.scan.olderThan) {
+      expect(stuck.unsupported.includes("olderThan")).toBe(true);
+      return;
+    }
     expect(stuck.matches.map((m) => m.key)).toEqual(["orders:1"]);
   });
 
@@ -433,6 +442,9 @@ export function storeContract(
 
   it(`${name}: measures time in state from the move, not from the last commit`, async () => {
     const store = make();
+    if (!store.capabilities.scan.olderThan) {
+      return;
+    }
     await store.append(
       "orders:1",
       commit("orders:1", 0, null, "a", 0),
@@ -452,6 +464,11 @@ export function storeContract(
 
   it(`${name}: forgets a key completely, stream and snapshot alike`, async () => {
     const store = make();
+    // Deleting is a capability. A store on an append-only medium may declare it cannot,
+    // and the runtime then refuses retention up front; there is nothing to hold it to here.
+    if (!store.capabilities.forget) {
+      return;
+    }
     await store.append(
       "orders:1",
       commit("orders:1", 0, null, "a", 0),
@@ -486,6 +503,9 @@ export function storeContract(
 
   it(`${name}: lets a forgotten key be created again from the beginning`, async () => {
     const store = make();
+    if (!store.capabilities.forget) {
+      return;
+    }
     await store.append(
       "orders:1",
       commit("orders:1", 0, null, "a", 0),

@@ -13,6 +13,7 @@ import { memoryStore } from "../src/stores/memory";
 import type { TelemetryEvent } from "../src/telemetry";
 
 const NON_NEGATIVE_INTEGER = /non-negative integer/;
+const NOT_BUILT = /was not built by defineEntity/;
 const NOTHING_TO_COMPACT = /no configured store layer can compact/;
 const POSITIVE_MILLISECONDS = /positive number of milliseconds/;
 
@@ -631,6 +632,19 @@ describe("post", () => {
     await vi.waitFor(() => expect(onUnhandled).toHaveBeenCalledTimes(1));
     const [reported] = onUnhandled.mock.calls[0] ?? [];
     expect((reported as EkmanError).code).toBe("HANDLER_FAILED");
+  });
+});
+
+describe("a definition the runtime did not build", () => {
+  it("is refused at registration, not on the first trigger", () => {
+    // Compiles, because the public graph type is a shape. It is not what the runtime needs.
+    const forged = {
+      ...orders,
+      states: { ...orders.states, names: ["pending"] },
+    } as typeof orders;
+
+    expect(() => new Ekman({ entities: [forged] })).toThrow(NOT_BUILT);
+    expect(() => new Ekman().define(forged)).toThrow(NOT_BUILT);
   });
 });
 
