@@ -73,6 +73,28 @@ export const incident = defineEntity.withTriggers<IncidentTrigger>()(
     },
 
     constraints: {
+      // The thing that opens incidents posts by key, so nothing has checked its fields by
+      // the time they arrive. A field that was left out would be stored as `undefined` and
+      // read back as "already recorded", so the incident could never be given its reason.
+      // These refuse the trigger instead, and the refusal is on the incident's record.
+      guards: [
+        {
+          name: "acknowledger-required",
+          on: "acknowledged",
+          check: (next) =>
+            typeof next.values.acknowledgedBy === "string" &&
+            next.values.acknowledgedBy !== "",
+        },
+      ],
+      invariants: [
+        {
+          name: "details-are-text",
+          check: (next) =>
+            typeof next.values.about === "string" &&
+            typeof next.values.reason === "string",
+        },
+      ],
+
       transitions: {
         policy: "reject",
         allow: {

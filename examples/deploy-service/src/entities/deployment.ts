@@ -213,12 +213,15 @@ export const deployment = defineEntity.withTriggers<DeploymentTrigger>()(
       },
 
       // A deploy with no region is not a deploy. The API layer validates request shape;
-      // this is the backstop that holds no matter which producer sent it.
+      // this is the backstop that holds no matter which producer sent it. It checks the
+      // type as well as the content, because a producer that sends by key, as the queue
+      // consumer does, can leave the field out altogether, and `undefined !== ""`.
       guards: [
         {
           name: "region-required",
           on: "deploying",
-          check: (next) => next.values.region !== "",
+          check: (next) =>
+            typeof next.values.region === "string" && next.values.region !== "",
         },
       ],
 

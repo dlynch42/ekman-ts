@@ -3,21 +3,25 @@
  *
  * The one piece worth reading is `STATUS`. Every failure the runtime produces carries a
  * stable code, so mapping outcomes onto HTTP is a lookup table rather than a pile of
- * string matching, and a client gets an answer it can act on: 409 means this will never
- * work, 503 means try again shortly.
+ * string matching. The code goes out in the body as well, because the status alone does
+ * not say whether sending again can help: two codes can share one and differ on that.
  */
 
+import { timingSafeEqual } from "node:crypto";
 import {
   createServer,
+  type IncomingHttpHeaders,
   type IncomingMessage,
   type Server,
   type ServerResponse,
 } from "node:http";
 import { isEkmanError } from "ekman";
+import { config } from "../lib/config";
 
 export interface RequestContext {
   readonly params: Record<string, string>;
   readonly query: URLSearchParams;
+  readonly headers: IncomingHttpHeaders;
   readonly body: () => Promise<Record<string, unknown>>;
 }
 
@@ -37,6 +41,9 @@ export interface Route {
 /** A request-shape problem, as opposed to a domain one. Never reaches the runtime. */
 export class BadRequest extends Error {}
 
+/** A body past the configured limit. It was not buffered, and it is not parsed. */
+export class PayloadTooLarge extends Error {}
+
 export function json(
   status: number,
   body: unknown,
@@ -48,9 +55,9 @@ export function json(
 /**
  * Runtime error codes onto HTTP status codes.
  *
- * The distinction that matters to a caller is retryable versus not. A constraint violation
- * will be violated again in exactly the same way, so it is a 409 and the client should
- * stop. An inbox overflow is this instant only, so it is a 503 with `Retry-After`.
+ * A status says what kind of refusal it was, not whether to try again. A constraint
+ * violation and a store conflict are both 409, and only the conflict is worth sending
+ * again. A client that has to decide reads the `error` code in the body.
  */
 const STATUS: Record<string, number> = {
   INVALID_KEY: 400,
@@ -85,6 +92,14 @@ function replyForError(error: unknown): Reply {
   if (error instanceof BadRequest) {
     return json(400, { error: "bad_request", message: error.message });
   }
+  if (error instanceof PayloadTooLarge) {
+    // Closing the connection is what stops a client that is still sending.
+    return json(
+      413,
+      { error: "payload_too_large", message: error.message },
+      { connection: "close" }
+    );
+  }
   if (!isEkmanError(error)) {
     console.error(error);
     return json(INTERNAL, { error: "internal", message: "internal error" });
@@ -105,6 +120,40 @@ function replyForError(error: unknown): Reply {
   return status === RETRYABLE
     ? json(status, body, { "retry-after": "1" })
     : json(status, body);
+}
+
+/**
+ * Gate a route that changes things on an operator token.
+ *
+ * Returns the refusal to send, or nothing when the caller may go on. This stands in for
+ * whatever authentication a real deployment already has: a session, mutual TLS, a gateway
+ * in front. The part worth copying is the shape, which is that a route able to delete
+ * state checks who is asking before it does anything else, and that with no token
+ * configured the route is off, not open.
+ */
+export function requireOperator(ctx: RequestContext): Reply | undefined {
+  if (config.opsToken === "") {
+    return json(503, {
+      error: "ops_disabled",
+      message: "set OPS_TOKEN to enable operator routes",
+    });
+  }
+
+  const presented = Buffer.from(ctx.headers.authorization ?? "");
+  const expected = Buffer.from(`Bearer ${config.opsToken}`);
+  // Compared in constant time, and only once the lengths match, which is all
+  // `timingSafeEqual` accepts.
+  const allowed =
+    presented.length === expected.length &&
+    timingSafeEqual(presented, expected);
+
+  return allowed
+    ? undefined
+    : json(
+        401,
+        { error: "unauthorized", message: "operator token required" },
+        { "www-authenticate": "Bearer" }
+      );
 }
 
 export function createApp(routes: readonly Route[]): Server {
@@ -137,6 +186,7 @@ async function handle(
       const reply = await route.handle({
         params,
         query: url.searchParams,
+        headers: req.headers,
         body: () => readJson(req),
       });
       send(res, reply);
@@ -177,14 +227,46 @@ function match(
   return params;
 }
 
+/**
+ * Read a request body, up to the configured limit and no further.
+ *
+ * Counted as it arrives. A body is somebody else's choice of size, and buffering all of it
+ * before looking is how one request takes a process down. Past the limit nothing more is
+ * kept: the rest is read and thrown away so the reply can be written, and the connection
+ * is closed behind it.
+ */
+function readBody(req: IncomingMessage): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let received = 0;
+    let refused = false;
+
+    req.on("data", (chunk: Buffer) => {
+      received += chunk.length;
+      if (refused) {
+        return;
+      }
+      if (received > config.maxBodyBytes) {
+        refused = true;
+        chunks.length = 0;
+        reject(
+          new PayloadTooLarge(
+            `the request body is larger than ${config.maxBodyBytes} bytes`
+          )
+        );
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
+
 async function readJson(
   req: IncomingMessage
 ): Promise<Record<string, unknown>> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) {
-    chunks.push(chunk as Buffer);
-  }
-  const raw = Buffer.concat(chunks).toString("utf8");
+  const raw = (await readBody(req)).toString("utf8");
   if (raw.trim() === "") {
     return {};
   }
