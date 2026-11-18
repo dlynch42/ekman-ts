@@ -178,14 +178,16 @@ The parts of this example most likely to be copied are the ones at its edge, so 
 written the way a service should have them:
 
 - **It listens on loopback** unless `HOST` says otherwise.
-- **Request bodies are capped** and counted as they arrive, not after they are buffered.
+- **Request bodies are capped** on every route, by declared length before routing and by
+  count as they arrive. A body is never buffered first and measured after.
 - **A request body is never passed on as a trigger.** Each trigger type lists the fields it
   takes. A client cannot set the `id` that is recorded as the cause of a commit, and cannot
   send the escalation the runtime delivers for a time bound.
 - **The routes that change things ask who is calling.** `POST /ops/prune` and
   `POST /ops/sweep` need the operator token, and are off when none is set.
-- **Shutdown drains.** On `SIGTERM` the server stops accepting, handlers in flight get ten
-  seconds to commit, and the stores are closed.
+- **Shutdown drains, and ends.** On `SIGTERM` the server stops accepting and handlers in
+  flight get to commit, then the stores are closed. The whole of it has ten seconds, counted
+  from the signal, after which open connections are dropped.
 - **The entities still check.** The region guard and the incident's checks hold for a
   producer that skips the API, as the queue consumer does.
 

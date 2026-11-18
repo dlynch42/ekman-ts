@@ -79,6 +79,7 @@ const STATUS: Record<string, number> = {
 };
 
 const RETRYABLE = 503;
+const BEARER = /^bearer +(.+)$/i;
 const INTERNAL = 500;
 
 /**
@@ -93,12 +94,7 @@ function replyForError(error: unknown): Reply {
     return json(400, { error: "bad_request", message: error.message });
   }
   if (error instanceof PayloadTooLarge) {
-    // Closing the connection is what stops a client that is still sending.
-    return json(
-      413,
-      { error: "payload_too_large", message: error.message },
-      { connection: "close" }
-    );
+    return json(413, { error: "payload_too_large", message: error.message });
   }
   if (!isEkmanError(error)) {
     console.error(error);
@@ -139,8 +135,11 @@ export function requireOperator(ctx: RequestContext): Reply | undefined {
     });
   }
 
-  const presented = Buffer.from(ctx.headers.authorization ?? "");
-  const expected = Buffer.from(`Bearer ${config.opsToken}`);
+  // The scheme name is case-insensitive and may be followed by more than one space, so it
+  // is parsed off and only the token is compared.
+  const [, token = ""] = BEARER.exec(ctx.headers.authorization ?? "") ?? [];
+  const presented = Buffer.from(token);
+  const expected = Buffer.from(config.opsToken);
   // Compared in constant time, and only once the lengths match, which is all
   // `timingSafeEqual` accepts.
   const allowed =
@@ -171,6 +170,18 @@ async function handle(
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
   const segments = split(url.pathname);
+
+  // Refused on its declared length, before routing, so the limit holds for every route
+  // and not only the ones that go on to read a body. A body that does not declare its
+  // length is counted as it is read, in `readBody`; a route that never reads one never
+  // buffers it.
+  if (Number(req.headers["content-length"] ?? 0) > config.maxBodyBytes) {
+    // What is still arriving is read and dropped. Closing the socket under a client that
+    // is mid-send resets it, and the client then sees a broken connection and no status.
+    req.resume();
+    send(res, replyForError(tooLarge()));
+    return;
+  }
 
   for (const route of routes) {
     if (route.method !== req.method) {
@@ -227,13 +238,19 @@ function match(
   return params;
 }
 
+function tooLarge(): PayloadTooLarge {
+  return new PayloadTooLarge(
+    `the request body is larger than ${config.maxBodyBytes} bytes`
+  );
+}
+
 /**
  * Read a request body, up to the configured limit and no further.
  *
  * Counted as it arrives. A body is somebody else's choice of size, and buffering all of it
  * before looking is how one request takes a process down. Past the limit nothing more is
- * kept: the rest is read and thrown away so the reply can be written, and the connection
- * is closed behind it.
+ * kept: the rest is read and thrown away, so the client can read the reply and is not cut
+ * off mid-send.
  */
 function readBody(req: IncomingMessage): Promise<Buffer> {
   return new Promise((resolve, reject) => {
@@ -249,11 +266,7 @@ function readBody(req: IncomingMessage): Promise<Buffer> {
       if (received > config.maxBodyBytes) {
         refused = true;
         chunks.length = 0;
-        reject(
-          new PayloadTooLarge(
-            `the request body is larger than ${config.maxBodyBytes} bytes`
-          )
-        );
+        reject(tooLarge());
         return;
       }
       chunks.push(chunk);

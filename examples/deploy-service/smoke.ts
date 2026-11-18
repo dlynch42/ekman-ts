@@ -29,9 +29,12 @@ process.env.MEMORY_BYTES = "65536";
 // Without a token the operator routes are off, and the retention checks need them on.
 process.env.OPS_TOKEN = "smoke-operator-token";
 
-const OPERATOR = { authorization: `Bearer ${process.env.OPS_TOKEN}` };
-/** One megabyte, which is the default body limit. */
+/** One megabyte. Set, not assumed, so an override in the environment cannot move it. */
 const BODY_LIMIT = 1024 * 1024;
+process.env.MAX_BODY_BYTES = String(BODY_LIMIT);
+
+// The scheme in another case, with extra spaces: both are allowed, and both must work.
+const OPERATOR = { authorization: `bearer  ${process.env.OPS_TOKEN}` };
 
 let base = "";
 let failures = 0;
@@ -368,23 +371,41 @@ async function theBoundary(ekman: {
     forged.status
   );
 
+  // A deploy redelivered while the first is still in progress. It is not a failure
+  // report, and it used to be handled as one.
+  const again = { service: "twice", region: "us-west-2", version: "1" };
+  await call("POST", "/deployments/twice", again);
+  const repeated = await call("POST", "/deployments/twice", again);
+  check(
+    "a deploy repeated while deploying leaves it deploying",
+    body(repeated).state === "deploying",
+    body(repeated).state
+  );
+
   await call("POST", "/deployments/forged-id", {
     service: "forged-id",
     region: "us-west-2",
     version: "1",
     id: "forged",
   });
-  await call("POST", "/deployments/forged-id/events", {
+  const landed = await call("POST", "/deployments/forged-id/events", {
     type: "succeeded",
     id: "forged",
   });
+  // The request has to have been accepted and committed, or there is no event whose
+  // cause could have been forged and the check below would pass on nothing.
+  check(
+    "a request carrying an id is still handled",
+    landed.status === 200 && body(landed).state === "live",
+    { status: landed.status, state: body(landed).state }
+  );
   const history = await call("GET", "/deployments/forged-id/history");
   const causes = (
     (body(history).events as { cause?: { id?: string } }[] | undefined) ?? []
   ).map((event) => event.cause?.id);
   check(
     "a client-supplied id never becomes an event's cause",
-    causes.length >= 2 && !causes.includes("forged"),
+    causes.length >= 3 && !causes.includes("forged"),
     causes
   );
 

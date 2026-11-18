@@ -57,7 +57,7 @@ async function main(): Promise<void> {
   );
 }
 
-/** How long shutdown waits for handlers that are still running before closing anyway. */
+/** How long shutdown may take in all, from the signal to the stores being closed. */
 const DRAIN_MS = 10_000;
 
 let stopping = false;
@@ -67,16 +67,25 @@ let stopping = false;
  *
  * The server stops accepting first, so nothing new arrives, and requests already in hand
  * get their answers, which they need the runtime for. Then `ekman.close()` refuses new
- * triggers, lets handlers that are running commit, and closes the stores. It waits at most
- * `DRAIN_MS`, so one handler that never returns cannot hold the process open past the
- * point where whatever sent the signal gives up and kills it.
+ * triggers, lets handlers that are running commit, and closes the stores.
+ *
+ * One deadline covers both halves, started at the signal. A request that never finishes
+ * sending, or a handler that never returns, would otherwise hold the first half open
+ * forever and the second would never start. At the deadline the connections still open are
+ * dropped, and the runtime gets whatever time is left, so the stores are closed before
+ * whatever sent the signal gives up and kills the process.
  */
 async function shutdown(signal: string): Promise<void> {
   console.log(`\n${signal} received, shutting down`);
+  const deadline = Date.now() + DRAIN_MS;
+
+  const cutOff = setTimeout(() => server.closeAllConnections(), DRAIN_MS);
   await new Promise<void>((resolve) => {
     server.close(() => resolve());
   });
-  await ekman.close({ timeoutMs: DRAIN_MS });
+  clearTimeout(cutOff);
+
+  await ekman.close({ timeoutMs: Math.max(1, deadline - Date.now()) });
   process.exit(0);
 }
 

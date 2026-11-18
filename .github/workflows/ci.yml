@@ -32,6 +32,10 @@ jobs:
       # The samples in README.md and docs/ that are tagged for it, compiled against src/.
       - name: Typecheck doc samples
         run: npm run check:docs
+      # Boots the example service and drives it over HTTP. Nothing else exercises it, and
+      # its checks on the request boundary are worth nothing if they only run by hand.
+      - name: Example smoke test
+        run: npm run example:smoke
 
   test:
     name: Test (Node ${{ matrix.node-version }})

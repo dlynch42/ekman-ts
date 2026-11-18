@@ -54,8 +54,11 @@ export const incident = defineEntity.withTriggers<IncidentTrigger>()(
         }
 
         // A redelivered `open`. Record the details the first time and ignore them after,
-        // so the incident keeps the reason it was actually opened for.
-        return current.values.reason === ""
+        // so the incident keeps the reason it was actually opened for. "Not recorded yet"
+        // includes a reason that is not text: an incident stored before the checks below
+        // existed can hold one, and a later `open` is what repairs it.
+        return typeof current.values.reason !== "string" ||
+          current.values.reason === ""
           ? stay({
               ...current.values,
               about: trigger.about,

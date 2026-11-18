@@ -139,14 +139,15 @@ export const deployment = defineEntity.withTriggers<DeploymentTrigger>()(
             });
           }
 
+          // A `deploy` for something already deploying is a redelivery. It is not a report
+          // that the deployment failed, and it must not be able to fail one.
+          if (trigger.type === "deploy") {
+            return stay(current.values);
+          }
+
           return transitionTo("failed", {
             ...current.values,
-            // A `failed` and a `rollback` both carry a reason. A `deploy` arriving here does
-            // not, and has none to give.
-            note:
-              trigger.type === "deploy"
-                ? "reported failed"
-                : text(trigger.reason, "reported failed"),
+            note: text(trigger.reason, "reported failed"),
           });
         },
         maxAttempts: config.deployMaxAttempts,
