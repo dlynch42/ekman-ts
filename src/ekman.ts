@@ -20,6 +20,9 @@ import type {
   QueryCriteria,
   QueryMatch,
   QueryResult,
+  StateMap,
+  StateMapEntry,
+  StateMapOptions,
 } from "./query";
 import { mergeRestores, parseDuration } from "./query";
 import type { ResolvedStack } from "./stack";
@@ -31,7 +34,7 @@ import type {
   StorageSweep,
   Store,
 } from "./store";
-import { EMPTY_SEQ } from "./store";
+import { EMPTY_SEQ, replay } from "./store";
 import type { TelemetryEvent } from "./telemetry";
 import {
   emit,
@@ -483,27 +486,34 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * what it retains, and reporting that as if it were everything is the one thing a query
    * must never do.
    */
-  async query(criteria: QueryCriteria): Promise<QueryResult> {
+  async query<S extends string = string, V extends Values = Values>(
+    criteria: QueryCriteria<S, V>
+  ): Promise<QueryResult<S, V>> {
     this.#definitionFor(criteria.entity);
     const { limit } = criteria;
-    if (limit !== undefined && !(Number.isInteger(limit) && limit >= 0)) {
-      throw new EkmanError(
-        "INVALID_CONFIG",
-        `a query's limit must be a non-negative integer, received ${JSON.stringify(limit)}. ` +
-          "Omit it to ask for every match."
-      );
-    }
+    assertLimit(limit, "a query's limit", "every match");
     const at = this.#now();
     const olderThanMs =
       criteria.olderThan === undefined
         ? undefined
         : parseDuration(criteria.olderThan);
+    const where = criteria.where as
+      | ((values: Readonly<Values>) => boolean)
+      | undefined;
+    const showing = criteria.includeValues === true;
+    const reading = showing || where !== undefined;
 
     const reasons = new Set<Partiality>();
     const sources = ["resident"];
     const matches = new Map<string, QueryMatch>();
 
-    for (const match of this.#residentMatches(criteria, olderThanMs, at)) {
+    for (const match of this.#residentMatches(
+      criteria.entity,
+      criteria.state,
+      olderThanMs,
+      at,
+      reading
+    )) {
       matches.set(match.key, match);
     }
 
@@ -515,9 +525,11 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       await this.#scanInto(
         matches,
         authority,
-        criteria,
+        criteria.entity,
+        criteria.state,
         olderThanMs,
         at,
+        reading,
         reasons
       );
       if (!this.#stack.durable) {
@@ -525,12 +537,22 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       }
     }
 
-    // Applied after the union, so a limit cannot silently prefer resident instances over
-    // stored ones or the other way round.
-    const truncated = limit !== undefined && limit < matches.size;
-    const instances = truncated
-      ? oldest(matches.values(), limit)
-      : [...matches.values()].sort(byAgeThenKey);
+    // Applied after the union, to resident and stored matches alike, so the filter is
+    // exact wherever an instance happened to be.
+    const found =
+      where === undefined
+        ? [...matches.values()]
+        : [...matches.values()].filter((match) =>
+            where(match.values as Readonly<Values>)
+          );
+
+    // Applied last, so a limit cannot silently prefer resident instances over stored ones
+    // or the other way round.
+    const truncated = limit !== undefined && limit < found.length;
+    const ordered = truncated ? oldest(found, limit) : found.sort(byAgeThenKey);
+    // Values read only to evaluate `where` are not part of an answer that did not ask.
+    const instances =
+      reading && !showing ? ordered.map(withoutValues) : ordered;
 
     if (truncated) {
       reasons.add("limit-reached");
@@ -541,7 +563,51 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       complete: reasons.size === 0,
       reasons: Object.freeze([...reasons]),
       sources: Object.freeze(sources),
-    });
+    }) as QueryResult<S, V>;
+  }
+
+  /**
+   * Where every instance of an entity is: a count and the keys for each state.
+   *
+   * The same union a query makes, grouped. Resident instances and stored ones are both
+   * counted, and the map reports itself incomplete for exactly the reasons a query over
+   * the entity would.
+   */
+  async map<S extends string = string>(
+    entity: string,
+    options: StateMapOptions = {}
+  ): Promise<StateMap<S>> {
+    const { limitPerState } = options;
+    assertLimit(limitPerState, "a map's limitPerState", "every key");
+    const found = await this.query({ entity });
+    return stateMap<S>(
+      entity,
+      found.instances,
+      found.reasons,
+      found.sources,
+      limitPerState
+    );
+  }
+
+  /**
+   * The state map of what is in memory, without asking a store.
+   *
+   * Synchronous and cheap, for a view that refreshes often. Never complete by
+   * construction: an evicted instance, or one this runtime has not loaded, is not in it,
+   * and the result says so with `resident-only`.
+   */
+  residentMap<S extends string = string>(entity: string): StateMap<S> {
+    this.#definitionFor(entity);
+    const instances = [
+      ...this.#residentMatches(
+        entity,
+        undefined,
+        undefined,
+        this.#now(),
+        false
+      ),
+    ].sort(byAgeThenKey);
+    return stateMap<S>(entity, instances, IN_MEMORY_ONLY, RESIDENT_ONLY);
   }
 
   /** Keys of every resident instance. */
@@ -777,6 +843,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       history: (id: string) => this.history(definition.key(id)),
       query: (criteria: Omit<QueryCriteria, "entity"> = {}) =>
         this.query({ ...criteria, entity: definition.name }),
+      map: (options?: StateMapOptions) => this.map(definition.name, options),
       forget: (id: string) => this.forget(definition.key(id)),
     }) as EntityHandle;
   }
@@ -1593,17 +1660,16 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
 
   /** Resident instances matching the criteria, read through the same index the sweep uses. */
   *#residentMatches(
-    criteria: QueryCriteria,
+    entity: string,
+    only: string | undefined,
     olderThanMs: number | undefined,
-    at: number
+    at: number,
+    reading: boolean
   ): Generator<QueryMatch> {
-    const states =
-      criteria.state === undefined
-        ? this.#temporal.states(criteria.entity)
-        : [criteria.state];
+    const states = only === undefined ? this.#temporal.states(entity) : [only];
 
     for (const state of states) {
-      for (const key of this.#temporal.keys(criteria.entity, state)) {
+      for (const key of this.#temporal.keys(entity, state)) {
         const aged = this.#ageOf(key, state, at);
         if (aged === undefined || (olderThanMs ?? 0) > aged.elapsedMs) {
           continue;
@@ -1611,12 +1677,13 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
 
         yield {
           key,
-          entity: criteria.entity,
+          entity,
           state,
           seq: aged.instance.seq,
           enteredAt: aged.instance.enteredAt,
           ageMs: aged.elapsedMs,
           resident: true,
+          ...(reading ? { values: aged.instance.values } : {}),
         };
       }
     }
@@ -1634,21 +1701,27 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * The caller's limit is not passed down. A store truncates in key order and the answer
    * is ordered by age, so a store that stopped early could drop a row older than every one
    * it returned.
+   *
+   * A match is rebuilt field by field, so values a store returned without being asked
+   * never reach an answer that did not ask for them.
    */
   async #scanInto(
     matches: Map<string, QueryMatch>,
     authority: Store,
-    criteria: QueryCriteria,
+    entity: string,
+    state: string | undefined,
     olderThanMs: number | undefined,
     at: number,
+    reading: boolean,
     reasons: Set<Partiality>
   ): Promise<void> {
     const result = await this.#scanStore(authority, {
-      entity: criteria.entity,
+      entity,
       now: at,
-      ...(criteria.state === undefined ? {} : { state: criteria.state }),
+      ...(state === undefined ? {} : { state }),
       ...(olderThanMs === undefined ? {} : { olderThanMs }),
       skip: new Set(matches.keys()),
+      ...(reading ? { includeValues: true } : {}),
     });
 
     if (!result.complete) {
@@ -1661,9 +1734,14 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     for (const match of result.matches) {
       if (!matches.has(match.key)) {
         matches.set(match.key, {
-          ...match,
+          key: match.key,
+          entity: match.entity,
+          state: match.state,
+          seq: match.seq,
+          enteredAt: match.enteredAt,
           ageMs: at - match.enteredAt,
           resident: false,
+          ...(reading ? { values: match.values as Readonly<Values> } : {}),
         });
       }
     }
@@ -1679,6 +1757,9 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * What the store declared it cannot do counts as well as what this answer reported, so
    * a store that declares no filter by state and then forgets to say so in an answer is
    * still filtered. The declaration and the answer cannot disagree.
+   *
+   * Values are finished here in the same way. A store asked for them that returned a match
+   * without any has that key loaded, so every match of a scan that asked carries values.
    */
   async #scanStore(
     authority: Store,
@@ -1700,7 +1781,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     }
     if (unsupported.size === 0) {
       return {
-        matches: result.matches,
+        matches: await this.#withValues(authority, criteria, result.matches),
         complete: result.complete,
         filtered: false,
       };
@@ -1717,7 +1798,44 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       return !(wrongState || tooRecent);
     });
 
-    return { matches, complete: result.complete, filtered: true };
+    return {
+      matches: await this.#withValues(authority, criteria, matches),
+      complete: result.complete,
+      filtered: true,
+    };
+  }
+
+  /**
+   * Read the values of any match a store returned without them, when the scan asked.
+   *
+   * A match whose key is gone by the time it is loaded was deleted in between, and is
+   * dropped: it is no longer an instance.
+   */
+  async #withValues(
+    authority: Store,
+    criteria: ScanCriteria,
+    matches: readonly ScanMatch[]
+  ): Promise<readonly ScanMatch[]> {
+    if (
+      criteria.includeValues !== true ||
+      matches.every((match) => match.values !== undefined)
+    ) {
+      return matches;
+    }
+
+    const read = await Promise.all(
+      matches.map(async (match) => {
+        if (match.values !== undefined) {
+          return match;
+        }
+        const loaded = await authority.load(match.key);
+        const current = loaded === undefined ? undefined : replay(loaded);
+        return current === undefined
+          ? undefined
+          : { ...match, values: current.values };
+      })
+    );
+    return read.filter((match) => match !== undefined);
   }
 
   /**
@@ -1872,6 +1990,9 @@ const CAPPED_IN_MEMORY: readonly Partiality[] = Object.freeze([
   "history-capped" as const,
 ]);
 const RESIDENT_ONLY: readonly string[] = Object.freeze(["resident"]);
+const IN_MEMORY_ONLY: readonly Partiality[] = Object.freeze([
+  "resident-only" as const,
+]);
 const COMPACTED: readonly Partiality[] = Object.freeze(["compacted"]);
 
 /** Why a history is not the whole story, if it is not. */
@@ -1883,6 +2004,78 @@ function partiality(
     return NO_DURABLE_STORE;
   }
   return compacted ? COMPACTED : NONE;
+}
+
+/** Refuse a limit that is not a count. `undefined` means no limit. */
+function assertLimit(
+  limit: number | undefined,
+  what: string,
+  everything: string
+): void {
+  if (limit !== undefined && !(Number.isInteger(limit) && limit >= 0)) {
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      `${what} must be a non-negative integer, received ${JSON.stringify(limit)}. ` +
+        `Omit it to ask for ${everything}.`
+    );
+  }
+}
+
+/** A match as an answer that did not ask for values shows it. */
+function withoutValues(match: QueryMatch): QueryMatch {
+  const { values: _values, ...rest } = match;
+  return rest;
+}
+
+/**
+ * Group matches by state. They arrive oldest first, so each state's keys come out oldest
+ * first as well. Grouped in a `Map` and only then turned into an object, so a state with
+ * a name an object treats specially is still an ordinary entry.
+ */
+function stateMap<S extends string>(
+  entity: string,
+  instances: readonly QueryMatch[],
+  reasons: readonly Partiality[],
+  sources: readonly string[],
+  limitPerState?: number
+): StateMap<S> {
+  const groups = new Map<string, { count: number; keys: string[] }>();
+  let truncated = false;
+
+  for (const { state, key } of instances) {
+    let group = groups.get(state);
+    if (group === undefined) {
+      group = { count: 0, keys: [] };
+      groups.set(state, group);
+    }
+    group.count += 1;
+    if (limitPerState === undefined || group.keys.length < limitPerState) {
+      group.keys.push(key);
+    } else {
+      truncated = true;
+    }
+  }
+
+  const all = new Set(reasons);
+  if (truncated) {
+    all.add("limit-reached");
+  }
+
+  const byState: Record<string, StateMapEntry> = Object.fromEntries(
+    [...groups].map(([state, { count, keys }]) => [
+      state,
+      Object.freeze({ count, keys: Object.freeze(keys) }),
+    ])
+  );
+
+  return Object.freeze({
+    entity,
+    byState: Object.freeze(byState) as StateMap<S>["byState"],
+    total: instances.length,
+    complete: all.size === 0,
+    reasons: Object.freeze([...all]),
+    sources,
+  });
 }
 
 /**

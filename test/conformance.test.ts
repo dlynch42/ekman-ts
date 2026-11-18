@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { runScenario } from "../runner/run";
 import type { Scenario } from "../runner/scenario";
 import {
@@ -9,7 +9,7 @@ import {
   loadScenarios,
   RUN_LEVELS,
 } from "../runner/scenario";
-import { SPEC_VERSION } from "../src/index";
+import { Ekman, SPEC_VERSION } from "../src/index";
 
 const scenarios = loadScenarios();
 
@@ -252,6 +252,68 @@ describe("detecting a broken expectation", () => {
     ]);
   });
 
+  it("notices a query whose matches carry other values", async () => {
+    const result = await runScenario(
+      corrupt("durable/042-a-query-can-return-values", (scenario) => {
+        scenario.then.queries[0].values["orders:1"].who = "z";
+        scenario.then.queries[0].values["orders:9"] = { who: "nobody" };
+      })
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.failures).toEqual([
+      'queries[0].values["orders:1"].who: expected "z", got "a"',
+      'queries[0].values["orders:9"]: expected an object, got undefined',
+    ]);
+  });
+
+  it("notices values carried by a query that did not ask for them", async () => {
+    // An implementation that always carries values, which the second query never asked for.
+    const { query } = Ekman.prototype;
+    const eager = vi
+      .spyOn(Ekman.prototype, "query")
+      .mockImplementation(function always(this: Ekman, criteria) {
+        return query.call(this, { ...criteria, includeValues: true });
+      });
+
+    const result = await runScenario(
+      load("durable/042-a-query-can-return-values")
+    );
+    eager.mockRestore();
+
+    expect(result.status).toBe("failed");
+    expect(result.failures).toContain(
+      'queries[1].values["orders:1"]: carried values without includeValues'
+    );
+  });
+
+  it("notices a state map that groups differently", async () => {
+    const result = await runScenario(
+      corrupt(
+        "core/163-the-state-map-counts-resident-instances-per-state",
+        (scenario) => {
+          const [whole, limited] = scenario.then.maps;
+          whole.byState.healthy = ["services:c", "services:a"];
+          whole.byState.retired = ["services:z"];
+          whole.byState.unreachable = undefined;
+          whole.total = 6;
+          whole.complete = true;
+          limited.reasons = ["limit-reached"];
+        }
+      )
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.failures).toEqual([
+      'maps[0].byState["healthy"]: expected [services:c, services:a], got [services:a, services:c]',
+      'maps[0].byState["retired"]: expected [services:z], got []',
+      'maps[0].byState["unreachable"]: expected [], got [services:d]',
+      "maps[0].total: expected 6, got 5",
+      "maps[0].complete: expected true, got false",
+      "maps[1].reasons: expected [limit-reached], got [no-durable-store, limit-reached]",
+    ]);
+  });
+
   it("notices a history that reads differently", async () => {
     const result = await runScenario(
       corrupt("durable/050-history-is-the-whole-stream", (scenario) => {
@@ -395,6 +457,29 @@ describe("refusing a malformed scenario", () => {
     ).rejects.toThrow(
       'scenario core/010-initialization: unknown then key "histroy"'
     );
+  });
+
+  it("refuses an unknown key inside a query or a map", async () => {
+    await expect(
+      runScenario(
+        corrupt("durable/042-a-query-can-return-values", (scenario) => {
+          scenario.then.queries[0].includeValue = true;
+        })
+      )
+    ).rejects.toThrow(
+      'scenario durable/042-a-query-can-return-values: unknown key "includeValue" in then.queries[0]'
+    );
+
+    await expect(
+      runScenario(
+        corrupt(
+          "core/163-the-state-map-counts-resident-instances-per-state",
+          (scenario) => {
+            scenario.then.maps[1].limit = 1;
+          }
+        )
+      )
+    ).rejects.toThrow('unknown key "limit" in then.maps[1]');
   });
 
   it("refuses an unknown step", async () => {

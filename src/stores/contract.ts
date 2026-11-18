@@ -563,6 +563,25 @@ export function storeContract(
     expect(scanned.complete).toBe(true);
   });
 
+  it(`${name}: carries the committed values on a scan that asks for them`, async () => {
+    const store = make();
+    await store.append("orders:1", commit("orders:1", 0, null, "a"), EMPTY_SEQ);
+    await store.append("orders:1", commit("orders:1", 1, "a", "a"), 0);
+
+    const scanned = await store.scan({
+      entity: "orders",
+      now: 0,
+      includeValues: true,
+    });
+
+    // A store may leave values out, and the runtime then reads them itself. What a store
+    // may not do is carry values other than the ones last committed.
+    const carried = scanned.matches[0]?.values;
+    if (carried !== undefined) {
+      expect(carried).toEqual({ n: 1 });
+    }
+  });
+
   it(`${name}: reports an answer it truncated as incomplete`, async () => {
     const store = make();
     await store.append("orders:1", commit("orders:1", 0, null, "a"), EMPTY_SEQ);

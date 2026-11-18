@@ -721,7 +721,9 @@ Queries run after everything has settled, each with the answer it must give.
 |---|---|
 | `entity` | Required. |
 | `state`, `olderThan`, `limit` | The criteria. `olderThan` is milliseconds or a duration such as `"5m"`. |
+| `includeValues` | Ask for each match's committed values. |
 | `keys` | Matching keys, **oldest in state first**. An exact list, in order. |
+| `values` | Values a match must carry, by key. Each is asserted as a subset, as `then.state` values are. |
 | `complete` | Whether the answer is the whole answer. |
 | `reasons` | Why not, asserted as a set. |
 
@@ -737,6 +739,13 @@ with itself.
 `olderThan` is inclusive: an instance that has been in a state for exactly the bound
 matches.
 
+A match carries values only when the query asked for them. That half is asserted on every
+query: one that does not set `includeValues` fails if any match comes back with values.
+
+A field this table does not list is refused as a malformed scenario, here and in
+`then.maps`, since a misspelt criterion would ask a different question and assert nothing
+about the one that was meant.
+
 Partiality reasons:
 
 | Reason | Meaning |
@@ -745,10 +754,53 @@ Partiality reasons:
 | `unsupported-criteria` | A store could not evaluate a filter, so the runtime applied it afterwards. |
 | `limit-reached` | The answer was truncated. |
 | `compacted` | A store folded part of the stream into a snapshot, so a history is missing its middle. |
+| `resident-only` | Only memory was asked, so anything evicted or not loaded is left out. Nothing a scenario can run reports it: it belongs to the synchronous map of resident instances, which a runner does not call. |
 | `history-capped` | No store holds the stream and the runtime keeps a bounded number of events per key in memory, so a history is missing its oldest events. |
 
 A result is `complete` exactly when there are no reasons. A memory-only runtime is never
 complete, even when it happens to hold everything, because it cannot know that it does.
+
+### `then.maps`
+
+State maps read after everything has settled, each with the answer it must give.
+
+```json
+[
+  {
+    "entity": "services",
+    "byState": {
+      "healthy": ["services:a", "services:c"],
+      "degraded": ["services:b"]
+    },
+    "total": 3,
+    "complete": true,
+    "reasons": []
+  }
+]
+```
+
+| Field | Meaning |
+|---|---|
+| `entity` | Required. |
+| `limitPerState` | List at most this many keys per state. |
+| `byState` | Required. Every state holding at least one instance, each with its keys. |
+| `total` | How many instances the map counted. |
+| `complete` | Whether the map is the whole answer. |
+| `reasons` | Why not, asserted as a set. |
+
+A map is the union a query over the entity makes, grouped by state: resident instances and
+stored ones, the resident view winning on a key in both. An evicted instance is counted
+under the state the store holds for it.
+
+`byState` is compared as a set of states, since the order of the states carries no meaning.
+A state the scenario does not name must hold nothing, and a state it names must hold exactly
+the keys listed, **oldest in state first**, ties broken on the key, as in `then.queries`.
+
+`limitPerState` shortens each state's list and nothing else. The count of a state and the
+`total` are of every instance found, so a truncated map still says how many there are. A
+map that left a key out reports `limit-reached`; one whose limit left nothing out does not.
+
+A map is `complete` exactly when a query over the entity would be and no key was left out.
 
 ### `then.history`
 
@@ -845,7 +897,7 @@ Anything that cannot be made deterministic must not be asserted.
    | `13x` | guards and invariants |
    | `14x` | temporal constraints |
    | `15x` | memory budget and eviction |
-   | `16x` | queries against a memory-only runtime, and partiality |
+   | `16x` | queries and the state map against a memory-only runtime, and partiality |
 
    Durable scenarios number from `01x` again, in their own directory:
 
@@ -854,7 +906,7 @@ Anything that cannot be made deterministic must not be asserted.
    | `01x` | durability: commits surviving a restart, replay |
    | `02x` | eviction with a store: snapshot on evict, transparent reload |
    | `03x` | audit sinks |
-   | `04x` | queries by state and time in state |
+   | `04x` | queries by state and time in state, values on request, and the state map |
    | `05x` | history as the whole per-key stream |
    | `06x` | deleting an instance outright |
    | `07x` | temporal constraints over a store |

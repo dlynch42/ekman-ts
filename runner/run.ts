@@ -10,6 +10,7 @@ import {
 import type {
   ForgetExpectation,
   HistoryExpectation,
+  MapExpectation,
   QueryExpectation,
   Scenario,
   SendExpectation,
@@ -75,9 +76,37 @@ const THEN_KEYS: ReadonlySet<string> = new Set([
   "memory",
   "audit",
   "queries",
+  "maps",
   "history",
   "buildError",
 ]);
+
+/**
+ * The fields a query or a map expectation may carry. Checked for the same reason as the
+ * keys above: a misspelt `includeValues` would otherwise ask a different question and
+ * assert nothing about the one that was meant.
+ */
+const ENTRY_KEYS = {
+  queries: new Set([
+    "entity",
+    "state",
+    "olderThan",
+    "limit",
+    "includeValues",
+    "keys",
+    "values",
+    "complete",
+    "reasons",
+  ]),
+  maps: new Set([
+    "entity",
+    "limitPerState",
+    "byState",
+    "total",
+    "complete",
+    "reasons",
+  ]),
+} as const;
 
 const TELEMETRY_TYPES = telemetryTypes();
 
@@ -93,6 +122,20 @@ function assertWellFormed(scenario: Scenario): void {
     if (!THEN_KEYS.has(key)) {
       throw new Error(`scenario ${scenario.id}: unknown then key "${key}"`);
     }
+  }
+
+  for (const [where, known] of Object.entries(ENTRY_KEYS)) {
+    (scenario.then?.[where as keyof typeof ENTRY_KEYS] ?? []).forEach(
+      (entry, i) => {
+        for (const key of Object.keys(entry)) {
+          if (!known.has(key)) {
+            throw new Error(
+              `scenario ${scenario.id}: unknown key "${key}" in then.${where}[${i}]`
+            );
+          }
+        }
+      }
+    );
   }
 
   for (const step of scenario.when ?? []) {
@@ -193,6 +236,7 @@ async function execute(scenario: Scenario, failures: string[]): Promise<void> {
     assertMemory(scenario.then?.memory, active.ekman, failures);
     assertAudit(scenario.then?.audit, audit, failures);
     await assertQueries(scenario.then?.queries, active.ekman, failures);
+    await assertMaps(scenario.then?.maps, active.ekman, failures);
     await assertHistory(scenario.then?.history, active.ekman, failures);
   } finally {
     // A scenario that configured an automatic sweep leaves an interval behind otherwise,
@@ -704,6 +748,9 @@ async function assertQueries(
       ...(want.state === undefined ? {} : { state: want.state }),
       ...(want.olderThan === undefined ? {} : { olderThan: want.olderThan }),
       ...(want.limit === undefined ? {} : { limit: want.limit }),
+      ...(want.includeValues === undefined
+        ? {}
+        : { includeValues: want.includeValues }),
     });
 
     const keys = got.instances.map((instance) => instance.key);
@@ -713,19 +760,104 @@ async function assertQueries(
       );
     }
 
-    if (want.complete !== undefined && want.complete !== got.complete) {
+    assertCarriedValues(`queries[${i}]`, want, got.instances, failures);
+    assertPartiality(`queries[${i}]`, want, got, failures);
+  }
+}
+
+/**
+ * Values are carried only when asked for, and that half is asserted on every query. The
+ * ones a scenario names are then compared as subsets, by key.
+ */
+function assertCarriedValues(
+  path: string,
+  want: QueryExpectation,
+  instances: readonly { key: string; values?: unknown }[],
+  failures: string[]
+): void {
+  if (want.includeValues !== true) {
+    for (const instance of instances) {
+      if (instance.values !== undefined) {
+        failures.push(
+          `${path}.values["${instance.key}"]: carried values without includeValues`
+        );
+      }
+    }
+  }
+
+  const carried = new Map(
+    instances.map((instance) => [instance.key, instance.values])
+  );
+  for (const [key, values] of Object.entries(want.values ?? {})) {
+    failures.push(
+      ...diff(`${path}.values["${key}"]`, carried.get(key), values)
+    );
+  }
+}
+
+async function assertMaps(
+  expected: readonly MapExpectation[] | undefined,
+  ekman: Ekman,
+  failures: string[]
+): Promise<void> {
+  if (expected === undefined) {
+    return;
+  }
+
+  for (const [i, want] of expected.entries()) {
+    // biome-ignore lint/performance/noAwaitInLoops: one map at a time keeps failures in scenario order
+    const got = await ekman.map(
+      want.entity,
+      want.limitPerState === undefined
+        ? {}
+        : { limitPerState: want.limitPerState }
+    );
+
+    // States are compared as a set, since their order means nothing. Each state's keys
+    // are an exact list, in order.
+    const states = new Set([
+      ...Object.keys(want.byState),
+      ...Object.keys(got.byState),
+    ]);
+    for (const state of [...states].sort()) {
+      const keys = (got.byState[state]?.keys ?? []).join(", ");
+      const wanted = (want.byState[state] ?? []).join(", ");
+      if (keys !== wanted) {
+        failures.push(
+          `maps[${i}].byState["${state}"]: expected [${wanted}], got [${keys}]`
+        );
+      }
+    }
+
+    if (want.total !== undefined && want.total !== got.total) {
       failures.push(
-        `queries[${i}].complete: expected ${want.complete}, got ${got.complete}`
+        `maps[${i}].total: expected ${want.total}, got ${got.total}`
       );
     }
 
-    if (want.reasons !== undefined) {
-      const sorted = [...got.reasons].sort().join(",");
-      if (sorted !== [...want.reasons].sort().join(",")) {
-        failures.push(
-          `queries[${i}].reasons: expected [${want.reasons.join(", ")}], got [${got.reasons.join(", ")}]`
-        );
-      }
+    assertPartiality(`maps[${i}]`, want, got, failures);
+  }
+}
+
+/** Whether an answer said it was whole, and why not, with the reasons compared as a set. */
+function assertPartiality(
+  path: string,
+  want: { complete?: boolean; reasons?: readonly string[] },
+  got: { complete: boolean; reasons: readonly string[] },
+  failures: string[]
+): void {
+  if (want.complete !== undefined && want.complete !== got.complete) {
+    failures.push(
+      `${path}.complete: expected ${want.complete}, got ${got.complete}`
+    );
+  }
+
+  if (want.reasons !== undefined) {
+    const sorted = [...got.reasons].sort().join(",");
+    if (sorted !== [...want.reasons].sort().join(",")) {
+      failures.push(
+        `${path}.reasons: expected [${want.reasons.join(", ")}], got [${got.reasons.join(", ")}]`
+      );
     }
   }
 }

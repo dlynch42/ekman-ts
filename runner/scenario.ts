@@ -272,6 +272,8 @@ export interface Then {
   readonly audit?: Readonly<Record<string, readonly string[]>>;
   /** Queries to run after everything has settled, each with the answer it must give. */
   readonly queries?: readonly QueryExpectation[];
+  /** State maps to read after everything has settled, each with the answer it must give. */
+  readonly maps?: readonly MapExpectation[];
   /** Per-key history reads, for what `then.events` cannot say. */
   readonly history?: Readonly<Record<string, HistoryExpectation>>;
 }
@@ -281,8 +283,24 @@ export interface QueryExpectation {
   readonly state?: string;
   readonly olderThan?: number | string;
   readonly limit?: number;
+  /** Ask for each match's values. Without it, a match carrying values is a failure. */
+  readonly includeValues?: boolean;
   /** Matching keys, oldest in state first. */
   readonly keys: readonly string[];
+  /** Values a match must carry, by key, each asserted as a subset. */
+  readonly values?: Readonly<Record<string, Record<string, unknown>>>;
+  readonly complete?: boolean;
+  /** Asserted as a set when present. */
+  readonly reasons?: readonly string[];
+}
+
+export interface MapExpectation {
+  readonly entity: string;
+  readonly limitPerState?: number;
+  /** Every state holding an instance, each with its keys, oldest in state first. */
+  readonly byState: Readonly<Record<string, readonly string[]>>;
+  /** How many instances the map counted, which a per-state limit does not reduce. */
+  readonly total?: number;
   readonly complete?: boolean;
   /** Asserted as a set when present. */
   readonly reasons?: readonly string[];

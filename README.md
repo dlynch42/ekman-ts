@@ -239,10 +239,15 @@ instance from one that just came back off disk. [More](./docs/memory.md)
 ```ts
 const stuck = await ekman.query({ entity: "deployments", state: "deploying", olderThan: "5m" });
 const { instances, complete, reasons } = stuck;
+
+const map = await ekman.map("deployments");
+// { byState: { deploying: { count: 3, keys: [...] }, live: { count: 41, keys: [...] } }, total: 44, ... }
 ```
 
 Time in state is measured from the last move, so a handler updating a progress counter does not
-keep resetting the clock. Every result says whether it is the whole answer; returning a partial
+keep resetting the clock. A query carries each match's values when asked with `includeValues`,
+and `where` filters by them. `map` is the whole fleet in one call: how many instances are in
+each state, and which. Every result says whether it is the whole answer; returning a partial
 one as if it were complete is the thing a query here will never do, because an operator acting on
 "nothing is stuck" needs that to have meant it. [More](./docs/queries.md)
 
@@ -269,12 +274,14 @@ Full surface in [docs/api.md](./docs/api.md). The parts you need first:
 | `post(key, trigger)` | `void` | Fire and forget. Failures go to `onUnhandled`. |
 | `inspect(key)` | `InstanceSnapshot \| undefined` | Synchronous. Resident instances only. |
 | `history(key)` | `Promise<HistoryResult>` | The per-key ordered stream. |
-| `query(criteria)` | `Promise<QueryResult>` | Instances by entity, state and time in state. |
+| `query(criteria)` | `Promise<QueryResult>` | Instances by entity, state and time in state, with their values on request. |
+| `map(entity, options?)` | `Promise<StateMap>` | A count and the keys for each state an entity's instances are in. |
+| `residentMap(entity)` | `StateMap` | **Synchronous.** The same map from resident instances only. |
 | `forget(key)` | `Promise<void>` | Delete an instance from memory and every store layer. |
 | `sweep()` | `Promise<number>` | Evaluate time-in-state constraints now. |
 | `sweepStorage()` | `Promise<StorageSweep>` | Run the store's retention pass. |
 | `close(options?)` | `Promise<void>` | Refuse new triggers, let in-flight work land up to `timeoutMs`, then close the stores. |
-| `entities.<name>` | `EntityHandle` | Typed handle: `send`, `post`, `inspect`, `history`, `query`, `forget`, `key`, all by id. |
+| `entities.<name>` | `EntityHandle` | Typed handle: `send`, `post`, `inspect`, `history`, `query`, `map`, `forget`, `key`, all by id. |
 | `memoryUsage` / `storageUsage` | `{ bytes, ... }` | Resident bytes, and bytes on disk. |
 
 ### Exports
@@ -294,7 +301,7 @@ Full surface in [docs/api.md](./docs/api.md). The parts you need first:
 
 That is every runtime export. The types they take and return are exported alongside them:
 the config shapes (`EkmanConfig`, `EntityConfig`, `ExecutionPolicy`, `StorageConfig`), the
-results (`CommitResult`, `QueryResult`, `StorageSweep`), every event and telemetry event,
+results (`CommitResult`, `QueryResult`, `StateMap`, `StorageSweep`), every event and telemetry event,
 `TemporalTrigger`, the trigger a time-in-state bound delivers, `UnhandledContext`, what
 `onUnhandled` is told about a failure, and `StateGraph`, the read-only view of an entity's
 states.
@@ -439,7 +446,7 @@ Reports pass or fail per scenario per level, and exits non-zero if a claimed lev
 | [Constraints](./docs/constraints.md) | Graphs, guards, invariants, time bounds, graph discovery |
 | [Durability and stores](./docs/durability.md) | Store kinds, layering, compaction, retention |
 | [Memory and eviction](./docs/memory.md) | The byte budget and eviction policies |
-| [Queries and history](./docs/queries.md) | `query`, `history`, and the partiality contract |
+| [Queries and history](./docs/queries.md) | `query`, `map`, `history`, and the partiality contract |
 | [Telemetry and audit](./docs/telemetry.md) | The runtime's own event stream, and audit sinks |
 | [Error codes](./docs/errors.md) | Every code, and a suggested HTTP mapping |
 

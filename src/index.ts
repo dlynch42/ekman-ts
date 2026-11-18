@@ -70,6 +70,9 @@ export type {
   QueryCriteria,
   QueryMatch,
   QueryResult,
+  StateMap,
+  StateMapEntry,
+  StateMapOptions,
 } from "./query";
 export { parseDuration } from "./query";
 export type {

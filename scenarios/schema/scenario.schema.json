@@ -760,10 +760,51 @@
                 ]
               },
               "limit": { "type": "integer", "minimum": 0 },
+              "includeValues": {
+                "description": "Ask for each match's values. Without it, a match carrying values is a failure.",
+                "type": "boolean"
+              },
               "keys": {
                 "description": "Matching keys, oldest in state first, ties broken on the key.",
                 "type": "array",
                 "items": { "type": "string" }
+              },
+              "values": {
+                "description": "Values a match must carry, by key, each asserted as a subset.",
+                "type": "object",
+                "additionalProperties": { "type": "object" }
+              },
+              "complete": { "type": "boolean" },
+              "reasons": {
+                "description": "Asserted as a set.",
+                "type": "array",
+                "items": { "$ref": "#/$defs/partiality" }
+              }
+            }
+          }
+        },
+        "maps": {
+          "description": "State maps read after everything settles, each with the answer it must give.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["entity", "byState"],
+            "additionalProperties": false,
+            "properties": {
+              "entity": { "type": "string", "minLength": 1 },
+              "limitPerState": { "type": "integer", "minimum": 0 },
+              "byState": {
+                "description": "Every state holding an instance, each with its keys, oldest in state first, ties broken on the key. States are compared as a set.",
+                "type": "object",
+                "additionalProperties": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                }
+              },
+              "total": {
+                "description": "How many instances the map counted. A per-state limit does not reduce it.",
+                "type": "integer",
+                "minimum": 0
               },
               "complete": { "type": "boolean" },
               "reasons": {
@@ -813,7 +854,8 @@
         "unsupported-criteria",
         "limit-reached",
         "compacted",
-        "history-capped"
+        "history-capped",
+        "resident-only"
       ]
     },
     "errorCode": {

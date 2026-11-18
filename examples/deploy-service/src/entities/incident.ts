@@ -13,7 +13,10 @@
 
 import { defineEntity, stay, transitionTo } from "ekman";
 
-export type IncidentState = "open" | "acknowledged" | "resolved";
+/** Every state an incident can be in. A list, so a state named in a URL can be checked. */
+export const INCIDENT_STATES = ["open", "acknowledged", "resolved"] as const;
+
+export type IncidentState = (typeof INCIDENT_STATES)[number];
 
 export interface IncidentValues extends Record<string, unknown> {
   /** The deployment this was opened for. */

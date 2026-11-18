@@ -5,23 +5,46 @@
  * query pasted into a runbook. "What is stuck in `deploying`, and for how long" is a
  * first-class question here rather than something to reconstruct under pressure.
  *
- * Both query endpoints pass `complete` and `reasons` straight through to the caller. That
- * is deliberate: an operator acting on "nothing is stuck" needs to know whether that was
- * the whole answer or only the part this process could see.
+ * The query endpoints and the map pass `complete` and `reasons` straight through to the
+ * caller. That is deliberate: an operator acting on "nothing is stuck" needs to know
+ * whether that was the whole answer or only the part this process could see.
+ *
+ * A state arrives here as text in a URL, and the entity's handle only accepts states the
+ * entity has. So it is checked against the list first, and a misspelt one is a 400 that
+ * names the choices instead of a query that quietly matches nothing.
  */
 
 import { isEkmanError } from "ekman";
+import { DEPLOYMENT_STATES } from "../../entities/deployment";
+import { INCIDENT_STATES } from "../../entities/incident";
 import { config } from "../../lib/config";
 import { metricsSnapshot } from "../../lib/metrics";
 import { deployments, ekman, incidents } from "../../lib/runtime";
-import { json, type Reply, type Route, requireOperator } from "../server";
+import {
+  BadRequest,
+  json,
+  type Reply,
+  type Route,
+  requireOperator,
+} from "../server";
+
+function stateFrom<S extends string>(given: string, states: readonly S[]): S {
+  const state = states.find((known) => known === given);
+  if (state === undefined) {
+    throw new BadRequest(`state must be one of: ${states.join(", ")}`);
+  }
+  return state;
+}
 
 export const opsRoutes: readonly Route[] = [
   {
     method: "GET",
     path: "/ops/stuck",
     handle: async (ctx): Promise<Reply> => {
-      const state = ctx.query.get("state") ?? "deploying";
+      const state = stateFrom(
+        ctx.query.get("state") ?? "deploying",
+        DEPLOYMENT_STATES
+      );
       const olderThan = ctx.query.get("olderThan") ?? "5m";
 
       // Oldest first, which is the order the question is asked in. Time in state is
@@ -45,12 +68,36 @@ export const opsRoutes: readonly Route[] = [
     path: "/ops/incidents",
     handle: async (ctx): Promise<Reply> => {
       const state = ctx.query.get("state");
-      const result = await incidents.query(state === null ? {} : { state });
+      const result = await incidents.query(
+        state === null ? {} : { state: stateFrom(state, INCIDENT_STATES) }
+      );
       return json(200, {
         count: result.instances.length,
         complete: result.complete,
         reasons: result.reasons,
         instances: result.instances,
+      });
+    },
+  },
+
+  {
+    method: "GET",
+    path: "/ops/map",
+    handle: async (ctx): Promise<Reply> => {
+      // The whole fleet in one call: how many deployments are in each state, and which.
+      const map = await deployments.map();
+      if (ctx.query.get("values") !== "true") {
+        return json(200, map);
+      }
+
+      // What each one knows, on request. Reading every deployment's values is the
+      // expensive form of the question, so it is not the default.
+      const { instances } = await deployments.query({ includeValues: true });
+      return json(200, {
+        ...map,
+        values: Object.fromEntries(
+          instances.map((match) => [match.key, match.values])
+        ),
       });
     },
   },

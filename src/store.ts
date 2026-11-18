@@ -146,6 +146,11 @@ export interface ScanCriteria {
    * is still correct, only slower.
    */
   readonly skip?: ReadonlySet<string>;
+  /**
+   * Carry each match's values. A store that ignores it is still correct: the runtime reads
+   * the values of any match that arrives without them, which costs a load per match.
+   */
+  readonly includeValues?: boolean;
 }
 
 export interface ScanMatch {
@@ -154,6 +159,8 @@ export interface ScanMatch {
   readonly state: string;
   readonly seq: number;
   readonly enteredAt: number;
+  /** The committed values, when the scan asked for them with `includeValues`. */
+  readonly values?: Readonly<Values>;
 }
 
 /** A scan criterion a store may be unable to apply. */
@@ -438,5 +445,6 @@ function toMatch(
     state: current.state,
     seq: current.seq,
     enteredAt: current.enteredAt,
+    ...(criteria.includeValues === true ? { values: current.values } : {}),
   };
 }

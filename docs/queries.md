@@ -25,6 +25,8 @@ answer, and it is one call.
 | `state` | `string` | Only instances currently in this state. |
 | `olderThan` | `number` \| `string` | Time in state, as milliseconds or a duration string such as `"5m"`, `"2h"`, `"30d"`. |
 | `limit` | `number` | Cap the answer to the oldest this many. Truncation is reported, never silent. Anything but a non-negative integer is refused with `INVALID_CONFIG`. |
+| `includeValues` | `boolean` | Carry each match's committed values. Off by default. |
+| `where` | `(values) => boolean` | Keep only the instances whose values pass. |
 
 The string form for `olderThan` exists because `"5m"` is what an operator actually wants to
 write, and `300000` is a number nobody checks twice. A string that is not a duration is refused
@@ -33,8 +35,10 @@ rather than guessed at.
 Each match is:
 
 ```ts
-{ key, entity, state, seq, enteredAt, ageMs, resident }
+{ key, entity, state, seq, enteredAt, ageMs, resident, values? }
 ```
+
+`values` is there only when the query set `includeValues`.
 
 Results come back oldest first, which is the order the question is asked in. Instances that
 entered their state at the same instant are ordered by key, compared as plain strings and not by
@@ -52,6 +56,33 @@ A resident instance that does not match is still asked about. So is one that is 
 If another writer has moved either into the state you asked for, the stored row is the answer,
 and it comes back with `resident: false`.
 
+### Values, and filtering by them
+
+```ts
+const failing = await ekman.entities.services.query({
+  state: "degraded",
+  includeValues: true,
+  where: (values) => values.errorRate > 0.05,
+});
+
+for (const { key, values } of failing.instances) {
+  console.log(key, values?.lastError);
+}
+```
+
+Values are left out unless you ask, because reading the values of every stored instance is
+the expensive form of a query, and most questions are answered by the key and the state.
+
+`where` is applied by the runtime, to resident and stored instances alike, after the store
+has answered. So the answer is exact, and a filter by values is never a reason for a partial
+one. It is only slower: every candidate's values are read to evaluate it, whether or not you
+also ask for them back. Narrow with `state` and `olderThan` first when you can. The function
+should be pure; one that throws fails the query. `limit` applies to what passed.
+
+On an entity's handle a query is typed by the entity: `state` must be one of its states, so
+a misspelt one is a compile error, and `values` has the entity's value types. `ekman.query`
+takes any string, since it is addressed by an entity name it cannot check at compile time.
+
 ### Time in state is measured from the last move
 
 A handler that updates a progress counter every second does not keep resetting the clock on
@@ -65,6 +96,52 @@ measurement survives a restart, and it keeps running through one. An instance th
 `deploying` for two minutes when the process stopped, and came back eight minutes later, has
 been `deploying` for ten. Time the process was down is time the instance was stuck. This
 relies on the clock you inject, or `Date.now`, meaning the same thing in both processes.
+
+## The state map
+
+```ts
+const map = await ekman.map("services");
+// {
+//   entity: "services",
+//   byState: {
+//     healthy:  { count: 397, keys: ["services:auth", ...] },
+//     degraded: { count: 3,   keys: ["services:payments-api", ...] },
+//   },
+//   total: 400,
+//   complete: true,
+//   reasons: [],
+//   sources: ["resident", "file"],
+// }
+```
+
+Where every instance of an entity is, in one call: how many are in each state, and which.
+It is the same union a query makes, grouped by state, so resident and stored instances are
+both counted and an evicted one appears under the state the store holds for it.
+
+- A state nothing is in has no entry. The order of the states carries no meaning.
+- Each state's keys are oldest in the state first, with ties broken on the key, the order a
+  query uses.
+- `limitPerState` lists at most that many keys per state. The counts and `total` stay whole,
+  and a map that left keys out reports `limit-reached`.
+- `complete` and `reasons` mean what they mean on a query. A map is incomplete whenever a
+  query over the entity would be.
+
+```ts
+await ekman.entities.services.map({ limitPerState: 20 });   // typed by the entity's states
+```
+
+To put values next to the map, run a query with `includeValues` alongside it.
+
+### What is in memory, without asking a store
+
+```ts
+const now = ekman.residentMap("services");   // synchronous
+```
+
+`residentMap` builds the same shape from resident instances only and never touches a store,
+for a view that refreshes often. It is never complete, by construction: an instance that was
+evicted, or that this runtime has not loaded, is not in it. It says so with `resident-only`,
+whether or not a store is configured.
 
 ## `history(key)`
 
@@ -108,6 +185,7 @@ if (!complete) {
 | `unsupported-criteria` | A store could not evaluate one of the filters, so it was applied after the fact. |
 | `limit-reached` | The answer was truncated by `limit`. |
 | `compacted` | The stream was compacted, so events before the snapshot are gone. Current state, values and sequence are unaffected; what is missing is the middle of the history. |
+| `resident-only` | Only memory was asked. Reported by `residentMap`, which leaves out anything evicted or not loaded by this runtime, whether or not a store holds it. |
 | `history-capped` | No store holds the stream, and the instance has more events than a runtime keeps in memory per key (the most recent 1,000), so the oldest are gone. Current state, values and sequence are unaffected. Only `history` reports this, and always alongside `no-durable-store`. |
 
 `complete: false` does not mean the answer is wrong. It means something in the configuration

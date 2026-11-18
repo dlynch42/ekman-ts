@@ -293,6 +293,10 @@ Two declarations the runtime holds you to:
   scan that could not apply one names it in `unsupported`, as `"state"` or `"olderThan"`, and
   the runtime finishes the filter and reports the answer as partial. If you declare that you
   cannot filter, the runtime filters whether or not an answer says so.
+- A scan may set `includeValues`. Carry each match's committed values in `values` when it
+  does; `scanKeys` already does. A `scan` that leaves them out is still correct, and the
+  runtime then loads each key it needs values for, so supporting it is a matter of speed.
+  What a store must not do is carry values other than the last committed ones.
 - `usage` is optional, and a method: `usage(): StoreUsage`. Implement it when the store can
   say what it holds. `ekman.storageUsage` sums it across the stack.
 
