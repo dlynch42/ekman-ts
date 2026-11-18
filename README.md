@@ -40,44 +40,46 @@ entrypoint. A runtime you embed, not a platform you operate.
 npm install ekman
 ```
 
-Node 20 or newer. Zero runtime dependencies. ESM and CommonJS entry points are both shipped and
+Node 22.12 or newer. Zero runtime dependencies. ESM and CommonJS entry points are both shipped and
 TypeScript types are bundled, so `import` from an ESM project and `require` from a CommonJS one
 both work with no configuration on your side.
 
 ## Quickstart
 
-```ts
+```ts check
 import { defineEntity, Ekman, isTransitionEvent, stay, transitionTo } from "ekman";
 
 /** Stand-in for whatever actually takes the money. */
 const chargeCard = async (cents: number) =>
   new Promise<string>((ok) => setTimeout(() => ok(`rc_${cents}`), 20));
 
-// 1. Describe how an order behaves: states to handlers. No runtime here, no I/O.
-const orders = defineEntity("orders", {
+// 1. Say what an order can be sent. This is what types `trigger` below.
+type OrderTrigger = { type: "pay"; amount: number } | { type: "cancel" };
+
+// 2. Describe how an order behaves: states to handlers. No runtime here, no I/O.
+const orders = defineEntity.withTriggers<OrderTrigger>()("orders", {
   initial: "pending",
   values: { total: 0, receipt: "" },
   states: {
     // One handler runs per key at a time, so read, await, write needs no lock.
     pending: async (order, trigger) => {
       if (trigger.type !== "pay") return stay(order.values);
-      const amount = trigger.amount as number;
-      const receipt = await chargeCard(amount);
-      return transitionTo("paid", { total: order.values.total + amount, receipt });
+      const receipt = await chargeCard(trigger.amount);
+      return transitionTo("paid", { total: order.values.total + trigger.amount, receipt });
     },
     paid: (order) => stay(order.values),
   },
 });
 
-// 2. Build the runtime once, at your entrypoint. No store means memory only.
+// 3. Build the runtime once, at your entrypoint. No store means memory only.
 const ekman = new Ekman({ entities: [orders] });
 
-// 3. Address an instance by id and send it a trigger. Resolves when the commit lands.
+// 4. Address an instance by id and send it a trigger. Resolves when the commit lands.
 const committed = await ekman.entities.orders.send("a-1", { type: "pay", amount: 4200 });
 // same thing by full key: await ekman.send("orders:a-1", { type: "pay", amount: 4200 })
 console.log(committed.state, committed.values);
 
-// 4. Read it back. inspect() is synchronous; history() is the whole per-key stream.
+// 5. Read it back. inspect() is synchronous; history() is the whole per-key stream.
 const { events } = await ekman.entities.orders.history("a-1");
 console.log(events.filter(isTransitionEvent).map((e) => `${e.from ?? "(new)"} -> ${e.to}`));
 
@@ -90,8 +92,10 @@ paid { total: 4200, receipt: 'rc_4200' }
 ```
 
 The keys of `states` are the only source of the state union, so `initial: "pending"` is checked
-and a typo is a compile error. Trigger payload fields are `unknown` by design, which is why
-`trigger.amount` is cast.
+and a typo is a compile error. The trigger union does the same for payloads: `trigger.amount`
+is a `number` once the type is narrowed to `pay`, and `entities.orders.send` refuses anything
+outside the union. Leave the union out, with plain `defineEntity("orders", ...)`, and payload
+fields are `unknown`. See [Typed triggers](./docs/entities.md#typed-triggers).
 
 **Make it durable.** Nothing above survives the process. Name a store and it does:
 
@@ -133,13 +137,19 @@ Each of these has a full page in [docs/](./docs).
 
 ### Entities and handlers
 
-```ts
-const orders = defineEntity("orders", {
+<!-- check-docs:
+import { defineEntity, stay, transitionTo } from "ekman";
+-->
+```ts check
+type OrderTrigger = { type: "pay"; amount: number } | { type: "refund" };
+
+const orders = defineEntity.withTriggers<OrderTrigger>()("orders", {
   initial: "pending",
   values: { total: 0 },
   triggers: ["pay", "refund"],          // anything else is refused and recorded
   states: {
-    pending: (order, trigger) => transitionTo("paid", { total: trigger.amount as number }),
+    pending: (order, trigger) =>
+      trigger.type === "pay" ? transitionTo("paid", { total: trigger.amount }) : stay(order.values),
     paid: (order) => stay(order.values),
   },
 });
@@ -278,10 +288,21 @@ Full surface in [docs/api.md](./docs/api.md). The parts you need first:
 | Errors | `EkmanError`, `ConstraintViolationError`, `isEkmanError`, `isConstraintViolation`, `ERROR_CODES`, `ERROR_FALLBACK` |
 | Events | `isTransitionEvent` |
 | Diagrams | `analyze`, `toMermaid`, `toDot`, `observeEdges`, `allowFrom` |
-| Stores | `createStore`, `resolveStack`, `replay`, `scanKeys`, `defaultLogDir` |
+| Stores | `createStore`, `defaultLogDir`, `replay`, `latestSeq`, `scanKeys`, `EMPTY_SEQ` |
+| Option lists | `OVERFLOW_POLICIES`, `EVICTION_POLICIES`, `RETENTION_POLICIES`, `DEFAULT_CAPACITY` |
 | Misc | `parseDuration`, `accountBytes`, `DEFAULT_TEMPORAL_TRIGGER`, `TELEMETRY_FALLBACK` |
 
-Plus the types for every one of them.
+That is every runtime export. The types they take and return are exported alongside them:
+the config shapes (`EkmanConfig`, `EntityConfig`, `ExecutionPolicy`, `StorageConfig`), the
+results (`CommitResult`, `QueryResult`, `StorageSweep`), every event and telemetry event,
+`TemporalTrigger`, the trigger a time-in-state bound delivers, `UnhandledContext`, what
+`onUnhandled` is told about a failure, and `StateGraph`, the read-only view of an entity's
+states.
+
+Store adapters import from `ekman/store`, which carries the `Store` types, the helpers
+`replay`, `latestSeq`, `previousSeq`, `scanKeys` and `EMPTY_SEQ`, and `storeContract`, the
+test suite an adapter proves itself with. See
+[Writing a store adapter](./docs/durability.md#writing-a-store-adapter).
 
 ### Handler context
 
@@ -398,7 +419,7 @@ Reports pass or fail per scenario per level, and exits non-zero if a claimed lev
 
 | | |
 |---|---|
-| Node | 20 or newer |
+| Node | 22.12 or newer |
 | Module formats | ESM (`import`) and CommonJS (`require`), both shipped |
 | TypeScript | Types bundled. Resolves under `NodeNext`, `Bundler` and `Node16`. |
 | Runtime dependencies | None |

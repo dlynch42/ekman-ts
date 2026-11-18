@@ -17,6 +17,7 @@ read the first four and come back for the rest.
 | [Runtime and API](./api.md) | Every `new Ekman({...})` option and every method on the runtime. |
 | [Ordering and the inbox](./ordering.md) | The bounded per-key inbox, capacity, and the three overflow policies. |
 | [Execution policy](./execution.md) | Retries, timeouts, backoff, and the fencing token that makes a zombie handler harmless. |
+| [Handlers that own external resources](./external-resources.md) | What the runtime cannot do for a handler that creates things outside it: roll back, commit atomically with a side effect, or restore what a crash destroyed. |
 | [Constraints](./constraints.md) | Transition graphs, guards, invariants, time-in-state bounds, and discovering a graph from real traffic. |
 | [Durability and stores](./durability.md) | Store kinds, layering, capability declaration, log compaction, retention. |
 | [Memory and eviction](./memory.md) | The byte budget, how instances are accounted, and the three eviction policies. |

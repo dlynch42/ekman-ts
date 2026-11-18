@@ -618,7 +618,7 @@ export class InstanceRecord<
       if (isEkmanError(error) && error.code === "STORE_CONFLICT") {
         this.#overtaken();
       }
-      this.#deps.onUnhandled(error);
+      this.#deps.onUnhandled(error, { source: "persist", key: this.key });
     });
   }
 

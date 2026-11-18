@@ -1,3 +1,4 @@
+import { constraintsOf } from "./compiled";
 import type { ProposedCommit } from "./constraints";
 import { checkConstraints, rejection, violationError } from "./constraints";
 import { resolveErrorHandler } from "./entity";
@@ -216,7 +217,7 @@ async function attemptLoop<S extends string, V extends Values>(
         attempt,
         maxAttempts: policy.maxAttempts,
         delayMs,
-        error: failure.reported.message,
+        error: failure.detail,
         trigger: triggerRef(trigger),
         at: telemetryNow(),
       });
@@ -288,12 +289,20 @@ class AttemptFailure extends Error {
   readonly original: Error;
   readonly reported: Error;
   readonly terminal: boolean;
+  /** What telemetry says about it. The reported message, unless that adds where it was. */
+  readonly detail: string;
 
-  constructor(original: Error, reported: Error, terminal = false) {
+  constructor(
+    original: Error,
+    reported: Error,
+    terminal = false,
+    detail = reported.message
+  ) {
     super(reported.message);
     this.original = original;
     this.reported = reported;
     this.terminal = terminal;
+    this.detail = detail;
   }
 }
 
@@ -535,11 +544,7 @@ async function handleFailure<S extends string, V extends Values>(
     } catch (thrown) {
       // An error handler that itself fails does not get another error handler. That
       // would be an unbounded chain, and the original failure is the one worth reporting.
-      // biome-ignore lint/style/useErrorCause: the failure being reported is the handler's, and `failed` carries it as the cause; what the error handler threw is folded into the message
-      throw new AttemptFailure(
-        error,
-        failed(instance.key, error, toError(thrown))
-      );
+      throw failed(instance, trigger, error, toError(thrown));
     }
 
     if (isHandlerResult(recovery)) {
@@ -556,30 +561,43 @@ async function handleFailure<S extends string, V extends Values>(
           token
         );
       }
-      throw new AttemptFailure(
-        error,
-        failed(instance.key, error, recovery.error)
-      );
+      throw failed(instance, trigger, error, recovery.error);
     }
   }
 
-  throw new AttemptFailure(error, failed(instance.key, error));
+  throw failed(instance, trigger, error);
 }
 
-function failed(key: string, error: Error, from?: Error): EkmanError {
+function failed(
+  instance: { readonly key: string; readonly state: string },
+  trigger: Trigger,
+  error: Error,
+  from?: Error
+): AttemptFailure {
   // A constraint refusal that nothing recovered keeps its own code all the way to the
   // sender. Rewrapping it as a generic handler failure would throw away the classification
   // at exactly the boundary where a caller wants to branch on it.
   if (from === undefined && isConstraintViolation(error)) {
-    return error;
+    return new AttemptFailure(error, error);
   }
 
   const suffix =
     from === undefined ? "" : ` (error handler also failed: ${from.message})`;
-  return new EkmanError("HANDLER_FAILED", `${error.message}${suffix}`, {
-    key,
-    cause: error,
-  });
+  const detail = `${error.message}${suffix}`;
+
+  // The sender's error says where, because the inner message alone does not: the same
+  // "connection refused" could have come from any handler of any entity. Telemetry keeps
+  // the bare detail, since its events already carry the key and the attempt.
+  return new AttemptFailure(
+    error,
+    new EkmanError(
+      "HANDLER_FAILED",
+      `handler for ${instance.key} in "${instance.state}" failed on "${trigger.type}": ${detail}`,
+      { key: instance.key, cause: error }
+    ),
+    false,
+    detail
+  );
 }
 
 /**
@@ -602,7 +620,7 @@ function applyConstraints<S extends string, V extends Values>(
     mutatingValues: boolean;
   }
 ): void {
-  const compiled = definition.constraints;
+  const compiled = constraintsOf(definition);
 
   // Entity with no constraints must not pay for a snapshot of an instance nobody inspects
   if (compiled === undefined || !compiled.checksAtCommit) {

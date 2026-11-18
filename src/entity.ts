@@ -1,3 +1,4 @@
+import { sealConstraints } from "./compiled";
 import { assertKnownKeys } from "./config";
 import type { CompiledTemporal } from "./constraints";
 import { compileConstraints } from "./constraints";
@@ -26,8 +27,11 @@ import { sealInitialValues } from "./values";
  * tested on its own and registered with more than one runtime.
  *
  * Types are inferred: the state union comes from the keys of `states`, and the values
- * type from `values`. To pin all three type parameters explicitly, annotate the
- * binding instead of passing type arguments, which also keeps the name literal:
+ * type from `values`. Trigger payloads are `unknown` unless the entity is given a trigger
+ * union, which is what `defineEntity.withTriggers` is for.
+ *
+ * To pin every type parameter explicitly, annotate the binding instead of passing type
+ * arguments, which also keeps the name literal:
  *
  * ```ts
  * export const deployments: EntityDefinition<"deployments", State, Values, Trigger> =
@@ -94,12 +98,12 @@ export function defineEntity<
 
   // Compiled last, because every constraint names states and the check is worth making
   // against the states that survived validation rather than against the raw config.
-  const constraints =
+  const compiled =
     config.constraints === undefined
       ? undefined
       : compileConstraints<S, V, T>(name, config.constraints, states);
 
-  assertEscalationsRecognized(name, triggers, constraints?.temporal ?? []);
+  assertEscalationsRecognized(name, triggers, compiled?.temporal ?? []);
 
   return Object.freeze({
     name,
@@ -111,10 +115,44 @@ export function defineEntity<
     handlers,
     errorHandlers,
     classify,
-    constraints,
+    constraints: sealConstraints(compiled),
     key: (id: string) => buildKey(name, id),
   });
 }
+
+/**
+ * Define an entity whose trigger union is given explicitly, with the name, states and
+ * values still inferred from the config.
+ *
+ * The union cannot be inferred from a handler's parameters, because inferring from the
+ * `states` values is what would widen the state union. So it is supplied first, on its own,
+ * and everything else follows from the config as usual:
+ *
+ * ```ts
+ * type OrderTrigger =
+ *   | { type: "pay"; amount: number }
+ *   | { type: "refund"; reason: string };
+ *
+ * const orders = defineEntity.withTriggers<OrderTrigger>()("orders", {
+ *   initial: "pending",
+ *   states: {
+ *     pending: (order, trigger) =>
+ *       trigger.type === "pay" ? transitionTo("paid", { total: trigger.amount }) : stay(),
+ *     paid: () => stay(),
+ *   },
+ * });
+ * ```
+ *
+ * `entities.orders.send` then refuses a payload outside the union at compile time, and a
+ * `triggers` list is checked against the union's types.
+ */
+defineEntity.withTriggers =
+  <T extends TriggerLike>() =>
+  <const N extends string, S extends string, V extends Values = Values>(
+    name: N,
+    config: EntityConfig<S, V, T>
+  ): EntityDefinition<N, S, V, T> =>
+    defineEntity<N, S, V, T>(name, config);
 
 /**
  * Normalize the two ways a state may be declared into one shape.

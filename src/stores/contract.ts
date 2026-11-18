@@ -1,6 +1,27 @@
-import { expect, it } from "vitest";
-import type { EkmanError, EkmanEvent, Store } from "../src/index";
-import { EMPTY_SEQ } from "../src/index";
+import type { EkmanError } from "../errors";
+import type { EkmanEvent } from "../events";
+import type { Store } from "../store";
+import { EMPTY_SEQ } from "../store";
+
+/** The assertions the contract makes. Vitest's and Jest's `expect` both satisfy this. */
+export interface ContractMatchers {
+  toBe: (expected: unknown) => void;
+  toBeUndefined: () => void;
+  toEqual: (expected: unknown) => void;
+  toHaveLength: (length: number) => void;
+  toMatchObject: (expected: object) => void;
+}
+
+/**
+ * The test runner the contract registers its cases with.
+ *
+ * Passed in so the contract depends on no test framework of its own: hand it the `it` and
+ * `expect` your suite already uses.
+ */
+export interface ContractHarness {
+  it: (name: string, run: () => void | Promise<void>) => void;
+  expect: (actual: unknown) => ContractMatchers;
+}
 
 /**
  * The shared store contract.
@@ -11,11 +32,21 @@ import { EMPTY_SEQ } from "../src/index";
  *
  * `make` returns a fresh, empty store each call. Adapters that touch the filesystem get a
  * fresh directory per call, which is the point of taking a factory rather than an instance.
+ *
+ * ```ts
+ * import { describe, expect, it } from "vitest";
+ * import { storeContract } from "ekman/store";
+ *
+ * describe("my store", () => {
+ *   storeContract("mine", () => myStore(), { durable: true }, { it, expect });
+ * });
+ * ```
  */
 export function storeContract(
   name: string,
   make: () => Store,
-  expected: { durable: boolean }
+  expected: { durable: boolean },
+  { it, expect }: ContractHarness
 ): void {
   const commit = (
     key: string,
@@ -357,6 +388,11 @@ export function storeContract(
       state: "pending",
       now: 0,
     });
+    if (!store.capabilities.scan.byState) {
+      // A store that cannot filter by state has to say so, and not answer as if it had.
+      expect(pending.unsupported.includes("state")).toBe(true);
+      return;
+    }
     expect(pending.matches.map((m) => m.key)).toEqual(["orders:1"]);
   });
 
@@ -386,6 +422,10 @@ export function storeContract(
       now: 10_000,
     });
 
+    if (!store.capabilities.scan.olderThan) {
+      expect(stuck.unsupported.includes("olderThan")).toBe(true);
+      return;
+    }
     expect(stuck.matches.map((m) => m.key)).toEqual(["orders:1"]);
   });
 
@@ -402,6 +442,9 @@ export function storeContract(
 
   it(`${name}: measures time in state from the move, not from the last commit`, async () => {
     const store = make();
+    if (!store.capabilities.scan.olderThan) {
+      return;
+    }
     await store.append(
       "orders:1",
       commit("orders:1", 0, null, "a", 0),
@@ -421,6 +464,11 @@ export function storeContract(
 
   it(`${name}: forgets a key completely, stream and snapshot alike`, async () => {
     const store = make();
+    // Deleting is a capability. A store on an append-only medium may declare it cannot,
+    // and the runtime then refuses retention up front; there is nothing to hold it to here.
+    if (!store.capabilities.forget) {
+      return;
+    }
     await store.append(
       "orders:1",
       commit("orders:1", 0, null, "a", 0),
@@ -455,6 +503,9 @@ export function storeContract(
 
   it(`${name}: lets a forgotten key be created again from the beginning`, async () => {
     const store = make();
+    if (!store.capabilities.forget) {
+      return;
+    }
     await store.append(
       "orders:1",
       commit("orders:1", 0, null, "a", 0),
@@ -477,7 +528,7 @@ export function storeContract(
   it(`${name}: forgetting a key it never held is not an error`, async () => {
     const store = make();
     // So a sweep that dies halfway behaves the same way when it is retried.
-    await expect(store.forget?.("orders:nobody")).resolves.toBeUndefined();
+    expect(await store.forget?.("orders:nobody")).toBeUndefined();
   });
 
   it(`${name}: says whether it can forget at all`, () => {

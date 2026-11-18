@@ -104,10 +104,19 @@ store: "file"                              // .ekman/logs/
 store: { kind: "file", dir: "/var/lib/app" }
 ```
 
-`.ekman/logs/` is found by walking up from the working directory to the nearest `package.json`,
-so the same service finds the same state however it was launched. A deployment with no
-`package.json` beside it, such as a bundled single-file build, should name the path explicitly
-rather than take the default.
+The default directory depends on where the process was started. `.ekman/logs/` is placed beside
+the nearest `package.json` at or above the **working directory**, and in the working directory
+itself when there is none. Starting the same service from somewhere else can therefore find a
+different, empty store:
+
+- A service unit with `WorkingDirectory=/` and no `package.json` above it writes to `/.ekman/logs`.
+- In a monorepo, starting from a package directory and starting from the repository root resolve
+  to two different directories.
+- A bundled single-file build or a container image often has no `package.json` beside it.
+- On a read-only filesystem the directory cannot be created, and the runtime refuses to start
+  with `INVALID_CONFIG`.
+
+In production, name the path with `dir` and do not take the default.
 
 One log per key, in a directory per entity:
 
@@ -248,6 +257,25 @@ The reload is recorded in the per-key stream as a `restored` event, carrying the
 restored *to* without advancing it. That is what makes a gap in a stream explicable rather than
 mysterious. It is deliberately not persisted; writing a restore back to the store would turn
 every read into a write.
+
+## Writing a store adapter
+
+A store is anything that implements `Store`. Import the type, the shared helpers and the
+contract from `ekman/store`, declare your capabilities honestly, since the runtime refuses a
+configuration your declaration cannot satisfy, and run `storeContract` in your own tests:
+
+```ts
+import { describe, expect, it } from "vitest";
+import { storeContract } from "ekman/store";
+
+describe("my store", () => {
+  storeContract("mine", () => myStore(), { durable: true }, { it, expect });
+});
+```
+
+The contract takes the `it` and `expect` your suite already uses, so it depends on no test
+framework of its own. An adapter that passes can be put in a stack without reading the
+runtime.
 
 ## Next
 

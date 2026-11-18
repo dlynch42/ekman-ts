@@ -66,9 +66,13 @@ Each PR wants two labels. The topic labels (`spec`, `runtime`, `constraints`, `s
 
 The label set itself lives in `.autorc` and is applied to the repository with `npx auto create-labels`.
 
+Releases are published by the `Release` workflow and nowhere else. It runs every check in a job that holds no secret, then publishes that job's build from a second job that installs with lifecycle scripts off. `package.json` has no `prepublishOnly`, so an `npm publish` from a laptop runs no checks at all. Do not publish by hand.
+
+A PR whose change a user will notice should carry a `## Release Notes` section in its body. `auto` copies that section into the changelog in place of the PR title, so an entry reads as a note to someone upgrading and not as a commit subject.
+
 ## Getting set up
 
-Ekman is a TypeScript project and requires Node.js 20 or newer. It has no runtime dependencies, and the file store writes under `.ekman/` in the working directory.
+Ekman is a TypeScript project and requires Node.js 22.12 or newer. That is the floor for using the package. Working on it wants a current Node 22 or 24, since the build and lint tooling move faster than the floor does. It has no runtime dependencies, and the file store writes under `.ekman/` beside the nearest `package.json` at or above the working directory, which for a checkout of this repository is its root.
 
 ```bash
 git clone https://github.com/dlynch42/ekman-ts
@@ -133,7 +137,7 @@ If a proposal blurs the line, expect pushback. This is not a marketing rule. It 
 
 Treat these as stable surface and don't change them casually:
 
-1. **Everything exported from `src/index.ts`.** That barrel is the entire public surface, deliberately. Removing or renaming an export is a breaking change.
+1. **Everything exported from `src/index.ts` and from `src/stores/index.ts`,** which is published as `ekman/store` for store adapters. Those two barrels are the entire public surface, deliberately. Removing or renaming an export is a breaking change.
 2. **The key format** `<entity>:<segment>...`. Keys are the public identity and appear in history, queries, telemetry, log filenames and error messages.
 3. **The error codes** in `src/errors.ts`. Callers branch on `code`, so the set and their meanings are contract. Messages are not.
 4. **The telemetry event names and shapes** in `src/telemetry.ts`. These land in other people's metrics pipelines.

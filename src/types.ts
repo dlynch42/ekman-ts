@@ -1,12 +1,11 @@
 import type { AuditSink } from "./audit";
-import type { CompiledConstraints, ConstraintsConfig } from "./constraints";
+import type { ConstraintsConfig } from "./constraints";
 import type { TransitionEvent } from "./events";
 import type { MemoryConfig } from "./memory";
 import type { ExecutionPolicy } from "./policy";
 import type { HistoryResult, QueryCriteria, QueryResult } from "./query";
 import type { HandlerResult } from "./results";
 import type { Coordination, StoreLayer } from "./stack";
-import type { States } from "./states";
 // Type-only, and so erased: `telemetry.ts` names `OverflowPolicy` from here, and this
 // names `TelemetrySink` from there. Neither import survives compilation, so the cycle
 // exists only for the typechecker, which resolves it fine.
@@ -158,8 +157,11 @@ export interface EntityConfig<
   /**
    * Trigger types this entity recognizes. Omitted means every type is recognized and
    * only a state with no handler reaches the unknown policy.
+   *
+   * Checked against the trigger union when the entity has one, so a typo here is a compile
+   * error. With no union declared this is any list of strings.
    */
-  readonly triggers?: readonly string[];
+  readonly triggers?: readonly NoInfer<T>["type"][];
   /**
    * Exactly one handler per state. Exhaustive over `S`.
    *
@@ -201,6 +203,36 @@ export interface EntityConfig<
   readonly constraints?: ConstraintsConfig<NoInfer<S>, NoInfer<V>, NoInfer<T>>;
 }
 
+/** The states an entity declares and the moves between them it allows. Read-only. */
+export interface StateGraph {
+  /** How many states. */
+  readonly size: number;
+  /** Every state, in declaration order. */
+  readonly names: readonly string[];
+  /** Whether a transition graph was declared. Without one, every move is allowed. */
+  readonly hasEdges: boolean;
+  has: (state: string) => boolean;
+  allows: (from: string, to: string) => boolean;
+  targetsOf: (from: string) => readonly string[];
+  outDegree: (from: string) => number;
+  /** States nothing leaves. */
+  terminals: () => readonly string[];
+  reachableFrom: (from: string) => ReadonlySet<string>;
+  unreachableFrom: (from: string) => readonly string[];
+}
+
+declare const COMPILED: unique symbol;
+
+/**
+ * An entity's constraints in the form the runtime checks them in.
+ *
+ * Opaque on purpose. What a constraint compiles to is the runtime's business and changes
+ * with it; what was declared is in the config the entity was defined from.
+ */
+export interface EntityConstraints {
+  readonly [COMPILED]: never;
+}
+
 /** A validated, runtime-free entity definition. Safe to share across runtimes. */
 export interface EntityDefinition<
   N extends string = string,
@@ -218,7 +250,7 @@ export interface EntityDefinition<
    * The states this entity has and the moves between them it allows, present whether or not
    * any constraint was declared. With no edges declared, every transition is legal.
    */
-  readonly states: States;
+  readonly states: StateGraph;
   /**
    * What the entity attaches to each of its states. One handler per state, which is what
    * makes the entity the implementer of the structure above rather than a description of it.
@@ -230,7 +262,7 @@ export interface EntityDefinition<
    * Compiled constraints, or undefined when the entity declares none. Constraints set to
    * `off` compile away entirely, so undefined and "all off" are the same fast path.
    */
-  readonly constraints: CompiledConstraints<S, V, T> | undefined;
+  readonly constraints: EntityConstraints | undefined;
   /** Build a full key from an id, without needing a runtime. */
   key: (id: string) => string;
 }
@@ -264,7 +296,7 @@ export interface EntityHandle<
   key: (id: string) => string;
   /** Resolves at commit. Rejects on a failed handler or a refused trigger. */
   send: (id: string, trigger: T) => Promise<CommitResult<S, V>>;
-  /** Fire and forget. Wraps `send` and swallows nothing: failures surface as telemetry. */
+  /** Fire and forget. Wraps `send` and swallows nothing: a failure goes to `onUnhandled`. */
   post: (id: string, trigger: T) => void;
   inspect: (id: string) => InstanceSnapshot<S, V> | undefined;
   /** The full per-key stream, read through the store when one is configured. */
@@ -371,6 +403,12 @@ export interface StorageConfig {
   readonly sweepMs?: number;
 }
 
+/** What `close()` accepts. */
+export interface CloseOptions {
+  /** How long to wait for in-flight work, in milliseconds. Defaults to 30 seconds. */
+  readonly timeoutMs?: number;
+}
+
 export interface EkmanConfig<
   D extends readonly AnyEntityDefinition[] = readonly AnyEntityDefinition[],
 > {
@@ -441,10 +479,46 @@ export interface EkmanConfig<
   /** Time source, in milliseconds. Defaults to `Date.now`. Injected by tests. */
   readonly now?: () => number;
   /**
-   * Where a failure from `post()` goes. There is no caller to reject, and dropping it
-   * silently is exactly the failure mode this runtime exists to prevent.
+   * Where a failure with no caller to reject goes: a `post()` that failed, a telemetry
+   * handler that threw, an escalation that could not be delivered, a sweep that failed, a
+   * snapshot or a refusal that could not be written. Dropping one silently is exactly the
+   * failure mode this runtime exists to prevent.
    *
-   * Defaults to logging on stderr. Replace it to route into your own telemetry.
+   * Defaults to logging on stderr with the source named. Replace it to route into your own
+   * telemetry.
    */
-  readonly onUnhandled?: (error: unknown) => void;
+  readonly onUnhandled?: OnUnhandled;
 }
+
+/** Where a failure nobody was waiting on came from. */
+export interface UnhandledContext {
+  /**
+   * What was being done when it failed.
+   *
+   * - `post`: a fire-and-forget send was refused or its handler failed.
+   * - `telemetry`: a telemetry handler threw or rejected.
+   * - `escalation`: a time-in-state bound fired and its trigger was refused.
+   * - `sweep`: an automatic time-in-state sweep failed.
+   * - `storage-sweep`: an automatic storage sweep failed.
+   * - `snapshot`: the snapshot written when an instance is evicted failed.
+   * - `persist`: a refusal or a violation could not be written to the store.
+   * - `audit`: delivering to an audit sink failed in a way the sink's own retries did
+   *   not cover.
+   * - `inbox`: a key's queue stopped draining.
+   */
+  readonly source:
+    | "post"
+    | "telemetry"
+    | "escalation"
+    | "sweep"
+    | "storage-sweep"
+    | "snapshot"
+    | "persist"
+    | "audit"
+    | "inbox";
+  /** The key it concerned, when it concerned one. */
+  readonly key?: string;
+}
+
+/** Receives a failure nobody was waiting on, and where it came from. */
+export type OnUnhandled = (error: unknown, context: UnhandledContext) => void;

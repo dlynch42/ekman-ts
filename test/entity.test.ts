@@ -1,4 +1,7 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
+import { constraintsOf } from "../src/compiled.js";
+import type { TemporalTrigger } from "../src/constraints.js";
+import { DEFAULT_TEMPORAL_TRIGGER } from "../src/constraints.js";
 import {
   defineEntity,
   resolveErrorHandler,
@@ -6,7 +9,7 @@ import {
 } from "../src/entity.js";
 import type { EkmanError } from "../src/errors.js";
 import { stay, transitionTo } from "../src/results.js";
-import type { EntityDefinition } from "../src/types.js";
+import type { EntityDefinition, EntityHandles } from "../src/types.js";
 
 // Deliberately unannotated. Annotating this `Handler` would widen its return to
 // HandlerResult<string>, which is not assignable to a handler for a narrow state union,
@@ -128,7 +131,7 @@ describe("defineEntity validation", () => {
       constraints: { temporal: [{ in: "a", within: 10, policy: "warn" }] },
     });
 
-    expect(definition.constraints?.temporal).toHaveLength(1);
+    expect(constraintsOf(definition)?.temporal).toHaveLength(1);
   });
 
   it("rejects a missing initial state", () => {
@@ -223,7 +226,7 @@ describe("defineEntity validation", () => {
 
     // One structure, not two. The constraint reads the entity's own edges rather than a
     // copy of them, which is what stops the two disagreeing.
-    expect(orders.constraints?.transitions?.states).toBe(orders.states);
+    expect(constraintsOf(orders)?.transitions?.states).toBe(orders.states);
     expect(orders.states.allows("a", "b")).toBe(true);
     expect(orders.states.allows("b", "a")).toBe(false);
   });
@@ -407,6 +410,142 @@ describe("type inference", () => {
       });
 
     expectTypeOf(orders.initial).toEqualTypeOf<State>();
+  });
+
+  it("gives a typed entity a handle that sends only its union", () => {
+    type OrderTrigger = { type: "approve"; actor: string } | { type: "cancel" };
+
+    const orders: EntityDefinition<
+      "orders",
+      "pending",
+      Record<string, unknown>,
+      OrderTrigger
+    > = defineEntity("orders", {
+      initial: "pending",
+      states: { pending: () => stay() },
+    });
+
+    type Send = EntityHandles<[typeof orders]>["orders"]["send"];
+    expectTypeOf<Send>().parameter(1).toEqualTypeOf<OrderTrigger>();
+
+    // @ts-expect-error "bogus" is not a type in the union
+    const refused: Parameters<Send>[1] = { type: "bogus" };
+    expect(refused.type).toBe("bogus");
+  });
+});
+
+describe("typed triggers", () => {
+  type OrderTrigger =
+    | { type: "pay"; amount: number }
+    | { type: "refund"; reason: string };
+
+  it("takes the union first and infers the name, states and values", () => {
+    const orders = defineEntity.withTriggers<OrderTrigger>()("orders", {
+      initial: "pending",
+      values: { total: 0 },
+      states: {
+        pending: (order, trigger) => {
+          expectTypeOf(trigger).toEqualTypeOf<OrderTrigger>();
+          expectTypeOf(order.values.total).toEqualTypeOf<number>();
+          return trigger.type === "pay"
+            ? transitionTo("paid", { total: trigger.amount })
+            : stay();
+        },
+        paid: () => stay(),
+      },
+    });
+
+    expectTypeOf(orders.name).toEqualTypeOf<"orders">();
+    expectTypeOf(orders.initial).toEqualTypeOf<"pending" | "paid">();
+    expectTypeOf(orders.initialValues.total).toEqualTypeOf<number>();
+    expect(orders.states.names).toEqual(["pending", "paid"]);
+  });
+
+  it("gives the handle a send that takes only the union", () => {
+    const orders = defineEntity.withTriggers<OrderTrigger>()("orders", {
+      initial: "pending",
+      states: { pending: () => stay() },
+    });
+
+    type Send = EntityHandles<[typeof orders]>["orders"]["send"];
+    expectTypeOf<Send>().parameter(1).toEqualTypeOf<OrderTrigger>();
+
+    // @ts-expect-error "bogus" is not a type in the union
+    const refused: Parameters<Send>[1] = { type: "bogus" };
+    expect(refused.type).toBe("bogus");
+  });
+
+  it("checks the triggers list against the union", () => {
+    const orders = defineEntity.withTriggers<OrderTrigger>()("orders", {
+      initial: "pending",
+      // @ts-expect-error "typo" is not a type in the union
+      triggers: ["pay", "typo"],
+      states: { pending: () => stay() },
+    });
+
+    // The runtime takes the list as written. The refusal is the compiler's.
+    expect(orders.triggers).toEqual(new Set(["pay", "typo"]));
+  });
+
+  it("leaves the triggers list as any strings when no union is given", () => {
+    const orders = defineEntity("orders", {
+      initial: "pending",
+      triggers: ["pay", "anything"],
+      states: { pending: noop },
+    });
+
+    expect(orders.triggers?.size).toBe(2);
+  });
+
+  it("narrows to the escalation once the union includes it", () => {
+    type State = "pending" | "overdue";
+    type Trigger = OrderTrigger | TemporalTrigger<State>;
+
+    const orders = defineEntity.withTriggers<Trigger>()("orders", {
+      initial: "pending",
+      triggers: ["pay", "refund", DEFAULT_TEMPORAL_TRIGGER],
+      states: {
+        pending: (_order, trigger) => {
+          if (trigger.type === DEFAULT_TEMPORAL_TRIGGER) {
+            expectTypeOf(trigger.escalateTo).toEqualTypeOf<State | undefined>();
+            expectTypeOf(trigger.sinceMs).toEqualTypeOf<number>();
+            return transitionTo(trigger.escalateTo ?? "overdue");
+          }
+          expectTypeOf(trigger).toEqualTypeOf<OrderTrigger>();
+          return stay();
+        },
+        overdue: () => stay(),
+      },
+      constraints: {
+        temporal: [{ in: "pending", within: 10, escalateTo: "overdue" }],
+      },
+    });
+
+    expect(orders.triggers?.has(DEFAULT_TEMPORAL_TRIGGER)).toBe(true);
+  });
+
+  it("types a bound's own trigger name", () => {
+    type State = "pending" | "overdue";
+    type Trigger = OrderTrigger | TemporalTrigger<State, "order.stuck">;
+
+    const orders = defineEntity.withTriggers<Trigger>()("orders", {
+      initial: "pending",
+      triggers: ["pay", "refund", "order.stuck"],
+      states: {
+        pending: (_order, trigger) => {
+          if (trigger.type === "order.stuck") {
+            expectTypeOf(trigger.state).toEqualTypeOf<State>();
+          }
+          return stay();
+        },
+        overdue: () => stay(),
+      },
+      constraints: {
+        temporal: [{ in: "pending", within: 10, trigger: "order.stuck" }],
+      },
+    });
+
+    expect(orders.triggers?.has("order.stuck")).toBe(true);
   });
 });
 

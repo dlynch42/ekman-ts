@@ -73,7 +73,10 @@ describe("emit", () => {
     // Telemetry observes the runtime. A broken observer must not take down the
     // dispatch that reported to it.
     expect(() => emit(sink, dropped, onUnhandled)).not.toThrow();
-    expect(onUnhandled).toHaveBeenCalledWith(boom);
+    expect(onUnhandled).toHaveBeenCalledWith(boom, {
+      source: "telemetry",
+      key: "orders:1",
+    });
   });
 });
 
@@ -116,7 +119,10 @@ describe("a telemetry handler that is async", () => {
     await tick();
     process.off("unhandledRejection", unhandledRejection);
 
-    expect(onUnhandled).toHaveBeenCalledWith(failure);
+    expect(onUnhandled).toHaveBeenCalledWith(failure, {
+      source: "telemetry",
+      key: "orders:1",
+    });
     expect(unhandledRejection).not.toHaveBeenCalled();
   });
 

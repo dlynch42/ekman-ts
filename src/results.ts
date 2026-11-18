@@ -131,6 +131,7 @@ export function toError(value: unknown): Error {
 
 function describe(value: unknown): string {
   try {
+    // biome-ignore lint/suspicious/noUnnecessaryConditions: typed as a string, but `JSON.stringify` returns undefined for undefined, a function or a symbol, and a handler can throw any of them
     return JSON.stringify(value) ?? String(value);
   } catch {
     return String(value);

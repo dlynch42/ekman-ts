@@ -21,6 +21,7 @@
  * The clock is injected, so five minutes takes no time at all.
  */
 
+import type { TemporalTrigger } from "ekman";
 import { defineEntity, Ekman, stay, transitionTo } from "ekman";
 import { banner, check, row, stream } from "./lib";
 
@@ -37,53 +38,70 @@ interface Values extends Record<string, unknown> {
   note: string;
 }
 
+/**
+ * What a deployment can be sent. The escalation is in the union because this entity
+ * declares a time bound, which is what lets the handler read `escalateTo` as a state.
+ */
+type DeploymentTrigger =
+  | { type: "start"; region: string; onEscalation: Values["onEscalation"] }
+  | { type: "succeeded" }
+  | { type: "rejected" }
+  | TemporalTrigger<State>;
+
+const initialValues: Values = {
+  region: "",
+  onEscalation: "give-up",
+  note: "",
+};
+
 /** Advanced by hand. Nothing here waits on a real timer. */
 let clock = Date.UTC(2026, 0, 1, 12, 0, 0);
 
-const deployments = defineEntity("deployments", {
-  initial: "queued",
-  values: {
-    region: "",
-    onEscalation: "give-up",
-    note: "",
-  } as Values,
-  states: {
-    queued: (deployment, trigger) =>
-      transitionTo("deploying", {
-        ...deployment.values,
-        region: trigger.region as string,
-        onEscalation: trigger.onEscalation as Values["onEscalation"],
-        note: "started",
-      }),
+const deployments = defineEntity.withTriggers<DeploymentTrigger>()(
+  "deployments",
+  {
+    initial: "queued",
+    values: initialValues,
+    states: {
+      queued: (deployment, trigger) =>
+        trigger.type === "start"
+          ? transitionTo("deploying", {
+              ...deployment.values,
+              region: trigger.region,
+              onEscalation: trigger.onEscalation,
+              note: "started",
+            })
+          : stay(deployment.values),
 
-    deploying: (deployment, trigger) => {
-      // The escalation is an ordinary trigger. It arrives here, in the handler, with the
-      // state it is asking for on it, and this code decides whether to agree.
-      if (trigger.type === "constraint.temporal") {
-        if (deployment.values.onEscalation === "keep-waiting") {
-          return stay({
+      deploying: (deployment, trigger) => {
+        // The escalation is an ordinary trigger. It arrives here, in the handler, with the
+        // state it is asking for on it, and this code decides whether to agree.
+        if (trigger.type === "constraint.temporal") {
+          if (deployment.values.onEscalation === "keep-waiting") {
+            return stay({
+              ...deployment.values,
+              note: "escalated, still waiting on purpose",
+            });
+          }
+          return transitionTo(trigger.escalateTo ?? "failed", {
             ...deployment.values,
-            note: "escalated, still waiting on purpose",
+            note: "gave up after the time bound",
           });
         }
-        return transitionTo(trigger.escalateTo as State, {
-          ...deployment.values,
-          note: "gave up after the time bound",
-        });
-      }
 
-      return trigger.type === "succeeded"
-        ? transitionTo("live", { ...deployment.values, note: "deployed" })
-        : transitionTo("failed", { ...deployment.values, note: "rejected" });
+        return trigger.type === "succeeded"
+          ? transitionTo("live", { ...deployment.values, note: "deployed" })
+          : transitionTo("failed", { ...deployment.values, note: "rejected" });
+      },
+
+      live: (deployment) => stay(deployment.values),
+      failed: (deployment) => stay(deployment.values),
     },
-
-    live: (deployment) => stay(deployment.values),
-    failed: (deployment) => stay(deployment.values),
-  },
-  constraints: {
-    temporal: [{ in: "deploying", within: BOUND, escalateTo: "failed" }],
-  },
-});
+    constraints: {
+      temporal: [{ in: "deploying", within: BOUND, escalateTo: "failed" }],
+    },
+  }
+);
 
 /**
  * A fleet, not an anecdote.
