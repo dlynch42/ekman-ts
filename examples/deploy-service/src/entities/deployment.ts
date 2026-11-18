@@ -49,9 +49,16 @@ export type DeploymentTrigger =
   | { type: "rollback"; reason?: string }
   | TemporalTrigger<DeploymentState>;
 
-/** An optional reason, with a fallback for one that was left out or left empty. */
-function text(value: string | undefined, fallback: string): string {
-  return value === undefined || value === "" ? fallback : value;
+/**
+ * An optional reason, with a fallback for one that was left out, left empty, or is not
+ * text at all.
+ *
+ * Takes `unknown` although the union says `string`. The union is a claim about triggers a
+ * caller built; one sent by key, from a request body or a queue message, has been checked
+ * by nobody, and a number written into `note` would be committed as one.
+ */
+function text(value: unknown, fallback: string): string {
+  return typeof value === "string" && value !== "" ? value : fallback;
 }
 
 /**
@@ -134,10 +141,12 @@ export const deployment = defineEntity.withTriggers<DeploymentTrigger>()(
 
           return transitionTo("failed", {
             ...current.values,
+            // A `failed` and a `rollback` both carry a reason. A `deploy` arriving here does
+            // not, and has none to give.
             note:
-              trigger.type === "failed"
-                ? text(trigger.reason, "reported failed")
-                : "reported failed",
+              trigger.type === "deploy"
+                ? "reported failed"
+                : text(trigger.reason, "reported failed"),
           });
         },
         maxAttempts: config.deployMaxAttempts,
