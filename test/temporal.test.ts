@@ -211,6 +211,37 @@ describe("rebuilding what a stay in a state has already been told", () => {
     });
   });
 
+  it("says what a bound is owed and whether a cause is still outstanding", () => {
+    const latch = new LatchFold();
+    latch.apply(violation("reject"));
+
+    expect(latch.hasFired("too-slow")).toBe(false);
+    expect(latch.owed("too-slow")).toEqual(cause);
+    expect(latch.owes(cause)).toBe(true);
+    expect(latch.owes({ type: "poke", id: "t7" })).toBe(false);
+    expect(latch.owes({ type: "constraint.temporal", id: "t8" })).toBe(false);
+
+    latch.fire("too-slow");
+    expect(latch.hasFired("too-slow")).toBe(true);
+    expect(latch.owed("too-slow")).toBeUndefined();
+    expect(latch.owes(cause)).toBe(false);
+  });
+
+  it("does not owe again what it has fired", () => {
+    const latch = new LatchFold({ fired: ["too-slow"], owed: {} });
+    latch.owe("too-slow", cause);
+    expect(latch.result()).toEqual({ fired: ["too-slow"], owed: {} });
+  });
+
+  it("takes in another account of the same stay without forgetting its own", () => {
+    const latch = new LatchFold({ fired: ["a"], owed: { b: cause } });
+    latch.merge({ fired: ["b"], owed: { a: cause, c: cause } });
+
+    expect(latch.result()).toEqual({ fired: ["a", "b"], owed: { c: cause } });
+    latch.merge(undefined);
+    expect(latch.result()).toEqual({ fired: ["a", "b"], owed: { c: cause } });
+  });
+
   it("forgets everything when the instance moves", () => {
     const latch = new LatchFold({ fired: ["too-slow"], owed: {} });
     latch.moved();

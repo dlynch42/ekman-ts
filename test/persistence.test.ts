@@ -1700,6 +1700,8 @@ describe("time-in-state bounds for instances a store holds", () => {
     const second = new Ekman({ entities: [watched], store, now: clock.now });
     clock.advance(100);
     expect(await second.sweep()).toBe(0);
+    // Resident now, so the store is no longer asked about it and the note is dropped.
+    expect(await second.sweep()).toBe(0);
 
     const { events } = await second.entities.watched.history("a");
     expect(violations(events)).toHaveLength(1);
@@ -2176,6 +2178,269 @@ describe("time-in-state bounds for instances a store holds", () => {
     clock.advance(100);
     expect(await third.sweep()).toBe(0);
     await third.close();
+  });
+
+  it("does not fire again for an escalation answered just before the instance was evicted", async () => {
+    const patient = defineEntity("patient", {
+      initial: "waiting",
+      states: { waiting: () => stay({ touched: true }) },
+      constraints: {
+        temporal: [{ name: "too-slow", in: "waiting", within: 100 }],
+      },
+    });
+    const clock = frozenClock();
+    const store = memoryStore();
+    // Nothing stays resident, so the instance is evicted, and its snapshot taken, the
+    // moment the escalation's commit lands and before the sweep has heard back.
+    const first = new Ekman({
+      entities: [patient],
+      store,
+      memory: { maxBytes: 0 },
+      now: clock.now,
+    });
+    await first.entities.patient.send("a", { type: "start" });
+    clock.advance(100);
+    expect(await first.sweep()).toBe(1);
+    expect((await store.load("patient:a"))?.snapshot?.temporal).toEqual({
+      fired: ["too-slow"],
+      owed: {},
+    });
+    await first.close();
+
+    const second = new Ekman({ entities: [patient], store, now: clock.now });
+    clock.advance(100);
+    expect(await second.sweep()).toBe(0);
+    expect(violations(await store.read("patient:a"))).toHaveLength(1);
+    await second.close();
+  });
+
+  it("holds a key that was deleted and created again to its bound", async () => {
+    const noted = defineEntity("noted", {
+      initial: "waiting",
+      states: { waiting: () => stay({ touched: true }) },
+      constraints: {
+        temporal: [
+          { name: "too-slow", in: "waiting", within: 100, policy: "warn" },
+        ],
+      },
+    });
+    const clock = frozenClock();
+    const ekman = new Ekman({
+      entities: [noted],
+      store: memoryStore(),
+      memory: { maxBytes: 0 },
+      now: clock.now,
+    });
+    await ekman.entities.noted.send("a", { type: "start" });
+    clock.advance(100);
+    expect(await ekman.sweep()).toBe(1);
+    expect(await ekman.sweep()).toBe(0);
+
+    // A new instance under the old key, at the sequence the old one was noted at.
+    await ekman.forget("noted:a");
+    await ekman.entities.noted.send("a", { type: "start" });
+    clock.advance(100);
+
+    expect(await ekman.sweep()).toBe(1);
+    await ekman.close();
+  });
+
+  it("leaves nothing behind when a record is evicted while the sweep is loading it", async () => {
+    const inner = memoryStore();
+    const clock = frozenClock();
+    const first = new Ekman({
+      entities: [stalling],
+      store: inner,
+      now: clock.now,
+    });
+    await first.entities.stalling.send("a", { type: "start" });
+    await first.close();
+
+    let answer: () => void = () => undefined;
+    const held = new Promise<void>((done) => {
+      answer = done;
+    });
+    // Only the first load of the key is held, which is the sweep's.
+    let loads = 0;
+    const store = wrap(inner, {
+      load: (key) => {
+        loads += key === "stalling:a" ? 1 : 0;
+        return key === "stalling:a" && loads === 1
+          ? held.then(() => inner.load(key))
+          : inner.load(key);
+      },
+    });
+    const second = new Ekman({
+      entities: [stalling, orders],
+      store,
+      memory: { maxBytes: 1 },
+      now: clock.now,
+    });
+    clock.advance(100);
+
+    const swept = second.sweep();
+    await settle();
+    // Another key goes idle over budget, and the record still loading is the coldest.
+    await second.entities.orders.send("1", { type: "poke" });
+    expect(second.residentKeys).toEqual([]);
+    answer();
+
+    expect(await swept).toBe(0);
+    expect(second.residentKeys).toEqual([]);
+    expect(second.memoryUsage.instances).toBe(0);
+
+    // Not indexed as resident either, so the next pass finds it in the store.
+    expect(await second.sweep()).toBe(1);
+    await second.close();
+  });
+
+  it("takes in what another writer's stream says has fired, when the instance did not move", async () => {
+    const clock = frozenClock();
+    const store = memoryStore();
+    const ekman = new Ekman({ entities: [watched], store, now: clock.now });
+    await ekman.entities.watched.send("a", { type: "start" });
+    clock.advance(100);
+
+    // Another runtime swept first, then committed without moving the instance.
+    await store.append(
+      "watched:a",
+      {
+        type: "violation",
+        key: "watched:a",
+        seq: 1,
+        at: 100,
+        cause: { type: "constraint.temporal", id: "x1" },
+        constraint: { kind: "temporal", name: "too-slow" },
+        policy: "warn",
+        reason: "too long",
+      },
+      1
+    );
+    await store.append(
+      "watched:a",
+      {
+        type: "transition",
+        key: "watched:a",
+        from: "waiting",
+        to: "waiting",
+        seq: 2,
+        at: 100,
+        cause: { type: "elsewhere", id: "x2" },
+        values: { touched: true },
+      },
+      1
+    );
+
+    // The first send finds out, the second reloads and commits.
+    await ekman.entities.watched
+      .send("a", { type: "poke" })
+      .catch(() => undefined);
+    await ekman.entities.watched.send("a", { type: "poke" });
+
+    expect(await ekman.sweep()).toBe(0);
+    expect(violations(await store.read("watched:a"))).toHaveLength(1);
+    await ekman.close();
+  });
+
+  it("never gives a new escalation the id of one a previous process left owed", async () => {
+    const twice = defineEntity("twice", {
+      initial: "waiting",
+      states: {
+        waiting: {
+          timeoutMs: 10,
+          handler: async (_i, trigger) => {
+            if (trigger.constraint === "first") {
+              await new Promise((done) => setTimeout(done, 40));
+            }
+            return stay({ touched: true });
+          },
+        },
+      },
+      constraints: {
+        temporal: [
+          { name: "first", in: "waiting", within: 100 },
+          { name: "second", in: "waiting", within: 200 },
+        ],
+      },
+    });
+    const clock = frozenClock();
+    const store = memoryStore();
+    const quiet = () => undefined;
+    const before = new Ekman({
+      entities: [twice],
+      store,
+      now: clock.now,
+      onUnhandled: quiet,
+    });
+    await before.entities.twice.send("a", { type: "start" });
+    await before.entities.twice.send("a", { type: "poke" });
+    clock.advance(100);
+    expect(await before.sweep()).toBe(1);
+    await before.close();
+    const [owed] = violations(await store.read("twice:a"));
+
+    // A new process counts its trigger ids from the beginning again.
+    const after = new Ekman({
+      entities: [twice],
+      store,
+      now: clock.now,
+      onUnhandled: quiet,
+    });
+    await after.entities.twice.send("a", { type: "poke" });
+    clock.advance(100);
+    expect(await after.sweep()).toBe(2);
+
+    const raised = violations(await store.read("twice:a"));
+    expect(raised).toHaveLength(2);
+    expect(raised[1]?.cause.id).not.toBe(owed?.cause.id);
+    // The first is still owed: its handler ran out of time again, and the commit that
+    // answered the second did not settle it.
+    expect(await after.sweep()).toBe(1);
+    await after.close();
+  });
+
+  it("loads nothing when the runtime began to close while it waited for a deletion", async () => {
+    const inner = memoryStore();
+    const clock = frozenClock();
+    const first = new Ekman({
+      entities: [stalling],
+      store: inner,
+      now: clock.now,
+    });
+    await first.entities.stalling.send("a", { type: "start" });
+    await first.close();
+
+    let giveUp: () => void = () => undefined;
+    const held = new Promise<void>((done) => {
+      giveUp = done;
+    });
+    // The deletion fails, so the instance is still in the store when the wait is over.
+    const store = wrap(inner, {
+      forget: () =>
+        held.then(() =>
+          Promise.reject(new EkmanError("STORE_UNAVAILABLE", "disk gone"))
+        ),
+    });
+    const seen: TelemetryEvent[] = [];
+    const second = new Ekman({
+      entities: [stalling],
+      store,
+      now: clock.now,
+      telemetry: { "instance.restored": (event) => seen.push(event) },
+    });
+    clock.advance(100);
+
+    const forgotten = second.forget("stalling:a").catch(() => undefined);
+    const swept = second.sweep();
+    await settle();
+    const closed = second.close().catch(() => undefined);
+    giveUp();
+
+    expect(await swept).toBe(0);
+    await forgotten;
+    await closed;
+    expect(seen).toEqual([]);
+    expect(violations(await inner.read("stalling:a"))).toEqual([]);
   });
 
   it("keeps what has fired through a compaction", async () => {

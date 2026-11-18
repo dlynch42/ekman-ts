@@ -62,6 +62,8 @@ type AnyDefinition = EntityDefinition<string, any, any, any>;
 interface SettledNote {
   /** The sequence the instance was at. Any commit since makes the note out of date. */
   readonly seq: number;
+  /** When it entered its state, which a different instance under the same key would not share. */
+  readonly enteredAt: number;
   /** The earliest moment one of its bounds could have something new to say. */
   readonly dueAt: number;
 }
@@ -106,10 +108,11 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * Stored instances the last sweep loaded and found nothing to raise for, by key.
    *
    * Without it every pass would load each instance that has sat past its bound and
-   * already been told so. Rebuilt on every pass from the keys that pass saw, so it never
-   * holds more than the stored instances currently past a bound.
+   * already been told so. A pass drops every note it did not see the key for, so this
+   * never holds more than the stored instances currently past a bound, and deleting an
+   * instance drops its note, so a key created again is not mistaken for the one before.
    */
-  #settled: ReadonlyMap<string, SettledNote> = new Map();
+  readonly #settled = new Map<string, SettledNote>();
   /** Eviction snapshots still on their way to the store, by key. Empty when none are. */
   readonly #snapshotting = new Map<string, Promise<unknown>>();
   #sweepTimer: ReturnType<typeof setInterval> | undefined;
@@ -368,6 +371,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     }
 
     const bytes = instance === undefined ? 0 : this.#release(instance);
+    this.#settled.delete(parsed);
 
     const deleting = (this.#forgetting.get(parsed) ?? Promise.resolve()).then(
       async () => {
@@ -952,8 +956,10 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   async #hydrate(instance: AnyInstance): Promise<void> {
     const before = instance.lastRestored;
     await instance.ready();
-    if (instance.unloaded) {
-      // Asked only to load, and the store holds nothing: there is no instance to index.
+    if (instance.unloaded || this.#instances.get(instance.key) !== instance) {
+      // Asked only to load, and the store holds nothing. Or the record was released while
+      // it loaded, which only one nothing is queued on can be. Indexing either would
+      // leave the ledger and the index holding a key the runtime does not.
       return;
     }
 
@@ -1268,7 +1274,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
 
   async #sweepOnce(): Promise<number> {
     const at = this.#now();
-    const settled = new Map<string, SettledNote>();
+    const noted = new Set<string>();
     let fired = 0;
 
     for (const definition of this.#definitions.values()) {
@@ -1284,10 +1290,14 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
         }
       }
 
-      fired += await this.#sweepStore(definition, byState, at, settled);
+      fired += await this.#sweepStore(definition, byState, at, noted);
     }
 
-    this.#settled = settled;
+    for (const key of this.#settled.keys()) {
+      if (!noted.has(key)) {
+        this.#settled.delete(key);
+      }
+    }
     return fired;
   }
 
@@ -1306,7 +1316,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     definition: AnyDefinition,
     byState: ReadonlyMap<string, readonly CompiledTemporal[]>,
     at: number,
-    settled: Map<string, SettledNote>
+    noted: Set<string>
   ): Promise<number> {
     const { authority } = this.#stack;
     if (authority === undefined) {
@@ -1350,7 +1360,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
           definition,
           constraints,
           at,
-          settled
+          noted
         );
       }
     }
@@ -1375,7 +1385,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     definition: AnyDefinition,
     constraints: readonly CompiledTemporal[],
     at: number,
-    settled: Map<string, SettledNote>
+    noted: Set<string>
   ): Promise<number> {
     if (this.#closing.signal.aborted) {
       // Nothing is loaded on behalf of a runtime that is shutting down. Whatever this
@@ -1385,8 +1395,13 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
 
     const { key, state } = match;
     const note = this.#settled.get(key);
-    if (note !== undefined && note.seq === match.seq && at < note.dueAt) {
-      settled.set(key, note);
+    if (
+      note !== undefined &&
+      note.seq === match.seq &&
+      note.enteredAt === match.enteredAt &&
+      at < note.dueAt
+    ) {
+      noted.add(key);
       return 0;
     }
 
@@ -1394,8 +1409,9 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     if (forgetting !== undefined) {
       await forgetting;
     }
-    if (this.#instances.has(key)) {
-      // Became resident while the pass was running, so the next pass finds it there.
+    if (this.#closing.signal.aborted || this.#instances.has(key)) {
+      // The runtime began to close while this waited, or the key became resident, in
+      // which case the next pass finds it there.
       return 0;
     }
 
@@ -1416,7 +1432,9 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       return 0;
     }
 
-    if (instance.unloaded) {
+    if (instance.unloaded || this.#instances.get(key) !== instance) {
+      // Nothing stored after all, or the record was released while it loaded: evicted to
+      // make room, or deleted. Either way there is nothing here to evaluate.
       this.#rest(instance);
       return 0;
     }
@@ -1424,8 +1442,10 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     const fired = await this.#sweepInstance(key, state, constraints, at);
 
     if (instance.state === state && !instance.needsHydration) {
-      settled.set(key, {
+      noted.add(key);
+      this.#settled.set(key, {
         seq: instance.seq,
+        enteredAt: instance.enteredAt,
         dueAt: nextDue(instance, constraints, at),
       });
     }
@@ -1655,10 +1675,11 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     elapsedMs: number,
     at: number
   ): Promise<EscalationOutcome> {
-    const entry = instance.stateEntry;
     const owed = instance.undelivered(constraint.name);
-    const id = owed ?? this.#nextTriggerId();
-    const cause = { type: constraint.trigger, id };
+    const cause =
+      owed === undefined
+        ? this.#freshCause(instance, constraint.trigger)
+        : { type: constraint.trigger, id: owed };
     const trigger: TemporalTrigger<string, string> = {
       ...cause,
       constraint: constraint.name,
@@ -1685,10 +1706,6 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       this.#onUnhandled(error, { source: "escalation", key: instance.key });
     }
 
-    if (outcome === "refused-transiently") {
-      instance.markUndelivered(constraint.name, cause, entry);
-    }
-
     this.#emit({
       type: "constraint.escalated",
       key: instance.key,
@@ -1703,6 +1720,21 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     });
 
     return outcome;
+  }
+
+  /**
+   * A cause for an escalation raised for the first time.
+   *
+   * Never one this instance still owes to another bound. Trigger ids start over with each
+   * process, so a fresh id can repeat one a previous process left owed, and the commit
+   * that answered either escalation would then settle both.
+   */
+  #freshCause(instance: AnyInstance, type: string): EventCause {
+    let cause = { type, id: this.#nextTriggerId() };
+    while (instance.owes(cause)) {
+      cause = { type, id: this.#nextTriggerId() };
+    }
+    return cause;
   }
 
   /** Write a temporal violation to the instance's stream and mirror it in telemetry. */

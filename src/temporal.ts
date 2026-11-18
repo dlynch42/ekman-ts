@@ -148,12 +148,7 @@ export class LatchFold {
   readonly #owed = new Map<string, EventCause>();
 
   constructor(seed?: TemporalLatch) {
-    for (const name of seed?.fired ?? []) {
-      this.#fired.add(name);
-    }
-    for (const [name, cause] of Object.entries(seed?.owed ?? {})) {
-      this.#owed.set(name, cause);
-    }
+    this.merge(seed);
   }
 
   /** The instance moved to another state, so nothing said about the last one carries over. */
@@ -187,6 +182,54 @@ export class LatchFold {
     }
   }
 
+  /** Whether a bound is done for this stay. */
+  hasFired(name: string): boolean {
+    return this.#fired.has(name);
+  }
+
+  /** The cause of the escalation a bound is still owed, if it is owed one. */
+  owed(name: string): EventCause | undefined {
+    return this.#owed.get(name);
+  }
+
+  /** Whether an escalation with this cause is still owed to any bound. */
+  owes(cause: EventCause): boolean {
+    for (const owed of this.#owed.values()) {
+      if (owed.id === cause.id && owed.type === cause.type) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Record a bound as done for this stay, whatever it was owed. */
+  fire(name: string): void {
+    this.#owed.delete(name);
+    this.#fired.add(name);
+  }
+
+  /** Record an escalation as owed to a bound that has not fired. */
+  owe(name: string, cause: EventCause): void {
+    if (!this.#fired.has(name)) {
+      this.#owed.set(name, cause);
+    }
+  }
+
+  /**
+   * Take in what another account of the same stay says.
+   *
+   * Nothing is forgotten: a bound either side has fired stays fired, and an escalation
+   * the other side still owes is owed here too unless this side knows it was answered.
+   */
+  merge(other: TemporalLatch | undefined): void {
+    for (const name of other?.fired ?? []) {
+      this.fire(name);
+    }
+    for (const [name, cause] of Object.entries(other?.owed ?? {})) {
+      this.owe(name, cause);
+    }
+  }
+
   /** The latch as it stands, or undefined when there is nothing in it. */
   result(): TemporalLatch | undefined {
     if (this.#fired.size === 0 && this.#owed.size === 0) {
@@ -198,8 +241,7 @@ export class LatchFold {
   #settle(cause: EventCause): void {
     for (const [name, owed] of this.#owed) {
       if (owed.id === cause.id && owed.type === cause.type) {
-        this.#owed.delete(name);
-        this.#fired.add(name);
+        this.fire(name);
       }
     }
   }

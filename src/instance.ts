@@ -21,7 +21,7 @@ import { accountValueBytes, byteLength } from "./memory";
 import type { NodeId, States } from "./states";
 import type { LoadResult, ReplayedState, Store, StoreSnapshot } from "./store";
 import { EMPTY_SEQ, replay } from "./store";
-import type { TemporalLatch } from "./temporal";
+import { LatchFold } from "./temporal";
 import type { InstanceSnapshot, Values } from "./types";
 import { freezeValues } from "./values";
 
@@ -84,23 +84,17 @@ export class InstanceRecord<
   readonly #states: States;
 
   /**
-   * Temporal constraints that have already fired for the current state.
+   * What this instance's time-in-state bounds have said about its current stay.
    *
-   * Cleared on every state change, so a constraint fires once per entry rather than on
-   * every sweep for as long as the instance sits there. Without this an interval sweep
-   * over one stuck instance produces an unbounded stream of identical escalations.
-   */
-  readonly #firedTemporal = new Set<string>();
-
-  /**
-   * Temporal constraints whose escalation was raised and turned away for a reason that
-   * passes, by name, with the id of the trigger that was raised.
+   * Kept by the same fold a replay uses, fed every event this record writes, so what is
+   * resident and what the stream would rebuild are the same answer at every moment. That
+   * matters at eviction: the snapshot is taken when the key goes idle, which is before
+   * the sweep that raised an escalation has heard how it ended.
    *
-   * The violation is already in the stream by then, so the retry on a later sweep reuses
-   * the id rather than recording a second one, and the commit that finally answers it
-   * carries the cause the violation named. Cleared with `#firedTemporal`.
+   * Cleared on every move, so a bound fires once per stay rather than on every sweep for
+   * as long as the instance sits there.
    */
-  readonly #undeliveredTemporal = new Map<string, EventCause>();
+  readonly #temporal = new LatchFold();
   #stateEntry = 0;
 
   /**
@@ -303,7 +297,7 @@ export class InstanceRecord<
 
   /** Whether a temporal constraint has already fired since this state was entered. */
   hasFired(constraint: string): boolean {
-    return this.#firedTemporal.has(constraint);
+    return this.#temporal.hasFired(constraint);
   }
 
   /**
@@ -319,62 +313,37 @@ export class InstanceRecord<
     return this.#stateEntry;
   }
 
-  /** Record that a constraint fired, unless the entry it fired for is no longer current. */
+  /**
+   * Record that a constraint fired, unless the entry it fired for is no longer current.
+   *
+   * For an outcome the stream does not show. One it does show, a commit or a recorded
+   * refusal, has settled the constraint already.
+   */
   markFired(constraint: string, entry: number): void {
-    if (entry !== this.#stateEntry) {
-      return;
+    if (entry === this.#stateEntry) {
+      this.#temporal.fire(constraint);
     }
-    this.#firedTemporal.add(constraint);
-    this.#undeliveredTemporal.delete(constraint);
   }
 
   /** The trigger id of an escalation still owed to this constraint, if one was turned away. */
   undelivered(constraint: string): string | undefined {
-    return this.#undeliveredTemporal.get(constraint)?.id;
-  }
-
-  /** Record an escalation as owed, unless the entry it was raised for is no longer current. */
-  markUndelivered(constraint: string, cause: EventCause, entry: number): void {
-    if (entry === this.#stateEntry) {
-      this.#undeliveredTemporal.set(constraint, cause);
-    }
+    return this.#temporal.owed(constraint)?.id;
   }
 
   /**
-   * Take up what a store recorded about this stay in a state.
+   * Whether an escalation with this cause is owed to any constraint on this instance.
    *
-   * Replaces whatever the record held, because the store's stream is the one account of
-   * the key that outlives an eviction or a restart.
+   * Asked before a fresh escalation is given an id. Trigger ids start over with each
+   * process, so a new one can repeat the id of an escalation a previous process left
+   * owed, and a commit answering either would then settle both.
    */
-  #adoptLatch(latch: TemporalLatch | undefined): void {
-    this.#firedTemporal.clear();
-    this.#undeliveredTemporal.clear();
-    for (const name of latch?.fired ?? []) {
-      this.#firedTemporal.add(name);
-    }
-    for (const [name, cause] of Object.entries(latch?.owed ?? {})) {
-      this.#undeliveredTemporal.set(name, cause);
-    }
-  }
-
-  /** What this record's bounds have said about the current stay, or undefined if nothing. */
-  #latch(): TemporalLatch | undefined {
-    if (
-      this.#firedTemporal.size === 0 &&
-      this.#undeliveredTemporal.size === 0
-    ) {
-      return;
-    }
-    return {
-      fired: [...this.#firedTemporal],
-      owed: Object.fromEntries(this.#undeliveredTemporal),
-    };
+  owes(cause: EventCause): boolean {
+    return this.#temporal.owes(cause);
   }
 
   #rearmTemporal(): void {
     this.#stateEntry += 1;
-    this.#firedTemporal.clear();
-    this.#undeliveredTemporal.clear();
+    this.#temporal.moved();
   }
 
   /**
@@ -483,7 +452,7 @@ export class InstanceRecord<
 
   /** The picture a store persists so a reload does not replay from the beginning. */
   storeSnapshot(at: number): StoreSnapshot<S, V> {
-    const temporal = this.#latch();
+    const temporal = this.#temporal.result();
     return Object.freeze({
       key: this.key,
       entity: this.entity,
@@ -581,6 +550,10 @@ export class InstanceRecord<
     if (moved) {
       this.#enteredAt = next.at;
       this.#rearmTemporal();
+    } else {
+      // A commit that answers an escalation settles the bound that raised it, here and
+      // not when the sweep hears back, because the key can be evicted in between.
+      this.#temporal.apply(event as EkmanEvent);
     }
 
     this.#bytes = bytes;
@@ -643,6 +616,7 @@ export class InstanceRecord<
 
   /** Append a non-commit event: into the stream now, towards the store behind it. */
   #record(event: EkmanEvent<S, V>): void {
+    this.#temporal.apply(event as EkmanEvent);
     if (this.#retainsStream) {
       this.#keep(event);
     }
@@ -729,8 +703,11 @@ export class InstanceRecord<
       current.enteredAt !== this.#enteredAt
     ) {
       this.#rearmTemporal();
-      this.#adoptLatch(current.temporal);
     }
+    // The store's account of the stay is taken in either way. Another runtime can have
+    // answered an escalation without moving the instance, and this one would raise it
+    // again if it kept only what it knew.
+    this.#temporal.merge(current.temporal);
 
     this.#setState(current.state);
     this.#values = freezeValues(current.values);
@@ -792,7 +769,8 @@ export class InstanceRecord<
     this.#seq = current.seq;
     this.#enteredAt = current.enteredAt;
     this.#bytes = this.#measure();
-    this.#adoptLatch(current.temporal);
+    this.#temporal.moved();
+    this.#temporal.merge(current.temporal);
 
     this.#restored(
       restoredEvent({
