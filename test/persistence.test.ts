@@ -2633,6 +2633,103 @@ describe("time-in-state bounds for instances a store holds", () => {
     await ekman.close();
   });
 
+  it("sweeps a resident record another writer has overtaken, which nothing else would reload", async () => {
+    const clock = frozenClock();
+    const store = memoryStore();
+    const telemetry: TelemetryEvent[] = [];
+    const ekman = new Ekman({
+      entities: [watched],
+      store,
+      now: clock.now,
+      onUnhandled: () => undefined,
+      telemetry: { "*": (event) => telemetry.push(event) },
+    });
+    await ekman.entities.watched.send("a", { type: "start" });
+
+    // Another runtime committed, and this one found out from a refused commit.
+    await store.append(
+      "watched:a",
+      {
+        type: "transition",
+        key: "watched:a",
+        from: "waiting",
+        to: "waiting",
+        seq: 2,
+        at: 0,
+        cause: { type: "elsewhere", id: "x2" },
+        values: { touched: true },
+      },
+      1
+    );
+    await ekman.entities.watched
+      .send("a", { type: "poke" })
+      .catch(() => undefined);
+    expect(ekman.inspect("watched:a")).toBeUndefined();
+
+    clock.advance(100);
+    expect(await ekman.sweep()).toBe(1);
+    expect(violations(await store.read("watched:a"))).toHaveLength(1);
+    expect(telemetry.map((event) => event.type)).toContain("instance.restored");
+
+    expect(await ekman.sweep()).toBe(0);
+    expect(violations(await store.read("watched:a"))).toHaveLength(1);
+    await ekman.close();
+  });
+
+  it("leaves an overtaken record to the trigger that is already reloading it", async () => {
+    const clock = frozenClock();
+    const inner = memoryStore();
+    let answer: () => void = () => undefined;
+    let held: Promise<void> | undefined;
+    const telemetry: TelemetryEvent[] = [];
+    const ekman = new Ekman({
+      entities: [watched],
+      store: wrap(inner, {
+        load: (key) =>
+          held === undefined
+            ? inner.load(key)
+            : held.then(() => inner.load(key)),
+      }),
+      now: clock.now,
+      onUnhandled: () => undefined,
+      telemetry: { "*": (event) => telemetry.push(event) },
+    });
+    await ekman.entities.watched.send("a", { type: "start" });
+    await inner.append(
+      "watched:a",
+      {
+        type: "transition",
+        key: "watched:a",
+        from: "waiting",
+        to: "waiting",
+        seq: 2,
+        at: 0,
+        cause: { type: "elsewhere", id: "x2" },
+        values: { touched: true },
+      },
+      1
+    );
+    await ekman.entities.watched
+      .send("a", { type: "poke" })
+      .catch(() => undefined);
+    clock.advance(100);
+
+    // A trigger arrives and its reload is held up while the sweep runs.
+    held = new Promise<void>((done) => {
+      answer = done;
+    });
+    const poked = ekman.entities.watched.send("a", { type: "poke" });
+    expect(await ekman.sweep()).toBe(0);
+    expect(telemetry.map((event) => event.type)).not.toContain(
+      "instance.evicted"
+    );
+
+    answer();
+    await poked;
+    expect(await ekman.sweep()).toBe(1);
+    await ekman.close();
+  });
+
   it("takes in what another writer's stream says has fired, when the instance did not move", async () => {
     const clock = frozenClock();
     const store = memoryStore();

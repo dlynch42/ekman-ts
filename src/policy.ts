@@ -238,7 +238,15 @@ export function assertPolicyKeys(
 ): void {
   assertKnownKeys(label, policy, POLICY_KEYS);
 
-  const backoff = policy?.backoff;
+  // Typed as it can arrive from a caller the compiler never saw. A null here would read
+  // as "use the default" further on, which is not what anyone who wrote it was told.
+  const backoff = policy?.backoff as Backoff | null | undefined;
+  if (backoff === null) {
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      `${label}: backoff is null. Give it a kind, or leave it out.`
+    );
+  }
   if (backoff !== undefined && backoff.kind in BACKOFF_KEYS) {
     assertKnownKeys(`${label} backoff`, backoff, BACKOFF_KEYS[backoff.kind]);
   }

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { Ekman } from "../src/ekman";
 import { EkmanError } from "../src/errors";
 import {
   assertPolicyKeys,
@@ -195,5 +196,15 @@ describe("assertPolicyKeys", () => {
     expect(
       codeOf(() => assertPolicyKeys({ retries: 3 } as never, "runtime"))
     ).toBe("INVALID_CONFIG");
+  });
+
+  it("refuses a null backoff as bad configuration, not with a TypeError", () => {
+    const policy = { backoff: null } as never;
+    expect(codeOf(() => assertPolicyKeys(policy, "runtime"))).toBe(
+      "INVALID_CONFIG"
+    );
+    expect(codeOf(() => new Ekman({ entities: [], execution: policy }))).toBe(
+      "INVALID_CONFIG"
+    );
   });
 });

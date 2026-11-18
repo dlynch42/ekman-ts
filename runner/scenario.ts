@@ -381,8 +381,7 @@ export function isWellFormedStep(step: unknown): step is Step {
     return (
       (awaited === undefined || typeof awaited === "boolean") &&
       hasStringKey(value) &&
-      typeof (value as { trigger?: unknown }).trigger === "object" &&
-      (value as { trigger?: unknown }).trigger !== null
+      hasTypedTrigger(value)
     );
   }
   if (awaited !== undefined) {
@@ -404,6 +403,16 @@ function hasStringKey(value: unknown): boolean {
     typeof value === "object" &&
     value !== null &&
     typeof (value as { key?: unknown }).key === "string"
+  );
+}
+
+/** A trigger is an object naming its type. Anything less would reach the runtime as one. */
+function hasTypedTrigger(value: unknown): boolean {
+  const { trigger } = value as { trigger?: unknown };
+  return (
+    typeof trigger === "object" &&
+    trigger !== null &&
+    typeof (trigger as { type?: unknown }).type === "string"
   );
 }
 

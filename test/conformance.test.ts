@@ -416,6 +416,14 @@ describe("refusing a malformed scenario", () => {
     ["two kinds at once", { drain: true, restart: true }],
     ["a wait that is not a number", { wait: "soon" }],
     ["a send with no trigger", { send: { key: "orders:1" } }],
+    [
+      "a send whose trigger has no type",
+      { send: { key: "orders:1", trigger: {} } },
+    ],
+    [
+      "a send whose trigger type is not a string",
+      { send: { key: "orders:1", trigger: { type: 1 } } },
+    ],
     ["a forget with no key", { forget: {} }],
     ["await on something other than a send", { drain: true, await: false }],
   ])("refuses a step with %s", async (_what, step) => {

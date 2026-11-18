@@ -1348,7 +1348,11 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     for (const [state, constraints] of byState) {
       bounds.set(state, Math.min(...constraints.map((c) => c.within)));
       for (const key of this.#temporal.keys(definition.name, state)) {
-        skip.add(key);
+        // Only a record that is current speaks for its key. One another writer has
+        // overtaken is passed over by the resident walk, so the store is asked about it.
+        if (this.#instances.get(key)?.needsHydration === false) {
+          skip.add(key);
+        }
       }
     }
 
@@ -1443,10 +1447,19 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     if (forgetting !== undefined) {
       await forgetting;
     }
-    if (this.#closing.signal.aborted || this.#instances.has(key)) {
-      // The runtime began to close while this waited, or the key became resident, in
-      // which case the next pass finds it there.
+    if (this.#closing.signal.aborted) {
       return 0;
+    }
+    const resident = this.#instances.get(key);
+    if (resident !== undefined) {
+      if (!(resident.needsHydration && resident.idle)) {
+        // Current, in which case the next pass finds it there. Or busy, and the trigger
+        // it is handling reconciles it.
+        return 0;
+      }
+      // Behind the store with nothing to prompt a reload, so it would sit out every
+      // pass. Released, and read back below like any other instance the store holds.
+      this.#evict(resident);
     }
 
     let instance: AnyInstance;

@@ -168,7 +168,7 @@ When several bounds on one state are due, they are evaluated in declaration orde
 evaluation stops as soon as an escalation has moved the instance: the rest were watching a
 state it has left. An escalation refused for a reason that passes (a full inbox, a full
 memory budget, a timeout, a store that could not take the write) is raised again by the next
-sweep, and its violation is recorded only once. One the handler refuses is not retried.
+sweep, and its violation is recorded only once. An escalation the handler refuses is not retried.
 
 Evaluate on a schedule with `temporal: { sweepMs }` on the runtime, or call `await ekman.sweep()`
 yourself. Without either, a bound is only checked when something asks.
