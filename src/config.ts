@@ -1,6 +1,6 @@
 import type { Caches } from "./caches";
 import { EkmanError } from "./errors";
-import type { EkmanEvent } from "./events";
+import type { TransitionEvent } from "./events";
 import type { ResolvedMemoryConfig } from "./memory";
 import type { ResolvedStack } from "./stack";
 import type { TelemetrySink } from "./telemetry";
@@ -43,7 +43,7 @@ export interface RuntimeDeps {
   /**
    * Hand a committed event to the audit sinks. Never awaited, never able to fail a commit.
    */
-  readonly audit: (event: EkmanEvent) => void;
+  readonly audit: (event: TransitionEvent) => void;
   /**
    * Called once a commit has been applied to a record, every time.
    *

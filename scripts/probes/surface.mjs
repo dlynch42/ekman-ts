@@ -23,6 +23,7 @@ if (leaked.length > 0) {
 
 const ADAPTER = [
   "EMPTY_SEQ",
+  "isAfterSnapshot",
   "latestSeq",
   "previousSeq",
   "replay",

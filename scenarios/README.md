@@ -434,6 +434,10 @@ fresh one opens over the same durable bytes. Everything resident is lost; everyt
 committed to a durable store is not. Runners rebuild durable layers rather than reusing the
 objects, so whatever a layer was caching in memory goes too.
 
+The declared clock is not restarted. It carries on from where it was, as a wall clock does
+across a real restart, so time in state includes the time the process was down: an instance
+that entered a state ten minutes before a `restart` is ten minutes old after it.
+
 An ephemeral layer necessarily survives a restart in a runner, because there is nothing to
 rebuild it from. That is not a claim about durability, and no scenario should make one:
 assert what a **durable** layer brings back.
@@ -693,7 +697,8 @@ was read back through the store without the assertion having to know it happened
 accounting, not an exact figure, because the exact number depends on key names.
 
 `audit` lists what each sink received, as `<type>@<seq>`, keyed by sink name. Initialization
-is a commit, so it appears as `transition@0`.
+is a commit, so it appears as `transition@0`. A sink receives commits only, so a refused
+trigger or a violation never appears here, though both are in `then.events`.
 
 ### `then.queries`
 
@@ -852,6 +857,7 @@ Anything that cannot be made deterministic must not be asserted.
    | `04x` | queries by state and time in state |
    | `05x` | history as the whole per-key stream |
    | `06x` | deleting an instance outright |
+   | `07x` | temporal constraints over a store |
 
 3. Assert the narrowest thing that proves the requirement. Over-asserting makes the suite
    brittle for the next port.

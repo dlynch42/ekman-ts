@@ -277,6 +277,25 @@ The contract takes the `it` and `expect` your suite already uses, so it depends 
 framework of its own. An adapter that passes can be put in a stack without reading the
 runtime.
 
+Two things about `load` and `snapshot` are easy to get wrong:
+
+- `load` returns the snapshot and every event the snapshot does not account for. That is each
+  commit above the snapshot's sequence, and also any refusal or violation recorded *at* that
+  sequence, since those carry the sequence of the commit they followed. `isAfterSnapshot` from
+  `ekman/store` is that test. Leaving them out loses the record that a time-in-state bound
+  already fired, and the bound fires a second time after the next reload.
+- A snapshot may carry a `temporal` field, which says what the instance's bounds had already
+  said when it was taken. Store it and hand it back as given. `replay` reads it.
+
+Two declarations the runtime holds you to:
+
+- `capabilities.scan` says whether your `scan` applies the `state` and `olderThan` criteria. A
+  scan that could not apply one names it in `unsupported`, as `"state"` or `"olderThan"`, and
+  the runtime finishes the filter and reports the answer as partial. If you declare that you
+  cannot filter, the runtime filters whether or not an answer says so.
+- `usage` is optional, and a method: `usage(): StoreUsage`. Implement it when the store can
+  say what it holds. `ekman.storageUsage` sums it across the stack.
+
 ## Next
 
 - [Memory and eviction](./memory.md) for the other budget: resident bytes rather than disk bytes.

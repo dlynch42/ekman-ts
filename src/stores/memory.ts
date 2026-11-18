@@ -9,7 +9,7 @@ import type {
   StoreCapabilities,
   StoreSnapshot,
 } from "../store";
-import { EMPTY_SEQ, scanKeys } from "../store";
+import { EMPTY_SEQ, isAfterSnapshot, scanKeys } from "../store";
 
 /**
  * The reference store: everything in a map, nothing on disk.
@@ -81,12 +81,10 @@ export class MemoryStore implements Store {
       return Promise.resolve(undefined);
     }
 
-    // Everything after the snapshot. A snapshot at seq N means every commit up to N is
-    // already folded into it, so replaying them again would be work with no effect.
     const after =
       snapshot === undefined
         ? events.slice()
-        : events.filter((event) => event.seq > snapshot.seq);
+        : events.filter((event) => isAfterSnapshot(event, snapshot.seq));
 
     return Promise.resolve({
       snapshot,

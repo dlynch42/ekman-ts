@@ -1,0 +1,152 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "durable/070-a-time-bound-fires-for-an-evicted-instance",
+  "name": "an instance evicted under budget pressure is still held to its time-in-state bound: the sweep loads it from the store and escalates it",
+  "level": "durable",
+  "given": {
+    "runtime": {
+      "store": [
+        {
+          "kind": "file"
+        }
+      ],
+      "memory": {
+        "maxBytes": 0,
+        "eviction": {
+          "policy": "lru"
+        }
+      },
+      "clock": {
+        "start": 0,
+        "stepMs": 0
+      }
+    },
+    "entities": [
+      {
+        "name": "deployments",
+        "initial": "deploying",
+        "constraints": {
+          "temporal": [
+            {
+              "name": "deploy-timeout",
+              "in": "deploying",
+              "within": 1000,
+              "escalateTo": "stalled"
+            }
+          ]
+        },
+        "states": [
+          {
+            "state": "deploying",
+            "cases": [
+              {
+                "when": {
+                  "trigger": "constraint.temporal"
+                },
+                "do": {
+                  "result": "transitionTo",
+                  "to": {
+                    "$trigger": "escalateTo"
+                  }
+                }
+              }
+            ],
+            "else": {
+              "result": "stay",
+              "values": {
+                "who": {
+                  "$trigger": "who"
+                }
+              }
+            }
+          },
+          {
+            "state": "stalled",
+            "else": {
+              "result": "stay"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "deployments:a",
+        "trigger": {
+          "type": "start",
+          "who": "a"
+        }
+      }
+    },
+    {
+      "advance": 5000
+    },
+    {
+      "sweep": true
+    }
+  ],
+  "then": {
+    "telemetry": [
+      {
+        "type": "instance.evicted",
+        "key": "deployments:a",
+        "snapshotted": true
+      },
+      {
+        "type": "instance.restored",
+        "key": "deployments:a",
+        "seq": 1
+      },
+      {
+        "type": "constraint.violated",
+        "key": "deployments:a",
+        "kind": "temporal",
+        "constraint": "deploy-timeout"
+      },
+      {
+        "type": "constraint.escalated",
+        "key": "deployments:a",
+        "delivered": true
+      }
+    ],
+    "events": {
+      "deployments:a": [
+        {
+          "type": "transition",
+          "from": null,
+          "to": "deploying",
+          "seq": 0
+        },
+        {
+          "type": "transition",
+          "from": "deploying",
+          "to": "deploying",
+          "seq": 1
+        },
+        {
+          "type": "violation",
+          "seq": 1,
+          "at": 5000,
+          "constraint": {
+            "kind": "temporal",
+            "name": "deploy-timeout"
+          }
+        },
+        {
+          "type": "transition",
+          "from": "deploying",
+          "to": "stalled",
+          "seq": 2
+        }
+      ]
+    },
+    "state": {
+      "deployments:a": {
+        "state": "stalled",
+        "seq": 2
+      }
+    }
+  }
+}

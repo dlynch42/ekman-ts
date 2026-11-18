@@ -367,8 +367,8 @@ export interface InboxConfig {
  * How temporal constraints are evaluated.
  *
  * Evaluation is a sweep rather than a timer per instance, so one pass costs the states
- * that are actually watched and nothing else. `sweep()` runs a pass on demand; `sweepMs`
- * additionally runs one on an interval.
+ * that are actually watched and, with a store, one scan of it per entity that has a
+ * bound. `sweep()` runs a pass on demand; `sweepMs` additionally runs one on an interval.
  */
 export interface TemporalConfig {
   /**
@@ -498,7 +498,8 @@ export interface UnhandledContext {
    * - `post`: a fire-and-forget send was refused or its handler failed.
    * - `telemetry`: a telemetry handler threw or rejected.
    * - `escalation`: a time-in-state bound fired and its trigger was refused.
-   * - `sweep`: an automatic time-in-state sweep failed.
+   * - `sweep`: an automatic time-in-state sweep failed, or a sweep could not scan the
+   *   store or load an instance it found there.
    * - `storage-sweep`: an automatic storage sweep failed.
    * - `snapshot`: the snapshot written when an instance is evicted failed.
    * - `persist`: a refusal or a violation could not be written to the store.

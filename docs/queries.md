@@ -60,6 +60,12 @@ something that has not gone anywhere. `stay` updates values; it does not restart
 That is the same measurement a [time-in-state constraint](./constraints.md#time-in-state) uses,
 deliberately. Two implementations of one question is how two answers start disagreeing.
 
+With a durable store the moment an instance entered its state is stored with it, so the
+measurement survives a restart, and it keeps running through one. An instance that was
+`deploying` for two minutes when the process stopped, and came back eight minutes later, has
+been `deploying` for ten. Time the process was down is time the instance was stuck. This
+relies on the clock you inject, or `Date.now`, meaning the same thing in both processes.
+
 ## `history(key)`
 
 ```ts

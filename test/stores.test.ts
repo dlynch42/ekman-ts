@@ -201,15 +201,15 @@ function minimalStore(): Store {
       return {
         ...found,
         unsupported: [
-          ...(state === undefined ? [] : ["state"]),
-          ...(olderThanMs === undefined ? [] : ["olderThan"]),
+          ...(state === undefined ? [] : ["state" as const]),
+          ...(olderThanMs === undefined ? [] : ["olderThan" as const]),
         ],
       };
     },
   };
 }
 
-// The same contract, both adapters. An adapter that passes can be swapped in without
+// The same contract, every adapter. An adapter that passes can be swapped in without
 // reading the runtime; one that fails is broken however reasonable it looks.
 describe("store contract", () => {
   const harness = { it, expect };
@@ -217,6 +217,17 @@ describe("store contract", () => {
   storeContract(
     "file",
     () => fileStore(freshDir()),
+    { durable: true },
+    harness
+  );
+  // With default retention a pass folds nothing this small, and the compaction cases
+  // would hold a store to nothing. This one folds every log it is asked about.
+  storeContract(
+    "file, compacting",
+    () =>
+      fileStore(freshDir(), {
+        retention: { perLogBytes: 0, totalBytes: 1, policy: "compact" },
+      }),
     { durable: true },
     harness
   );
@@ -968,7 +979,7 @@ describe("retention", () => {
 
     it("accepts a budget with no policy, which measures without enforcing", () => {
       const store = fileStore(freshDir(), { retention: { totalBytes: 1024 } });
-      expect(store.usage.maxBytes).toBe(1024);
+      expect(store.usage().maxBytes).toBe(1024);
     });
   });
 
@@ -1076,7 +1087,7 @@ describe("retention", () => {
       // files: compaction moves bytes out of the log and into the snapshot, so a total
       // that watched the log alone would report that move as space reclaimed while the
       // disk gave back nothing.
-      expect(store.usage.bytes).toBe(onDisk(dir, "orders:1"));
+      expect(store.usage().bytes).toBe(onDisk(dir, "orders:1"));
     });
 
     it("reclaims across keys on a sweep, without a per-log limit to trigger it", async () => {
@@ -1093,7 +1104,7 @@ describe("retention", () => {
         await fill(store, key, 8);
       }
 
-      const before = store.usage.bytes;
+      const before = store.usage().bytes;
       expect(before).toBeGreaterThan(2000);
 
       const swept = await store.compact();
@@ -1101,8 +1112,8 @@ describe("retention", () => {
       expect(swept.logs).toBeGreaterThan(0);
       expect(swept.reclaimed).toBeGreaterThan(0);
       expect(swept.withinBudget).toBe(true);
-      expect(store.usage.bytes).toBeLessThan(before);
-      expect(store.usage.bytes).toBeLessThanOrEqual(2000);
+      expect(store.usage().bytes).toBeLessThan(before);
+      expect(store.usage().bytes).toBeLessThanOrEqual(2000);
 
       // History is what it cost. State is not: every key still replays to where it was.
       for (const key of ["orders:1", "orders:2", "orders:3"]) {
@@ -1157,8 +1168,8 @@ describe("retention", () => {
       // would report room the disk does not have.
       const reopened = fileStore(dir, { retention: { totalBytes: 4096 } });
 
-      expect(reopened.usage.bytes).toBe(onDisk(dir, "orders:1"));
-      expect(reopened.usage.bytes).toBeGreaterThan(
+      expect(reopened.usage().bytes).toBe(onDisk(dir, "orders:1"));
+      expect(reopened.usage().bytes).toBeGreaterThan(
         readFileSync(logPathOf(dir, "orders:1")).byteLength
       );
     });
@@ -1393,12 +1404,12 @@ describe("retention", () => {
       const dir = freshDir();
       const store = fileStore(dir);
 
-      expect(store.usage).toEqual({ bytes: 0, logs: 0, maxBytes: null });
+      expect(store.usage()).toEqual({ bytes: 0, logs: 0, maxBytes: null });
 
       await fill(store, "orders:1", 3);
 
-      expect(store.usage.logs).toBe(1);
-      expect(store.usage.bytes).toBeGreaterThan(0);
+      expect(store.usage().logs).toBe(1);
+      expect(store.usage().bytes).toBeGreaterThan(0);
     });
 
     it("counts a write once when a budget makes it start counting mid-flight", async () => {
@@ -1411,7 +1422,7 @@ describe("retention", () => {
 
       await fill(store, "orders:1", 1);
 
-      expect(store.usage.bytes).toBe(
+      expect(store.usage().bytes).toBe(
         readFileSync(logPathOf(dir, "orders:1")).byteLength
       );
     });
@@ -1422,15 +1433,15 @@ describe("retention", () => {
 
       await fill(store, "orders:1", 3);
       await fill(store, "orders:2", 3);
-      const both = store.usage.bytes;
+      const both = store.usage().bytes;
 
       await store.forget("orders:1");
 
       // The budget has to fall as well as rise, or a store that churns keys would report
       // itself full while holding almost nothing.
-      expect(store.usage.logs).toBe(1);
-      expect(store.usage.bytes).toBeLessThan(both);
-      expect(store.usage.bytes).toBe(
+      expect(store.usage().logs).toBe(1);
+      expect(store.usage().bytes).toBeLessThan(both);
+      expect(store.usage().bytes).toBe(
         readFileSync(logPathOf(dir, "orders:2")).byteLength
       );
     });
@@ -1461,8 +1472,8 @@ describe("retention", () => {
       // A brand new store over the same directory has counted nothing yet. Reading usage
       // is what seeds it, and it has to see the logs it inherited.
       const reopened = fileStore(dir);
-      expect(reopened.usage.logs).toBe(1);
-      expect(reopened.usage.bytes).toBeGreaterThan(0);
+      expect(reopened.usage().logs).toBe(1);
+      expect(reopened.usage().bytes).toBeGreaterThan(0);
     });
 
     it("refuses a new instance once full, and lets existing ones continue", async () => {
@@ -1472,7 +1483,7 @@ describe("retention", () => {
       });
 
       await fill(store, "orders:1", 3);
-      expect(store.usage.bytes).toBeGreaterThan(600);
+      expect(store.usage().bytes).toBeGreaterThan(600);
 
       // The instance that already exists is untouched by the budget.
       await expect(
@@ -1491,7 +1502,7 @@ describe("retention", () => {
       const store = fileStore(freshDir());
       await fill(store, "orders:1", 2);
 
-      expect(store.usage.logs).toBe(1);
+      expect(store.usage().logs).toBe(1);
     });
   });
 });
@@ -1909,7 +1920,7 @@ describe("loading a key that has a snapshot", () => {
     });
 
     expect(store.keys).toEqual([KEY, "orders:only"].sort());
-    expect(store.usage.bytes).toBe(held);
+    expect(store.usage().bytes).toBe(held);
     // It exists, so under a full budget it still commits where a new key is refused.
     await store.append("orders:only", { ...event(4), key: "orders:only" }, 3);
     const refused = await store
@@ -2200,13 +2211,13 @@ describe("the file store's commit path", () => {
           retention: { perLogBytes: LIMIT },
         });
         await append(store, 1, 4);
-        expect(store.usage.bytes).toBe(onDisk(dir, "orders:1"));
+        expect(store.usage().bytes).toBe(onDisk(dir, "orders:1"));
 
         await turn();
 
         expect(store.lastHousekeepingError?.code).toBe("STORE_UNAVAILABLE");
         expect(lineCount(dir, "orders:1")).toBe(0);
-        expect(store.usage.bytes).toBe(onDisk(dir, "orders:1"));
+        expect(store.usage().bytes).toBe(onDisk(dir, "orders:1"));
         expect(store.openLogs).toBe(0);
         await store.close();
       }
@@ -2284,7 +2295,7 @@ describe("the file store's commit path", () => {
 
         await store.append("orders:1", event("orders:1", 1), 0);
         expect(store.lastHousekeepingError).toBeUndefined();
-        expect(store.usage.bytes).toBe(onDisk(dir, "orders:1"));
+        expect(store.usage().bytes).toBe(onDisk(dir, "orders:1"));
         await store.close();
       }
     );

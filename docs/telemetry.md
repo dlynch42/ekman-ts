@@ -91,7 +91,10 @@ const ekman = new Ekman({
 });
 ```
 
-An audit sink receives a copy of every committed event, out of band.
+An audit sink receives a copy of every committed event, out of band. That is the
+initialization of an instance and every transition after it. A refused trigger or a constraint
+violation is not a commit and is not delivered: those are in the instance's
+[history](./queries.md) and in the telemetry events above.
 
 **Audit sinks never gate a commit.** Delivery is asynchronous and at-least-once, and a sink has
 no veto. A sink that throws, hangs forever, or is merely slow cannot delay or fail a commit, and
@@ -124,7 +127,7 @@ rejection with no context. The second argument says where it came from:
 | `post` | A fire-and-forget send was refused, or its handler failed. Includes a `post()` after `close()`. | yes |
 | `telemetry` | A telemetry handler threw or rejected. | when the event has one |
 | `escalation` | A time-in-state bound fired and its trigger was refused. | yes |
-| `sweep` | An automatic time-in-state sweep failed. | no |
+| `sweep` | An automatic time-in-state sweep failed, or a sweep could not scan the store or load an instance it found there. | when it was loading one |
 | `storage-sweep` | An automatic storage sweep failed. | no |
 | `snapshot` | The snapshot written when an instance is evicted failed. The events are already stored, so this costs replay time and no state. | yes |
 | `persist` | A refusal or a violation could not be written to the store. | yes |
