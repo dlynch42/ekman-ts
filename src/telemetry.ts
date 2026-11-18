@@ -11,7 +11,7 @@
  */
 import type { ConstraintKind } from "./events";
 import type { FenceReason } from "./fence";
-import type { OverflowPolicy } from "./types";
+import type { OnUnhandled, OverflowPolicy } from "./types";
 
 /** The `"*"` key: receives any event no named handler claimed. */
 export const TELEMETRY_FALLBACK = "*";
@@ -421,7 +421,7 @@ export type TelemetrySink = {
 export function emit(
   sink: TelemetrySink | undefined,
   event: TelemetryEvent,
-  onUnhandled: (error: unknown) => void
+  onUnhandled: OnUnhandled
 ): void {
   if (sink === undefined) {
     return;
@@ -432,13 +432,20 @@ export function emit(
     return;
   }
 
+  const report = (error: unknown): void => {
+    onUnhandled(error, {
+      source: "telemetry",
+      ...("key" in event ? { key: event.key } : {}),
+    });
+  };
+
   try {
     const returned = (handler as (delivered: TelemetryEvent) => unknown)(event);
     if (isThenable(returned)) {
-      returned.then(undefined, onUnhandled);
+      returned.then(undefined, report);
     }
   } catch (error) {
-    onUnhandled(error);
+    report(error);
   }
 }
 

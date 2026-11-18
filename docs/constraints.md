@@ -62,6 +62,37 @@ CONSTRAINT_VIOLATED | transitions: "paid" to "pending" is not a declared transit
 From "paid" the declared targets are: (none)
 ```
 
+### A transition to the same state is still a transition
+
+Every `transitionTo` is checked against the graph, including one that targets the state the
+instance is already in. `transitionTo("error", ...)` from `error` needs `error: ["error"]` in
+`allow`, or it is refused like any other undeclared move.
+
+This bites hardest in a failure path. A handler or an `onError` handler that reports a repeated
+failure by transitioning to `error` again is refused the second time, with `CONSTRAINT_VIOLATED`,
+from inside the code that was supposed to be handling the problem:
+
+```ts
+allow: {
+  running: ["error"],
+  error: ["running", "error"],   // the second entry is what lets a repeated failure be recorded
+},
+```
+
+Two ways to stay out of it:
+
+- **Use `stay(values)` when the state is not changing.** It updates values without asking to
+  move, so the graph is not consulted.
+- **List a self-edge on purpose** when asking to enter the state again means something: the
+  state's guards are checked again, and the move is recorded as a transition.
+
+A self-transition does not restart the clock. Time in state is measured from the last move to a
+*different* state, so transitioning to the state an instance is already in neither extends a
+time-in-state bound nor arms again one that has fired.
+
+Rolling a graph out under `policy: "warn"` first shows every self-transition your handlers
+actually make before any of them is refused.
+
 ## Guards
 
 A guard is a condition on entering a state. It can be scoped to where the transition comes
@@ -122,6 +153,9 @@ states: {
 
 Set `trigger` on the constraint to use a type of your own instead of the default.
 
+An entity with a [trigger union](./entities.md#typed-triggers) adds `TemporalTrigger<State>` to
+it, which types the escalation's `escalateTo` as one of the entity's states.
+
 An entity that declares `triggers` must list the type its bounds deliver, as above. A bound
 whose escalation the entity would refuse as unknown is rejected by `defineEntity`, because
 the instance it was watching would stay stuck. A bound with `policy: "warn"` delivers nothing
@@ -162,11 +196,17 @@ legal instead.
 
 `warn` mode ends with a diagram rather than a log read.
 
-```ts
+<!-- check-docs:
+import type { AnyEntityDefinition, Ekman } from "ekman";
+declare const ekman: Ekman;
+declare const keys: string[];
+declare const orders: AnyEntityDefinition;
+-->
+```ts check
 import { allowFrom, observeEdges, toMermaid } from "ekman";
 
 // Fold every key's stream into the edges the traffic actually walked.
-let observed;
+let observed = observeEdges([]);
 for (const key of keys) {
   observed = observeEdges((await ekman.history(key)).events, observed);
 }

@@ -107,7 +107,7 @@ export class EkmanError extends Error {
     // `name` is a class field, so it is assigned after super() and after Error's own
     // stack capture. Re-capture so the stack header reads "EkmanError", not "Error".
     if (Error.captureStackTrace) {
-      Error.captureStackTrace(this, EkmanError);
+      Error.captureStackTrace(this, new.target);
     } else {
       this.stack = composeStack(this.name, message, this.stack);
     }

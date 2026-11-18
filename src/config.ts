@@ -4,7 +4,7 @@ import type { EkmanEvent } from "./events";
 import type { ResolvedMemoryConfig } from "./memory";
 import type { ResolvedStack } from "./stack";
 import type { TelemetrySink } from "./telemetry";
-import type { InboxConfig, OverflowPolicy } from "./types";
+import type { InboxConfig, OnUnhandled, OverflowPolicy } from "./types";
 
 /**
  * Runtime configuration, resolved once at construction.
@@ -33,7 +33,7 @@ export interface ResolvedInboxConfig {
 export interface RuntimeDeps {
   readonly now: () => number;
   readonly telemetry: TelemetrySink | undefined;
-  readonly onUnhandled: (error: unknown) => void;
+  readonly onUnhandled: OnUnhandled;
   readonly inbox: ResolvedInboxConfig;
   /** Which layer owns the truth, and which are caches. */
   readonly stack: ResolvedStack;

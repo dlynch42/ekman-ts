@@ -14,7 +14,7 @@ import { isEkmanError } from "ekman";
 import { config } from "../../lib/config";
 import { metricsSnapshot } from "../../lib/metrics";
 import { deployments, ekman, incidents } from "../../lib/runtime";
-import { json, type Reply, type Route } from "../server";
+import { json, type Reply, type Route, requireOperator } from "../server";
 
 export const opsRoutes: readonly Route[] = [
   {
@@ -58,7 +58,13 @@ export const opsRoutes: readonly Route[] = [
   {
     method: "POST",
     path: "/ops/sweep",
-    handle: async (): Promise<Reply> => {
+    handle: async (ctx): Promise<Reply> => {
+      // It delivers triggers, so it changes things, so it asks who is calling.
+      const denied = requireOperator(ctx);
+      if (denied !== undefined) {
+        return denied;
+      }
+
       // The runtime sweeps on its own interval; this is the manual version, for when you
       // do not want to wait for the next one.
       const escalated = await ekman.sweep();
@@ -85,6 +91,13 @@ export const opsRoutes: readonly Route[] = [
     method: "POST",
     path: "/ops/prune",
     handle: async (ctx): Promise<Reply> => {
+      // The one route that deletes committed state. Checked before anything is read, a
+      // dry run included, because the list of what would be deleted is not public either.
+      const denied = requireOperator(ctx);
+      if (denied !== undefined) {
+        return denied;
+      }
+
       // Retention is this: a query you already have, and the one verb that deletes. There
       // is no policy inside the runtime deciding when a deployment stops mattering,
       // because that is a product question and it belongs here.

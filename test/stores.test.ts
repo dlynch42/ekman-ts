@@ -16,22 +16,19 @@ import { dirname, join } from "node:path";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import type { EkmanError } from "../src/errors";
 import type { EkmanEvent, TransitionEvent } from "../src/events";
-import {
-  defaultLogDir,
-  defaultStoreDir,
-  Ekman,
-  EMPTY_SEQ,
-  entityOf,
-  projectRoot,
-  replay,
-  STORE_DIR_NAME,
-} from "../src/index";
+import { defaultLogDir, Ekman, EMPTY_SEQ, replay } from "../src/index";
 import type { LoadResult, Store, StoreSnapshot } from "../src/store";
+import { entityOf } from "../src/store";
 import type { FileStore, RetentionPolicy } from "../src/stores/file";
-import { fileStore } from "../src/stores/file";
+import {
+  defaultStoreDir,
+  fileStore,
+  projectRoot,
+  STORE_DIR_NAME,
+} from "../src/stores/file";
+import { storeContract } from "../src/stores/index";
 import { memoryStore } from "../src/stores/memory";
 import type { Values } from "../src/types";
-import { storeContract } from "./store-contract";
 
 const NEEDS_BUDGET = /needs a totalBytes to act on/;
 const NEEDS_BYTE_COUNT = /non-negative integer/;
@@ -182,11 +179,50 @@ describe("finding the project root", () => {
   });
 });
 
+/**
+ * A store that declares no optional capability: it cannot forget, and it reports the scan
+ * filters it was asked for as unsupported, matching on the entity alone.
+ */
+function minimalStore(): Store {
+  const inner = memoryStore();
+  return {
+    name: "minimal",
+    capabilities: {
+      ...inner.capabilities,
+      scan: { byState: false, olderThan: false },
+      forget: false,
+    },
+    append: (key, event, expectedSeq) => inner.append(key, event, expectedSeq),
+    read: (key) => inner.read(key),
+    load: (key) => inner.load(key),
+    snapshot: (key, snapshot) => inner.snapshot(key, snapshot),
+    scan: async ({ state, olderThanMs, ...criteria }) => {
+      const found = await inner.scan(criteria);
+      return {
+        ...found,
+        unsupported: [
+          ...(state === undefined ? [] : ["state"]),
+          ...(olderThanMs === undefined ? [] : ["olderThan"]),
+        ],
+      };
+    },
+  };
+}
+
 // The same contract, both adapters. An adapter that passes can be swapped in without
 // reading the runtime; one that fails is broken however reasonable it looks.
 describe("store contract", () => {
-  storeContract("memory", () => memoryStore(), { durable: false });
-  storeContract("file", () => fileStore(freshDir()), { durable: true });
+  const harness = { it, expect };
+  storeContract("memory", () => memoryStore(), { durable: false }, harness);
+  storeContract(
+    "file",
+    () => fileStore(freshDir()),
+    { durable: true },
+    harness
+  );
+  // A valid adapter may do less. One that cannot delete and cannot filter a scan passes
+  // by saying so, and is not held to what it declared it cannot do.
+  storeContract("minimal", minimalStore, { durable: false }, harness);
 });
 
 describe("capability declarations", () => {

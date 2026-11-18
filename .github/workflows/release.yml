@@ -1,13 +1,24 @@
 name: Release
 
-# Two channels, one workflow file. Merges to `release` publish a release
-# candidate on the `rc` dist-tag; merges to `main` publish stable on `latest`.
-# They share a file because npm's trusted publisher configuration names a single
-# workflow, so a second publishing workflow could not authenticate.
+# Two channels, one workflow file. A push to `rc` publishes a release candidate
+# on the `rc` dist-tag; a push to `main` publishes stable on `latest`. They share
+# a file because npm's trusted publisher configuration names a single workflow,
+# so a second publishing workflow could not authenticate.
+#
+# Two jobs, split by what they are trusted with. `gate` installs every
+# development dependency and runs their code: lifecycle scripts, the test
+# runner, the bundler. It holds no secret and can write nothing. `release` holds
+# the token that pushes and the right to publish, and runs as little as it can:
+# it installs with lifecycle scripts off and publishes the build `gate` made.
+# A compromised development dependency therefore runs where there is nothing to
+# take.
 on:
   push:
     branches: [main, rc]
   workflow_dispatch:
+
+# Nothing by default. Each job asks for what it needs.
+permissions: {}
 
 concurrency:
   # Deliberately not keyed on the ref: a stable release and a release candidate
@@ -16,15 +27,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: Release
+  gate:
+    name: Gate
     runs-on: ubuntu-latest
-    # Gated behind the "release" GitHub Environment so an approval rule can be added.
-    environment: release
     # Guards against a publish loop. `auto` appends `[skip ci]` to its own
     # "Bump version to:" and "Update CHANGELOG.md" commits, and GitHub honors
     # that natively by not triggering at all, so this condition is a second
-    # layer rather than the mechanism.
+    # layer rather than the mechanism. `release` needs this job, so skipping it
+    # here skips both.
     #
     # Deliberately not keyed on the commit author: `auto` takes its identity
     # from the `email` field in .autorc, which is the maintainer's own address,
@@ -34,38 +44,38 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       !contains(github.event.head_commit.message, '[skip ci]')
     permissions:
-      contents: write # push the version bump commit + tag, create the GitHub release
-      issues: write # auto comments on issues fixed by the release
-      pull-requests: write # auto comments on released PRs
-      id-token: write # OIDC for npm trusted publishing + build provenance
+      contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # auto reads the whole history to find the previous release and the
-          # PRs merged since it.
-          fetch-depth: 0
-          token: ${{ secrets.RELEASE_TOKEN }}
+          # Nothing here pushes, so the checkout token is not left in .git/config
+          # for a dependency's script to read.
+          persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24.x
-          registry-url: https://registry.npmjs.org
           cache: npm
 
       - name: Install dependencies
         run: npm ci
 
-      # The gate runs here, before `auto` is invoked, on purpose. package.json
-      # also carries it as `prepublishOnly` for anyone publishing from a laptop,
-      # but a failure at that point would leave `auto` half-finished: version
-      # bumped and tag created, nothing published.
+      # Everything a release has to pass, before `auto` is invoked at all. A
+      # failure after it starts would leave it half-finished: version bumped and
+      # tag created, nothing published.
       - name: Typecheck
         run: npm run typecheck
 
       - name: Lint
         run: npm run lint
+
+      - name: Typecheck doc samples
+        run: npm run check:docs
+
+      - name: Example smoke test
+        run: npm run example:smoke
 
       - name: Test
         run: npm test
@@ -79,6 +89,58 @@ jobs:
       - name: Verify the packed tarball
         run: npm run verify:package
 
+      # The build that was just verified is the build that ships. `release`
+      # downloads it and does not build again.
+      - name: Upload the build
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          # `release` waits on an approval before it downloads this, and an approval can
+          # sit for as long as the environment allows. The build has to outlast the wait.
+          retention-days: 30
+
+  release:
+    name: Release
+    needs: gate
+    runs-on: ubuntu-latest
+    # Gated behind the "release" GitHub Environment so an approval rule can be added.
+    environment: release
+    permissions:
+      contents: write # push the version bump commit + tag, create the GitHub release
+      issues: write # auto comments on issues fixed by the release
+      pull-requests: write # auto comments on released PRs
+      id-token: write # OIDC for npm trusted publishing + build provenance
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # auto reads the whole history to find the previous release and the
+          # PRs merged since it.
+          fetch-depth: 0
+          # auto pushes with the token it is handed in its own step below, not
+          # with one left behind in .git/config.
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.x
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      # `auto` and its plugins have to be installed to run. Their lifecycle
+      # scripts, and those of every other development dependency, do not.
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Download the build
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+
       # One step for both channels: `auto shipit` is context aware, publishing
       # a stable release from the base branch and a prerelease from a branch
       # listed in `prereleaseBranches`. `rc` is a real branch, so the version
@@ -90,6 +152,10 @@ jobs:
       # this workflow file and the `release` environment, and provenance is
       # attached automatically. Deliberately no NODE_AUTH_TOKEN, because
       # setup-node writes one into .npmrc and npm would prefer it over OIDC.
+      #
+      # package.json has no `prepublishOnly`, on purpose. One would rebuild
+      # dist/ here, with the bundler, in the job that can publish, and ship that
+      # instead of what `gate` verified.
       - name: Release
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}

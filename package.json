@@ -6,7 +6,7 @@
   "type": "module",
   "sideEffects": false,
   "engines": {
-    "node": ">=20"
+    "node": ">=22.12"
   },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -16,6 +16,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
+    },
+    "./store": {
+      "types": "./dist/stores/index.d.ts",
+      "import": "./dist/stores/index.js",
+      "require": "./dist/stores/index.cjs"
     },
     "./package.json": "./package.json"
   },
@@ -49,6 +54,7 @@
     "test:coverage": "vitest run --coverage",
     "conformance": "tsx runner/cli.ts",
     "verify:package": "node scripts/verify-package.mjs",
+    "check:docs": "node scripts/check-docs.mjs",
     "bench": "tsx benchmarks/run.ts",
     "bench:commit-rate": "tsx benchmarks/run.ts commit-rate",
     "bench:constraints": "tsx benchmarks/run.ts constraints",
@@ -75,19 +81,18 @@
     "example:api": "tsx examples/deploy-service/src/main.ts",
     "example:smoke": "tsx examples/deploy-service/smoke.ts",
     "lint": "ultracite check",
-    "format": "ultracite fix",
-    "prepublishOnly": "npm run typecheck && npm run lint && npm test && npm run conformance && npm run build"
+    "format": "ultracite fix"
   },
   "devDependencies": {
     "@auto-it/core": "^11.3.6",
     "@auto-it/npm": "^11.3.6",
-    "@biomejs/biome": "^2.5.6",
+    "@biomejs/biome": "~2.5.6",
     "@types/node": "^22.9.0",
     "@vitest/coverage-v8": "^4.1.10",
     "auto": "^11.3.6",
     "tsup": "^8.3.5",
     "tsx": "^4.19.2",
-    "typescript": "^5.6.3",
+    "typescript": "^6.0.3",
     "ultracite": "^7.10.5",
     "vitest": "^4.1.10"
   },

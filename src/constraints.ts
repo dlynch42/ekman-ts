@@ -29,6 +29,35 @@ export type ViolationPolicy = "reject" | "warn" | "off";
 /** The default trigger type an escalating temporal constraint delivers. */
 export const DEFAULT_TEMPORAL_TRIGGER = "constraint.temporal";
 
+/**
+ * The trigger a time-in-state bound delivers when it fires.
+ *
+ * An entity with a typed trigger union and a bound adds this to the union, so a handler can
+ * narrow on `trigger.type` and read `escalateTo` as a state:
+ *
+ * ```ts
+ * type DeployTrigger = { type: "deploy"; region: string } | TemporalTrigger<State>;
+ * ```
+ *
+ * `K` is the bound's `trigger` name, for a bound that sets one.
+ */
+// biome-ignore lint/style/useConsistentTypeDefinitions: an interface has no implicit index signature, so the runtime could not hand one to `send` as a `Trigger`
+export type TemporalTrigger<
+  S extends string = string,
+  K extends string = typeof DEFAULT_TEMPORAL_TRIGGER,
+> = {
+  readonly type: K;
+  readonly id?: string;
+  /** The name of the bound that fired. */
+  readonly constraint: string;
+  /** The state the instance has been sitting in. */
+  readonly state: S;
+  /** How long it has been there, in milliseconds. */
+  readonly sinceMs: number;
+  /** The state the bound asks for, when it names one. The handler decides whether to go. */
+  readonly escalateTo?: S;
+};
+
 const POLICIES: readonly ViolationPolicy[] = ["reject", "warn", "off"];
 
 /** The state and values a result is asking to commit. */

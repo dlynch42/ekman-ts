@@ -1,7 +1,11 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "paths": {}
+    "paths": {},
+    // tsup's declaration build sets `baseUrl` itself, which TypeScript 6 reports as
+    // deprecated and refuses to build with unless told otherwise. Remove this once the
+    // bundler stops setting it.
+    "ignoreDeprecations": "6.0"
   },
   "include": ["src"]
 }

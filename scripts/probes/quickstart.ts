@@ -7,7 +7,9 @@
 // and the published example stays checkable: if the README's code stops working
 // against the published package, this fails.
 //
-// It must be valid as both plain JavaScript and TypeScript, so no annotations.
+// It must be valid as both plain JavaScript and TypeScript, so no annotations. The
+// README declares a trigger union and uses defineEntity.withTriggers; a type alias is
+// not JavaScript, so this stays on plain defineEntity and carries no payload.
 import {
   defineEntity,
   Ekman,

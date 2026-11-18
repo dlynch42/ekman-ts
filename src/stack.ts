@@ -255,7 +255,9 @@ export function resolveStack(
       "INVALID_CONFIG",
       `${claimed.length} store layers claim to be the commit authority (${claimed
         .map((layer) => layer.name)
-        .join(", ")}). Exactly one layer owns the truth.`
+        .join(
+          ", "
+        )}). Exactly one layer owns the truth. Remove authority: true from all but one layer.`
     );
   }
 
@@ -344,7 +346,8 @@ function assertUniqueNames(layers: readonly Store[]): void {
       throw new EkmanError(
         "INVALID_CONFIG",
         `two store layers are both named "${layer.name}". Layer names appear in telemetry ` +
-          "and in query results, so they have to tell the layers apart."
+          "and in query results, so they have to tell the layers apart. Give one of them a " +
+          "different name with the store's name option."
       );
     }
     seen.add(layer.name);

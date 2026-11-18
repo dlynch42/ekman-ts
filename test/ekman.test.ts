@@ -2,6 +2,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
+import type { TemporalTrigger } from "../src/constraints";
+import { DEFAULT_TEMPORAL_TRIGGER } from "../src/constraints";
 import { Ekman } from "../src/ekman";
 import { defineEntity } from "../src/entity";
 import { EkmanError } from "../src/errors";
@@ -13,6 +15,7 @@ import { memoryStore } from "../src/stores/memory";
 import type { TelemetryEvent } from "../src/telemetry";
 
 const NON_NEGATIVE_INTEGER = /non-negative integer/;
+const NOT_BUILT = /was not built by defineEntity/;
 const NOTHING_TO_COMPACT = /no configured store layer can compact/;
 const POSITIVE_MILLISECONDS = /positive number of milliseconds/;
 
@@ -629,8 +632,52 @@ describe("post", () => {
     ekman.entities.orders.post("1", { type: "cancel" });
 
     await vi.waitFor(() => expect(onUnhandled).toHaveBeenCalledTimes(1));
-    const [reported] = onUnhandled.mock.calls[0] ?? [];
+    const [reported, context] = onUnhandled.mock.calls[0] ?? [];
     expect((reported as EkmanError).code).toBe("HANDLER_FAILED");
+    expect(context).toEqual({ source: "post", key: "orders:1" });
+  });
+
+  it("says an escalation that was refused came from an escalation", async () => {
+    let now = 1000;
+    const onUnhandled = vi.fn();
+    const stuck = defineEntity("stuck", {
+      initial: "waiting",
+      states: {
+        waiting: (_instance, trigger) => {
+          if (trigger.type === DEFAULT_TEMPORAL_TRIGGER) {
+            throw new Error("cannot escalate");
+          }
+          return stay();
+        },
+      },
+      constraints: { temporal: [{ in: "waiting", within: 50 }] },
+    });
+    const ekman = new Ekman({
+      entities: [stuck],
+      now: () => now,
+      onUnhandled,
+    });
+    await ekman.entities.stuck.send("a", { type: "arrive" });
+
+    now += 100;
+    await ekman.sweep();
+
+    const [reported, context] = onUnhandled.mock.calls[0] ?? [];
+    expect((reported as EkmanError).code).toBe("HANDLER_FAILED");
+    expect(context).toEqual({ source: "escalation", key: "stuck:a" });
+  });
+});
+
+describe("a definition the runtime did not build", () => {
+  it("is refused at registration, not on the first trigger", () => {
+    // Compiles, because the public graph type is a shape. It is not what the runtime needs.
+    const forged = {
+      ...orders,
+      states: { ...orders.states, names: ["pending"] },
+    } as typeof orders;
+
+    expect(() => new Ekman({ entities: [forged] })).toThrow(NOT_BUILT);
+    expect(() => new Ekman().define(forged)).toThrow(NOT_BUILT);
   });
 });
 
@@ -716,6 +763,9 @@ describe("telemetry", () => {
     // inbox.enqueued, handler.started, handler.settled, memory.accounted: each reported,
     // none fatal.
     expect(onUnhandled).toHaveBeenCalledTimes(4);
+    expect(onUnhandled.mock.calls.map(([, context]) => context)).toEqual(
+      new Array(4).fill({ source: "telemetry", key: "orders:1" })
+    );
   });
 
   it("refuses an inbox configuration it cannot satisfy, at construction", () => {
@@ -782,7 +832,29 @@ describe("uncovered surface", () => {
       const ekman = new Ekman({ entities: [orders] });
       ekman.entities.orders.post("1", { type: "cancel" });
       await vi.waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
-      expect(spy.mock.calls[0]?.[0]).toContain("[ekman]");
+      expect(spy.mock.calls[0]?.[0]).toBe(
+        "[ekman] unhandled failure (post for orders:1)"
+      );
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("names the source alone when a failure concerns no key", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const ekman = new Ekman({
+        entities: [orders],
+        telemetry: {
+          "runtime.closed": () => {
+            throw new Error("exporter is down");
+          },
+        },
+      });
+      await ekman.close();
+      expect(spy.mock.calls[0]?.[0]).toBe(
+        "[ekman] unhandled failure (telemetry)"
+      );
     } finally {
       spy.mockRestore();
     }
@@ -2092,7 +2164,8 @@ describe("deciding whether a failure is worth another attempt", () => {
 
     expect(refused).toMatchObject({
       code: "HANDLER_FAILED",
-      message: "carrier unavailable",
+      message:
+        'handler for jobs:a in "open" failed on "run": carrier unavailable',
     });
     expect((refused as EkmanError).cause).toBeInstanceOf(Flaky);
     await ekman.close();
@@ -2441,5 +2514,46 @@ describe("audit sinks and the commit path", () => {
     expect(() => new Ekman({ audit: [sink as never] })).toThrow(
       expect.objectContaining({ code: "INVALID_CONFIG" })
     );
+  });
+});
+
+describe("typed escalation", () => {
+  it("hands a typed handler an escalation it can act on without a cast", async () => {
+    type State = "pending" | "overdue";
+    type InvoiceTrigger = { type: "issue" } | TemporalTrigger<State>;
+
+    let now = 1000;
+    const seen: InvoiceTrigger[] = [];
+    const invoices = defineEntity.withTriggers<InvoiceTrigger>()("invoices", {
+      initial: "pending",
+      states: {
+        pending: (_invoice, trigger) => {
+          seen.push(trigger);
+          return trigger.type === DEFAULT_TEMPORAL_TRIGGER &&
+            trigger.escalateTo !== undefined
+            ? transitionTo(trigger.escalateTo)
+            : stay();
+        },
+        overdue: () => stay(),
+      },
+      constraints: {
+        temporal: [{ in: "pending", within: 50, escalateTo: "overdue" }],
+      },
+    });
+
+    const ekman = new Ekman({ entities: [invoices], now: () => now });
+    await ekman.entities.invoices.send("a", { type: "issue" });
+
+    now += 100;
+    expect(await ekman.sweep()).toBe(1);
+
+    expect(ekman.entities.invoices.inspect("a")?.state).toBe("overdue");
+    expect(seen.at(-1)).toMatchObject({
+      type: "constraint.temporal",
+      constraint: "temporal:pending:50",
+      state: "pending",
+      sinceMs: 100,
+      escalateTo: "overdue",
+    });
   });
 });
