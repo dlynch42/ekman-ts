@@ -1,12 +1,11 @@
 import type { AuditSink } from "./audit";
-import type { CompiledConstraints, ConstraintsConfig } from "./constraints";
+import type { ConstraintsConfig } from "./constraints";
 import type { TransitionEvent } from "./events";
 import type { MemoryConfig } from "./memory";
 import type { ExecutionPolicy } from "./policy";
 import type { HistoryResult, QueryCriteria, QueryResult } from "./query";
 import type { HandlerResult } from "./results";
 import type { Coordination, StoreLayer } from "./stack";
-import type { States } from "./states";
 // Type-only, and so erased: `telemetry.ts` names `OverflowPolicy` from here, and this
 // names `TelemetrySink` from there. Neither import survives compilation, so the cycle
 // exists only for the typechecker, which resolves it fine.
@@ -201,6 +200,36 @@ export interface EntityConfig<
   readonly constraints?: ConstraintsConfig<NoInfer<S>, NoInfer<V>, NoInfer<T>>;
 }
 
+/** The states an entity declares and the moves between them it allows. Read-only. */
+export interface StateGraph {
+  /** How many states. */
+  readonly size: number;
+  /** Every state, in declaration order. */
+  readonly names: readonly string[];
+  /** Whether a transition graph was declared. Without one, every move is allowed. */
+  readonly hasEdges: boolean;
+  has: (state: string) => boolean;
+  allows: (from: string, to: string) => boolean;
+  targetsOf: (from: string) => readonly string[];
+  outDegree: (from: string) => number;
+  /** States nothing leaves. */
+  terminals: () => readonly string[];
+  reachableFrom: (from: string) => ReadonlySet<string>;
+  unreachableFrom: (from: string) => readonly string[];
+}
+
+declare const COMPILED: unique symbol;
+
+/**
+ * An entity's constraints in the form the runtime checks them in.
+ *
+ * Opaque on purpose. What a constraint compiles to is the runtime's business and changes
+ * with it; what was declared is in the config the entity was defined from.
+ */
+export interface EntityConstraints {
+  readonly [COMPILED]: never;
+}
+
 /** A validated, runtime-free entity definition. Safe to share across runtimes. */
 export interface EntityDefinition<
   N extends string = string,
@@ -218,7 +247,7 @@ export interface EntityDefinition<
    * The states this entity has and the moves between them it allows, present whether or not
    * any constraint was declared. With no edges declared, every transition is legal.
    */
-  readonly states: States;
+  readonly states: StateGraph;
   /**
    * What the entity attaches to each of its states. One handler per state, which is what
    * makes the entity the implementer of the structure above rather than a description of it.
@@ -230,7 +259,7 @@ export interface EntityDefinition<
    * Compiled constraints, or undefined when the entity declares none. Constraints set to
    * `off` compile away entirely, so undefined and "all off" are the same fast path.
    */
-  readonly constraints: CompiledConstraints<S, V, T> | undefined;
+  readonly constraints: EntityConstraints | undefined;
   /** Build a full key from an id, without needing a runtime. */
   key: (id: string) => string;
 }
@@ -369,6 +398,12 @@ export interface StorageConfig {
    * configured and does nothing.
    */
   readonly sweepMs?: number;
+}
+
+/** What `close()` accepts. */
+export interface CloseOptions {
+  /** How long to wait for in-flight work, in milliseconds. Defaults to 30 seconds. */
+  readonly timeoutMs?: number;
 }
 
 export interface EkmanConfig<

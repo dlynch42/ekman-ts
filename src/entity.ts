@@ -1,3 +1,4 @@
+import { sealConstraints } from "./compiled";
 import { assertKnownKeys } from "./config";
 import type { CompiledTemporal } from "./constraints";
 import { compileConstraints } from "./constraints";
@@ -94,12 +95,12 @@ export function defineEntity<
 
   // Compiled last, because every constraint names states and the check is worth making
   // against the states that survived validation rather than against the raw config.
-  const constraints =
+  const compiled =
     config.constraints === undefined
       ? undefined
       : compileConstraints<S, V, T>(name, config.constraints, states);
 
-  assertEscalationsRecognized(name, triggers, constraints?.temporal ?? []);
+  assertEscalationsRecognized(name, triggers, compiled?.temporal ?? []);
 
   return Object.freeze({
     name,
@@ -111,7 +112,7 @@ export function defineEntity<
     handlers,
     errorHandlers,
     classify,
-    constraints,
+    constraints: sealConstraints(compiled),
     key: (id: string) => buildKey(name, id),
   });
 }

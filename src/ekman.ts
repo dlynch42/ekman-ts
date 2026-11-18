@@ -1,6 +1,7 @@
 import type { AuditSink } from "./audit";
 import { assertAuditSink, deliverTo } from "./audit";
 import { Caches } from "./caches";
+import { constraintsOf, statesOf } from "./compiled";
 import type { CommittedRecord, RuntimeDeps } from "./config";
 import { assertKnownKeys, resolveInboxConfig } from "./config";
 import type { CompiledTemporal } from "./constraints";
@@ -36,6 +37,7 @@ import type { EscalationOutcome } from "./temporal";
 import { refusalOutcome, TemporalIndex } from "./temporal";
 import type {
   AnyEntityDefinition,
+  CloseOptions,
   CommitResult,
   EkmanConfig,
   EntityDefinition,
@@ -590,7 +592,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    *
    * @param options `timeoutMs` is how long to wait for in-flight work. Defaults to 30 seconds.
    */
-  close(options: { readonly timeoutMs?: number } = {}): Promise<void> {
+  close(options: CloseOptions = {}): Promise<void> {
     const timeoutMs = options.timeoutMs ?? DEFAULT_CLOSE_TIMEOUT_MS;
     if (!(timeoutMs > 0 && timeoutMs <= MAX_TIMER_MS)) {
       return Promise.reject(
@@ -809,7 +811,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       entity: definition.name,
       initial: definition.initial,
       initialValues: definition.initialValues,
-      states: definition.states,
+      states: statesOf(definition),
       at: this.#now(),
       cause: { type: "init", id: trigger.id as string },
       deps: this.#runtime,
@@ -1233,7 +1235,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     let fired = 0;
 
     for (const definition of this.#definitions.values()) {
-      const byState = definition.constraints?.temporalByState;
+      const byState = constraintsOf(definition)?.temporalByState;
       if (byState === undefined) {
         continue;
       }

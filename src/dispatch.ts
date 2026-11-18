@@ -1,3 +1,4 @@
+import { constraintsOf } from "./compiled";
 import type { ProposedCommit } from "./constraints";
 import { checkConstraints, rejection, violationError } from "./constraints";
 import { resolveErrorHandler } from "./entity";
@@ -602,7 +603,7 @@ function applyConstraints<S extends string, V extends Values>(
     mutatingValues: boolean;
   }
 ): void {
-  const compiled = definition.constraints;
+  const compiled = constraintsOf(definition);
 
   // Entity with no constraints must not pay for a snapshot of an instance nobody inspects
   if (compiled === undefined || !compiled.checksAtCommit) {

@@ -57,6 +57,7 @@ export type {
   ViolationEvent,
 } from "./events";
 export { isTransitionEvent } from "./events";
+export type { FenceReason } from "./fence";
 export type { ParsedKey } from "./key";
 export { buildKey, KEY_SEPARATOR, parseKey } from "./key";
 export type {
@@ -68,6 +69,7 @@ export type {
 export { accountBytes, EVICTION_POLICIES } from "./memory";
 export type { ObservedEdges } from "./observed";
 export { allowFrom, observeEdges } from "./observed";
+export type { Backoff, ExecutionPolicy } from "./policy";
 export type {
   HistoryResult,
   Partiality,
@@ -91,16 +93,16 @@ export type {
   StoreSpec,
 } from "./stack";
 export { createStore, resolveStack } from "./stack";
-export type { NodeId, States } from "./states";
-export { UNKNOWN_NODE } from "./states";
 export type {
   LoadResult,
   ReplayedState,
   ScanCriteria,
   ScanMatch,
   ScanResult,
+  StorageSweep,
   Store,
   StoreCapabilities,
+  StoreCompaction,
   StoreSnapshot,
   StoreUsage,
 } from "./store";
@@ -112,6 +114,7 @@ export {
   scanKeys,
 } from "./store";
 export type {
+  FileModeConfig,
   FileStoreOptions,
   RetentionConfig,
   RetentionPolicy,
@@ -137,9 +140,12 @@ export type {
   InboxEnqueuedEvent,
   InboxRejectedEvent,
   InstanceEvictedEvent,
+  InstanceForgottenEvent,
   InstanceRestoredEvent,
   MemoryAccountedEvent,
   MemoryRefusedEvent,
+  RuntimeClosedEvent,
+  StorageSweptEvent,
   StoreCacheFailedEvent,
   TelemetryEvent,
   TelemetryEventType,
@@ -149,9 +155,11 @@ export type {
 export { TELEMETRY_FALLBACK } from "./telemetry";
 export type {
   AnyEntityDefinition,
+  CloseOptions,
   CommitResult,
   EkmanConfig,
   EntityConfig,
+  EntityConstraints,
   EntityDefinition,
   EntityHandle,
   EntityHandles,
@@ -161,6 +169,11 @@ export type {
   InboxConfig,
   InstanceSnapshot,
   OverflowPolicy,
+  StateConfig,
+  StateEntry,
+  StateGraph,
+  StatePolicyConfig,
+  StorageConfig,
   TemporalConfig,
   Trigger,
   TriggerLike,

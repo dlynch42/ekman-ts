@@ -1,4 +1,5 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
+import { constraintsOf } from "../src/compiled.js";
 import {
   defineEntity,
   resolveErrorHandler,
@@ -128,7 +129,7 @@ describe("defineEntity validation", () => {
       constraints: { temporal: [{ in: "a", within: 10, policy: "warn" }] },
     });
 
-    expect(definition.constraints?.temporal).toHaveLength(1);
+    expect(constraintsOf(definition)?.temporal).toHaveLength(1);
   });
 
   it("rejects a missing initial state", () => {
@@ -223,7 +224,7 @@ describe("defineEntity validation", () => {
 
     // One structure, not two. The constraint reads the entity's own edges rather than a
     // copy of them, which is what stops the two disagreeing.
-    expect(orders.constraints?.transitions?.states).toBe(orders.states);
+    expect(constraintsOf(orders)?.transitions?.states).toBe(orders.states);
     expect(orders.states.allows("a", "b")).toBe(true);
     expect(orders.states.allows("b", "a")).toBe(false);
   });
