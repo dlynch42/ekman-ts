@@ -321,6 +321,25 @@ async function theBoundary(ekman: {
   });
   check("a body over the limit is 413", huge.status === 413, huge.status);
 
+  // Chunked, so it declares no length, and sent to a route that never reads a body. The
+  // limit has to hold there too, and before the sweep runs.
+  const chunked = await fetch(`${base}/ops/sweep`, {
+    method: "POST",
+    headers: OPERATOR,
+    body: new ReadableStream({
+      start(controller) {
+        controller.enqueue(new Uint8Array(2 * BODY_LIMIT));
+        controller.close();
+      },
+    }),
+    duplex: "half",
+  } as RequestInit);
+  check(
+    "and so is a chunked one on a route that reads no body",
+    chunked.status === 413,
+    chunked.status
+  );
+
   // A fresh id and a trigger that is on the list but is not a deploy. It used to start a
   // deployment with nothing in it.
   const early = await call("POST", "/deployments/never-deployed/events", {

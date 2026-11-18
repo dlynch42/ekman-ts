@@ -171,10 +171,9 @@ async function handle(
   const url = new URL(req.url ?? "/", "http://localhost");
   const segments = split(url.pathname);
 
-  // Refused on its declared length, before routing, so the limit holds for every route
-  // and not only the ones that go on to read a body. A body that does not declare its
-  // length is counted as it is read, in `readBody`; a route that never reads one never
-  // buffers it.
+  // Refused on its declared length, before routing and before anything is read. A body
+  // that does not declare its length, which is any chunked one, is counted as it arrives
+  // in `readBody` below.
   if (Number(req.headers["content-length"] ?? 0) > config.maxBodyBytes) {
     // What is still arriving is read and dropped. Closing the socket under a client that
     // is mid-send resets it, and the client then sees a broken connection and no status.
@@ -193,12 +192,16 @@ async function handle(
     }
 
     try {
+      // Read before the route runs, whether or not the route wants it. The limit then
+      // holds on every route, and a body over it is refused before the route has done
+      // anything, where reading on demand let a route that ignores its body act first.
       // biome-ignore lint/performance/noAwaitInLoops: at most one route matches, and this returns immediately after
+      const raw = await readBody(req);
       const reply = await route.handle({
         params,
         query: url.searchParams,
         headers: req.headers,
-        body: () => readJson(req),
+        body: async () => parseJson(raw),
       });
       send(res, reply);
     } catch (error) {
@@ -276,10 +279,8 @@ function readBody(req: IncomingMessage): Promise<Buffer> {
   });
 }
 
-async function readJson(
-  req: IncomingMessage
-): Promise<Record<string, unknown>> {
-  const raw = (await readBody(req)).toString("utf8");
+function parseJson(body: Buffer): Record<string, unknown> {
+  const raw = body.toString("utf8");
   if (raw.trim() === "") {
     return {};
   }
