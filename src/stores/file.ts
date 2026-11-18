@@ -29,7 +29,14 @@ import type {
   StoreSnapshot,
   StoreUsage,
 } from "../store";
-import { EMPTY_SEQ, entityOf, latestSeq, replay, scanKeys } from "../store";
+import {
+  EMPTY_SEQ,
+  entityOf,
+  isAfterSnapshot,
+  latestSeq,
+  replay,
+  scanKeys,
+} from "../store";
 import { conflict } from "./memory";
 
 /** The directory a durable store defaults into, under the calling project's root. */
@@ -869,7 +876,7 @@ export class FileStore implements Store {
   }
 
   /** What this store is holding, and what it is allowed to hold. */
-  get usage(): StoreUsage {
+  usage(): StoreUsage {
     const bytes = this.#attempt("measure its logs", undefined, () =>
       this.#seeded()
     );
@@ -1229,6 +1236,9 @@ export class FileStore implements Store {
         seq: current.seq,
         at: Date.now(),
         enteredAt: current.enteredAt,
+        ...(current.temporal === undefined
+          ? {}
+          : { temporal: current.temporal }),
       } satisfies StoreSnapshot)
     );
     this.#accountSnapshot(key);
@@ -1528,7 +1538,8 @@ export class FileStore implements Store {
   }
 
   /**
-   * Parse whole lines into events, keeping those above `covered`.
+   * Parse whole lines into events, keeping those a snapshot at `covered` does not account
+   * for: every later commit, and anything recorded at that sequence that is not a commit.
    *
    * `startsAt`, when asked for, is given the index into the text of the first line kept,
    * or the text's length when none was.
@@ -1551,7 +1562,7 @@ export class FileStore implements Store {
           key,
           `log for ${JSON.stringify(key)} is corrupt at line ${number + 1}`
         );
-        if (event.seq > covered) {
+        if (isAfterSnapshot(event, covered)) {
           first = Math.min(first, index);
           events.push(event);
         }
@@ -1564,7 +1575,7 @@ export class FileStore implements Store {
   }
 
   /**
-   * The events above a snapshot's sequence, reading no more of the log than it has to.
+   * The events a snapshot does not account for, reading no more of the log than it has to.
    *
    * The first load of a key in this process reads the whole log, which is also what trims
    * a torn tail. It leaves behind where the events it kept begin, and later loads start

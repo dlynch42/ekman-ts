@@ -74,7 +74,7 @@ not useful, so a call made while one is running returns 0 immediately rather tha
 | `history(key)` | `Promise<HistoryResult>` | The per-key ordered stream, read through the commit authority. Rejects with `UNKNOWN_ENTITY` for an entity that is not registered. |
 | `query(criteria)` | `Promise<QueryResult>` | Instances by entity, state and time in state. Rejects with `UNKNOWN_ENTITY` for an entity that is not registered. |
 | `forget(key)` | `Promise<void>` | Delete an instance outright, from memory and every store layer. Rejects with `UNKNOWN_ENTITY` for an entity that is not registered. |
-| `sweep()` | `Promise<number>` | Evaluate every time-in-state constraint once and deliver whatever escalations are due. Returns how many fired. |
+| `sweep()` | `Promise<number>` | Evaluate every time-in-state constraint once, for resident instances and for those a store holds, and deliver whatever escalations are due. Returns how many fired. |
 | `sweepStorage()` | `Promise<StorageSweep>` | Run the store's retention pass. Returns `{ logs, reclaimed, overBudget }`. |
 | `close(options?)` | `Promise<void>` | Refuse new triggers, let in-flight work land up to `timeoutMs` (30 seconds by default), then close the store layers. See [below](#shutting-down). |
 | `define(definition)` | `EntityHandle` | Register an already-defined entity after construction. |
@@ -86,7 +86,8 @@ not useful, so a call made while one is running returns 0 immediately rather tha
 
 ### `forget` is refused while a key is busy
 
-`forget` raises `KEY_BUSY` while a handler is in flight. A commit landing into a key that had
+`forget` raises `KEY_BUSY` while a handler is in flight, or while a time-in-state sweep is
+loading the instance and reading its bounds. A commit landing into a key that had
 just been deleted would resurrect it at a sequence nothing accounts for, and the fence cannot
 help, because an attempt already writing has sealed its token. Refusing is the honest answer, and
 a caller that wants to wait can retry.
@@ -151,8 +152,9 @@ process.on("SIGTERM", async () => {
 1. It stops accepting triggers. From this point `send()` rejects with `RUNTIME_CLOSED`, `post()`
    reports the same error through `onUnhandled`, and no sweep runs.
 2. It waits for handlers that are already running to finish and commit, for refusals and
-   violations still on their way to the store, and for a `forget()` or a storage sweep that had
-   already begun. `forget()` called after this point rejects with `RUNTIME_CLOSED`. A retry that is waiting out its backoff is not
+   violations still on their way to the store, and for a `forget()`, a storage sweep or a
+   time-in-state sweep that had already begun. A time-in-state sweep loads nothing more from
+   this point. `forget()` called after this point rejects with `RUNTIME_CLOSED`. A retry that is waiting out its backoff is not
    started: its sender receives `RUNTIME_CLOSED`.
 3. It closes the store layers.
 

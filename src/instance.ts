@@ -19,8 +19,9 @@ import { assertCommittable, CommitToken, fenceViolation } from "./fence";
 import { Inbox } from "./inbox";
 import { accountValueBytes, byteLength } from "./memory";
 import type { NodeId, States } from "./states";
-import type { ReplayedState, Store, StoreSnapshot } from "./store";
+import type { LoadResult, ReplayedState, Store, StoreSnapshot } from "./store";
 import { EMPTY_SEQ, replay } from "./store";
+import { LatchFold } from "./temporal";
 import type { InstanceSnapshot, Values } from "./types";
 import { freezeValues } from "./values";
 
@@ -83,24 +84,20 @@ export class InstanceRecord<
   readonly #states: States;
 
   /**
-   * Temporal constraints that have already fired for the current state.
+   * What this instance's time-in-state bounds have said about its current stay.
    *
-   * Cleared on every state change, so a constraint fires once per entry rather than on
-   * every sweep for as long as the instance sits there. Without this an interval sweep
-   * over one stuck instance produces an unbounded stream of identical escalations.
-   */
-  readonly #firedTemporal = new Set<string>();
-
-  /**
-   * Temporal constraints whose escalation was raised and turned away for a reason that
-   * passes, by name, with the id of the trigger that was raised.
+   * Kept by the same fold a replay uses, fed every event this record writes, so what is
+   * resident and what the stream would rebuild are the same answer at every moment. That
+   * matters at eviction: the snapshot is taken when the key goes idle, which is before
+   * the sweep that raised an escalation has heard how it ended.
    *
-   * The violation is already in the stream by then, so the retry on a later sweep reuses
-   * the id rather than recording a second one, and the commit that finally answers it
-   * carries the cause the violation named. Cleared with `#firedTemporal`.
+   * Cleared on every move, so a bound fires once per stay rather than on every sweep for
+   * as long as the instance sits there.
    */
-  readonly #undeliveredTemporal = new Map<string, string>();
+  readonly #temporal = new LatchFold();
   #stateEntry = 0;
+  /** How many callers are holding this record resident. See `pin`. */
+  #pins = 0;
 
   /**
    * Whether this record still has to be reconciled with the store.
@@ -160,6 +157,11 @@ export class InstanceRecord<
     deps: RuntimeDeps;
     /** Called when this key goes idle, which is when eviction may consider it. */
     onIdle?: () => void;
+    /**
+     * Load the key if the store holds it, and do not create it if the store does not.
+     * For a reader such as a sweep, which must never bring an instance into being.
+     */
+    loadOnly?: boolean;
   }) {
     this.key = args.key;
     this.entity = args.entity;
@@ -202,6 +204,7 @@ export class InstanceRecord<
       initialValues: args.initialValues,
       at: args.at,
       cause: args.cause,
+      loadOnly: args.loadOnly === true,
     };
   }
 
@@ -296,7 +299,7 @@ export class InstanceRecord<
 
   /** Whether a temporal constraint has already fired since this state was entered. */
   hasFired(constraint: string): boolean {
-    return this.#firedTemporal.has(constraint);
+    return this.#temporal.hasFired(constraint);
   }
 
   /**
@@ -312,31 +315,37 @@ export class InstanceRecord<
     return this.#stateEntry;
   }
 
-  /** Record that a constraint fired, unless the entry it fired for is no longer current. */
+  /**
+   * Record that a constraint fired, unless the entry it fired for is no longer current.
+   *
+   * For an outcome the stream does not show. One it does show, a commit or a recorded
+   * refusal, has settled the constraint already.
+   */
   markFired(constraint: string, entry: number): void {
-    if (entry !== this.#stateEntry) {
-      return;
+    if (entry === this.#stateEntry) {
+      this.#temporal.fire(constraint);
     }
-    this.#firedTemporal.add(constraint);
-    this.#undeliveredTemporal.delete(constraint);
   }
 
   /** The trigger id of an escalation still owed to this constraint, if one was turned away. */
   undelivered(constraint: string): string | undefined {
-    return this.#undeliveredTemporal.get(constraint);
+    return this.#temporal.owed(constraint)?.id;
   }
 
-  /** Record an escalation as owed, unless the entry it was raised for is no longer current. */
-  markUndelivered(constraint: string, triggerId: string, entry: number): void {
-    if (entry === this.#stateEntry) {
-      this.#undeliveredTemporal.set(constraint, triggerId);
-    }
+  /**
+   * Whether an escalation with this cause is owed to any constraint on this instance.
+   *
+   * Asked before a fresh escalation is given an id. Trigger ids start over with each
+   * process, so a new one can repeat the id of an escalation a previous process left
+   * owed, and a commit answering either would then settle both.
+   */
+  owes(cause: EventCause): boolean {
+    return this.#temporal.owes(cause);
   }
 
   #rearmTemporal(): void {
     this.#stateEntry += 1;
-    this.#firedTemporal.clear();
-    this.#undeliveredTemporal.clear();
+    this.#temporal.moved();
   }
 
   /**
@@ -344,7 +353,22 @@ export class InstanceRecord<
    * waiting behind it.
    */
   get idle(): boolean {
-    return this.inbox.idle;
+    return this.inbox.idle && this.#pins === 0;
+  }
+
+  /**
+   * Keep this record from being evicted or deleted until the returned function is called.
+   *
+   * For work on a record that happens outside its inbox, where nothing else says the
+   * record is in use: a sweep loading it and evaluating its bounds one after another.
+   * Without this an escalation's own inbox turn ends, the key goes idle, and the record
+   * is released with the rest of its bounds still unread.
+   */
+  pin(): () => void {
+    this.#pins += 1;
+    return () => {
+      this.#pins -= 1;
+    };
   }
 
   /**
@@ -445,6 +469,7 @@ export class InstanceRecord<
 
   /** The picture a store persists so a reload does not replay from the beginning. */
   storeSnapshot(at: number): StoreSnapshot<S, V> {
+    const temporal = this.#temporal.result();
     return Object.freeze({
       key: this.key,
       entity: this.entity,
@@ -453,6 +478,7 @@ export class InstanceRecord<
       seq: this.#seq,
       enteredAt: this.#enteredAt,
       at,
+      ...(temporal === undefined ? {} : { temporal }),
     });
   }
 
@@ -541,6 +567,10 @@ export class InstanceRecord<
     if (moved) {
       this.#enteredAt = next.at;
       this.#rearmTemporal();
+    } else {
+      // A commit that answers an escalation settles the bound that raised it, here and
+      // not when the sweep hears back, because the key can be evicted in between.
+      this.#temporal.apply(event as EkmanEvent);
     }
 
     this.#bytes = bytes;
@@ -601,12 +631,18 @@ export class InstanceRecord<
     );
   }
 
-  /** Append a non-commit event: into the stream now, towards the store behind it. */
+  /**
+   * Append a non-commit event: into the stream now, towards the store behind it.
+   *
+   * Not handed to audit sinks. A sink is told what was committed, and a refusal or a
+   * violation changed nothing. Both are in the stream and in telemetry for whoever wants
+   * them.
+   */
   #record(event: EkmanEvent<S, V>): void {
+    this.#temporal.apply(event as EkmanEvent);
     if (this.#retainsStream) {
       this.#keep(event);
     }
-    this.#deps.audit(event);
 
     // Not awaited. Nothing downstream depends on it, and a caller being refused should not
     // wait on a disk write to be told so. Ordering against the next commit is preserved by
@@ -676,6 +712,7 @@ export class InstanceRecord<
         initialValues: this.#initialValues,
         at: this.#enteredAt,
         cause: RELOAD_CAUSE,
+        loadOnly: false,
       };
       this.#pending = pending;
       this.#hydration = this.#hydrating(pending, authority);
@@ -689,6 +726,10 @@ export class InstanceRecord<
     ) {
       this.#rearmTemporal();
     }
+    // The store's account of the stay is taken in either way. Another runtime can have
+    // answered an escalation without moving the instance, and this one would raise it
+    // again if it kept only what it knew.
+    this.#temporal.merge(current.temporal);
 
     this.#setState(current.state);
     this.#values = freezeValues(current.values);
@@ -706,7 +747,7 @@ export class InstanceRecord<
         at: current.enteredAt,
         cause: RELOAD_CAUSE,
         from: loaded.snapshot === undefined ? "replay" : "snapshot",
-        replayed: loaded.events.length,
+        replayed: replayedCount(loaded),
       })
     );
   }
@@ -719,6 +760,15 @@ export class InstanceRecord<
     const current = found.current as ReplayedState<S, V> | undefined;
 
     if (loaded === undefined || current === undefined) {
+      if (pending.loadOnly && this.inbox.idle) {
+        // Nothing stored and nobody waiting to send, so there is no instance to make. The
+        // record stays unloaded for its creator to release. Should a trigger arrive
+        // first, it starts over and initializes the key as it would any other.
+        this.#pending = { ...pending, loadOnly: false };
+        this.#hydration = undefined;
+        return;
+      }
+
       // Genuinely new. Initialization is a commit at sequence 0, and it has to be durable
       // before anything is dispatched against it.
       const event = this.#initEvent(pending.at, pending.cause);
@@ -741,6 +791,8 @@ export class InstanceRecord<
     this.#seq = current.seq;
     this.#enteredAt = current.enteredAt;
     this.#bytes = this.#measure();
+    this.#temporal.moved();
+    this.#temporal.merge(current.temporal);
 
     this.#restored(
       restoredEvent({
@@ -749,7 +801,7 @@ export class InstanceRecord<
         at: pending.at,
         cause: pending.cause,
         from: loaded.snapshot === undefined ? "replay" : "snapshot",
-        replayed: loaded.events.length,
+        replayed: replayedCount(loaded),
       })
     );
 
@@ -864,6 +916,8 @@ interface PendingInit<S extends string, V extends Values> {
   readonly initialValues: Readonly<V>;
   readonly at: number;
   readonly cause: EventCause;
+  /** Whether a key the store does not hold is left alone rather than initialized. */
+  readonly loadOnly: boolean;
 }
 
 /**
@@ -876,6 +930,20 @@ const RELOAD_CAUSE: EventCause = Object.freeze({
   type: "reload",
   id: "store-conflict",
 });
+
+/**
+ * How many events a load replayed on top of its snapshot.
+ *
+ * A refusal or a violation at the snapshot's own sequence comes back with the load and
+ * is not counted: nothing is rebuilt from it.
+ */
+function replayedCount(loaded: LoadResult): number {
+  const { snapshot, events } = loaded;
+  if (snapshot === undefined) {
+    return events.length;
+  }
+  return events.filter((event) => event.seq > snapshot.seq).length;
+}
 
 function ignore(): void {
   // Deliberately empty: this exists to keep the write chain from rejecting.

@@ -91,6 +91,12 @@ instance from one that just came back off disk: the same `send()`, the same resu
 guarantees. The reload appears in the per-key stream as a `restored` event and in telemetry as
 `instance.restored`.
 
+A [time-in-state sweep](./constraints.md#instances-that-are-not-resident) reloads an evicted
+instance too, when it has sat past a bound and is owed an escalation. That load is counted
+against the budget like any other, and the instance is evictable again as soon as it is idle.
+Under `reject` a full budget refuses the load: the sweep reports it through `onUnhandled` and
+tries again on its next pass.
+
 ```
 npm run demo:memory-bound   # 5000 instances inside a 64 KB budget
 ```

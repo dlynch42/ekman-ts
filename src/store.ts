@@ -1,4 +1,6 @@
 import type { EkmanEvent, TransitionEvent } from "./events";
+import type { TemporalLatch } from "./temporal";
+import { LatchFold } from "./temporal";
 import type { Values } from "./types";
 
 /**
@@ -105,6 +107,11 @@ export interface StoreSnapshot<
   readonly enteredAt: number;
   /** When the snapshot was taken. */
   readonly at: number;
+  /**
+   * What the instance's time-in-state bounds had already said about its stay in `state`.
+   * Absent when none had fired, and in snapshots written before this was recorded.
+   */
+  readonly temporal?: TemporalLatch;
 }
 
 /**
@@ -149,13 +156,16 @@ export interface ScanMatch {
   readonly enteredAt: number;
 }
 
+/** A scan criterion a store may be unable to apply. */
+export type ScanFilter = "state" | "olderThan";
+
 export interface ScanResult {
   readonly matches: readonly ScanMatch[];
   /**
    * Criteria this store could not evaluate, named so the runtime can report a partial
    * answer as partial. A store that quietly ignores a filter turns a query into a lie.
    */
-  readonly unsupported: readonly string[];
+  readonly unsupported: readonly ScanFilter[];
   /** False when the answer was truncated, by a limit or by anything else. */
   readonly complete: boolean;
 }
@@ -236,8 +246,13 @@ export interface Store {
    */
   readonly compact?: () => Promise<StoreCompaction>;
 
-  /** What this store is holding, when it accounts for itself. */
-  readonly usage?: StoreUsage;
+  /**
+   * What this store is holding, when it accounts for itself.
+   *
+   * A method, because measuring is work: a store may have to walk what it holds to
+   * answer, and a property that does that on every read hides the cost from its caller.
+   */
+  readonly usage?: () => StoreUsage;
 
   /** Release anything held open. Optional, because a memory store holds nothing. */
   readonly close?: () => Promise<void>;
@@ -247,8 +262,11 @@ export interface Store {
  * Rebuild current state from a load.
  *
  * Shared by every adapter and by the runtime, because "replay" having one meaning is the
- * whole point of the event stream. Only transition events reconstruct: a rejection or a
- * violation records that something happened, not that anything changed.
+ * whole point of the event stream. Only transition events reconstruct state: a rejection
+ * or a violation records that something happened, not that anything changed. Those are
+ * still read for one thing, which is what the instance's time-in-state bounds have already
+ * said about its current stay, so a bound that fired before an eviction or a restart does
+ * not fire again after it.
  */
 export interface ReplayedState<
   S extends string = string,
@@ -258,13 +276,16 @@ export interface ReplayedState<
   readonly values: Readonly<V>;
   readonly seq: number;
   readonly enteredAt: number;
+  /** Absent when no time-in-state bound has fired during the current stay. */
+  readonly temporal?: TemporalLatch;
 }
 
 export function replay<S extends string, V extends Values>(
   loaded: LoadResult<S, V>
 ): ReplayedState<S, V> | undefined {
   const { snapshot } = loaded;
-  let current: ReplayedState<S, V> | undefined =
+  const latch = new LatchFold(snapshot?.temporal);
+  let current: Omit<ReplayedState<S, V>, "temporal"> | undefined =
     snapshot === undefined
       ? undefined
       : {
@@ -275,29 +296,57 @@ export function replay<S extends string, V extends Values>(
         };
 
   for (const event of loaded.events) {
+    // Anything below the sequence reached so far is already accounted for: a commit
+    // folded into the snapshot, or a refusal from a stay in a state that has since ended.
+    if (current !== undefined && event.seq < current.seq) {
+      continue;
+    }
     if (event.type !== "transition") {
+      latch.apply(event);
+      continue;
+    }
+    if (current !== undefined && event.seq === current.seq) {
       continue;
     }
 
     const transition = event as TransitionEvent<S, V>;
-    // Events already folded into the snapshot are skipped rather than reapplied.
-    if (current !== undefined && transition.seq <= current.seq) {
-      continue;
+    // A move restarts time in state; a values-only commit leaves it running.
+    const before = current;
+    const stayed = before !== undefined && transition.from === transition.to;
+    if (stayed) {
+      latch.apply(event);
+    } else {
+      latch.moved();
     }
 
     current = {
       state: transition.to,
       values: transition.values,
       seq: transition.seq,
-      // A move restarts time in state; a values-only commit leaves it running.
-      enteredAt:
-        transition.from === transition.to && current !== undefined
-          ? current.enteredAt
-          : transition.at,
+      enteredAt: stayed ? before.enteredAt : transition.at,
     };
   }
 
-  return current;
+  const temporal = latch.result();
+  if (current === undefined || temporal === undefined) {
+    return current;
+  }
+  return { ...current, temporal };
+}
+
+/**
+ * Whether a load should hand back an event alongside a snapshot at `covered`.
+ *
+ * Every commit up to the snapshot's sequence is folded into it, so those are left out.
+ * A refusal or a violation recorded at that sequence is not: it carries the sequence of
+ * the commit it followed, a snapshot at a sequence a store already holds is ignored, and
+ * so the event is the only record that it happened since.
+ */
+export function isAfterSnapshot(event: EkmanEvent, covered: number): boolean {
+  return (
+    event.seq > covered ||
+    (event.seq === covered && event.type !== "transition")
+  );
 }
 
 /** The sequence a key is at after these events, ignoring everything that is not a commit. */

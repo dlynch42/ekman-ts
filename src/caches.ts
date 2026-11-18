@@ -253,6 +253,7 @@ export class Caches {
       seq: current.seq,
       enteredAt: current.enteredAt,
       at: this.#now(),
+      ...(current.temporal === undefined ? {} : { temporal: current.temporal }),
     });
 
     this.#enqueue(key, () =>

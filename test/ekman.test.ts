@@ -13,6 +13,7 @@ import { fail, stay, transitionTo } from "../src/results";
 import type { Store } from "../src/store";
 import { memoryStore } from "../src/stores/memory";
 import type { TelemetryEvent } from "../src/telemetry";
+import { frozenClock } from "./deps";
 
 const NON_NEGATIVE_INTEGER = /non-negative integer/;
 const NOT_BUILT = /was not built by defineEntity/;
@@ -948,17 +949,6 @@ describe("remaining edges", () => {
     }
   });
 });
-
-/** A clock frozen until something moves it, which is what elapsed time needs. */
-const frozenClock = (start = 0) => {
-  let t = start;
-  return {
-    now: () => t,
-    advance: (ms: number) => {
-      t += ms;
-    },
-  };
-};
 
 const stalling = defineEntity("stalling", {
   initial: "deploying",
@@ -2115,6 +2105,99 @@ describe("values a handler cannot corrupt or commit", () => {
   });
 });
 
+describe("what a handler is told about the attempt it is running", () => {
+  it("is handed its key, its entity and which attempt this is", async () => {
+    const told: { key: string; entity: string; attempt: number }[] = [];
+    const jobs = defineEntity("jobs", {
+      initial: "open",
+      states: {
+        open: (_i, _trigger, ctx) => {
+          told.push({ key: ctx.key, entity: ctx.entity, attempt: ctx.attempt });
+          if (ctx.attempt === 1) {
+            throw new Error("once");
+          }
+          return stay();
+        },
+      },
+    });
+    const ekman = new Ekman({
+      entities: [jobs],
+      execution: { maxAttempts: 2, backoff: { kind: "fixed", delayMs: 0 } },
+    });
+
+    await ekman.entities.jobs.send("1", { type: "run" });
+
+    expect(told).toEqual([
+      { key: "jobs:1", entity: "jobs", attempt: 1 },
+      { key: "jobs:1", entity: "jobs", attempt: 2 },
+    ]);
+    await ekman.close();
+  });
+
+  it("aborts the signal when the attempt runs out of time, and says why", async () => {
+    let reason: unknown;
+    let aborted = false;
+    const jobs = defineEntity("jobs", {
+      initial: "open",
+      states: {
+        open: {
+          timeoutMs: 10,
+          handler: async (_i, _trigger, ctx) => {
+            await new Promise<void>((done) => {
+              ctx.signal.addEventListener("abort", () => done());
+            });
+            ({ aborted, reason } = ctx.signal);
+            return stay();
+          },
+        },
+      },
+    });
+    const ekman = new Ekman({ entities: [jobs] });
+
+    expect(await code(ekman.entities.jobs.send("1", { type: "run" }))).toBe(
+      "HANDLER_TIMEOUT"
+    );
+    // The handler was still running when it was told, which is the point of the signal:
+    // a handler that listens can stop, and one that does not is fenced regardless.
+    expect(aborted).toBe(true);
+    expect(reason).toMatchObject({ code: "HANDLER_TIMEOUT" });
+    expect(ekman.entities.jobs.inspect("1")).toMatchObject({ seq: 0 });
+    await ekman.close();
+  });
+
+  it("is not disturbed by an entity registered while it runs", async () => {
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((done) => {
+      release = done;
+    });
+    const slow = defineEntity("slow", {
+      initial: "open",
+      states: {
+        open: async () => {
+          await held;
+          return transitionTo("done");
+        },
+        done: () => stay(),
+      },
+    });
+    const late = defineEntity("late", {
+      initial: "open",
+      states: { open: () => stay({ seen: true }) },
+    });
+    const ekman = new Ekman({ entities: [slow] });
+
+    const running = ekman.entities.slow.send("1", { type: "go" });
+    const handle = ekman.define(late);
+    expect(await handle.send("1", { type: "go" })).toMatchObject({
+      values: { seen: true },
+    });
+    release();
+
+    expect(await running).toMatchObject({ state: "done", seq: 1 });
+    await ekman.close();
+  });
+});
+
 describe("deciding whether a failure is worth another attempt", () => {
   class Flaky extends Error {
     override name = "Flaky";
@@ -2469,6 +2552,85 @@ describe("audit sinks and the commit path", () => {
 
     await tick();
     expect(seen).toEqual(["transition@0", "transition@1"]);
+    await ekman.close();
+  });
+
+  it("hands a sink commits and nothing else", async () => {
+    const seen: string[] = [];
+    const doors = defineEntity("doors", {
+      initial: "open",
+      triggers: ["close", "open"],
+      states: {
+        open: () => transitionTo("closed"),
+        closed: () => transitionTo("open"),
+      },
+      constraints: {
+        transitions: { policy: "warn", allow: { open: ["closed"] } },
+      },
+    });
+    const ekman = new Ekman({
+      entities: [doors],
+      audit: [
+        {
+          name: "trail",
+          deliver: (event) => {
+            seen.push(`${event.type}@${event.seq}`);
+          },
+        },
+      ],
+    });
+
+    await ekman.entities.doors.send("1", { type: "close" });
+    expect(await code(ekman.entities.doors.send("1", { type: "knock" }))).toBe(
+      "UNKNOWN_TRIGGER"
+    );
+    // Not a declared edge, and only warned about, so it commits with a violation.
+    await ekman.entities.doors.send("1", { type: "open" });
+    await tick();
+
+    const { events } = await ekman.entities.doors.history("1");
+    expect(events.map((event) => `${event.type}@${event.seq}`)).toEqual([
+      "transition@0",
+      "transition@1",
+      "rejected@1",
+      "violation@1",
+      "transition@2",
+    ]);
+    expect(seen).toEqual(["transition@0", "transition@1", "transition@2"]);
+    await ekman.close();
+  });
+
+  it("does not wait for a sink that never answers", async () => {
+    let asked = 0;
+    const ekman = new Ekman({
+      entities: [orders],
+      audit: [
+        {
+          name: "silent",
+          deliver: () => {
+            asked += 1;
+            return new Promise<void>(() => undefined);
+          },
+        },
+      ],
+    });
+
+    const first = await ekman.entities.orders.send("1", {
+      type: "approve",
+      actor: "amy",
+    });
+    await tick();
+    const second = await ekman.entities.orders.send("2", {
+      type: "approve",
+      actor: "amy",
+    });
+
+    // Both commits landed with the first delivery still outstanding, and the sink went on
+    // being offered events it never acknowledged.
+    expect(first).toMatchObject({ seq: 1 });
+    expect(second).toMatchObject({ seq: 1 });
+    await tick();
+    expect(asked).toBe(4);
     await ekman.close();
   });
 

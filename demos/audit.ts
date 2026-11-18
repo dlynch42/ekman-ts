@@ -13,7 +13,8 @@
  *
  * Three sinks below, and only one of them works. One throws every time. One accepts the
  * event and never comes back at all, which is the failure mode a timeout-free `await`
- * turns into a hung process. One is merely slow. The commits do not care about any of it.
+ * turns into a hung process. One is merely slow: it completes nothing until every commit
+ * has landed. The commits do not care about any of it.
  */
 
 import { rmSync } from "node:fs";
@@ -24,7 +25,18 @@ import { banner, check, delay, row, stream } from "./lib";
 
 /** Enough commits that the latency claim is a distribution rather than an anecdote. */
 const COMMITS = 200;
-const ARCHIVE_MS = 250;
+
+/**
+ * Holds the slow sink shut until the commits are done.
+ *
+ * A fixed delay would do for a story and not for a check: "the commits finished before a
+ * 250ms sink did" is a claim about how fast this machine is. Held shut, the sink cannot
+ * finish first on any machine, so commits that land anyway did not wait for it.
+ */
+let release: () => void = () => undefined;
+const held = new Promise<void>((done) => {
+  release = done;
+});
 
 const ledger = defineEntity("ledger", {
   initial: "open",
@@ -66,11 +78,11 @@ const kafka: AuditSink = {
   },
 };
 
-/** Works, but slowly. The commits must not be paying for this. */
+/** Works, but only once it is let through. The commits must not be waiting for that. */
 const archive: AuditSink = {
   name: "s3-archive",
   deliver: async (event: EkmanEvent) => {
-    await delay(ARCHIVE_MS);
+    await held;
     archived.push({ seq: event.seq, at: Date.now() });
   },
 };
@@ -115,18 +127,18 @@ async function main(): Promise<void> {
   row("total", `${committedBy - started}ms`);
   row("median commit", `${median}ms`);
   row("slowest commit", `${slowest}ms`);
-  row("the slow sink", `${ARCHIVE_MS}ms`, "per event, and it is one of three");
+  row(
+    "the slow sink",
+    "held shut",
+    "it completes nothing until it is released"
+  );
   row("its deliveries so far", archived.length, "out of every commit above");
 
-  // Every commit finished before the slow sink completed even one delivery. A commit path
-  // that waited on its sinks could not produce this ordering.
+  // Every commit finished while the slow sink was still held shut. A commit path that
+  // waited on its sinks would never have got here: it would still be waiting.
   check(
     archived.length === 0,
-    `the commits waited for the slow sink: ${archived.length} deliveries already done`
-  );
-  check(
-    slowest < ARCHIVE_MS,
-    `a single commit took ${slowest}ms, which is as slow as the sink it should not be waiting for`
+    `the slow sink completed ${archived.length} deliveries before it was released`
   );
 
   banner("What the sinks did with those events");
@@ -197,11 +209,16 @@ async function main(): Promise<void> {
       "  of it, and this is what that distinction is worth on the day a sink goes down."
   );
 
-  // Waiting for the slow sink here only to show it does eventually arrive, which is what
+  // Released only now, to show that what was held does arrive, which is what
   // at-least-once means once the pressure is off the commit path.
-  await waitFor(() => archived.length === events, ARCHIVE_MS * 4);
+  release();
+  await waitFor(() => archived.length === events, 2000);
   console.log(
-    `  (a moment later, s3-archive has caught up: ${archived.length} of ${events} delivered)`
+    `  (released, s3-archive has caught up: ${archived.length} of ${events} delivered)`
+  );
+  check(
+    archived.length === events,
+    `the slow sink was handed ${events} events and delivered ${archived.length}`
   );
 
   console.log(

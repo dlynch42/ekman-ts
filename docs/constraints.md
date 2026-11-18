@@ -173,6 +173,35 @@ sweep, and its violation is recorded only once. One the handler refuses is not r
 Evaluate on a schedule with `temporal: { sweepMs }` on the runtime, or call `await ekman.sweep()`
 yourself. Without either, a bound is only checked when something asks.
 
+### Instances that are not resident
+
+With a store configured, a bound holds for every instance of the entity, resident or not. An
+instance that is stuck is usually idle, and an idle instance is the first one a
+[memory budget](./memory.md) releases; after a restart nothing is resident at all. So each
+sweep also asks the store which instances have sat in a watched state past its bound, loads
+each one, and escalates it as it would a resident one. The instance is released again once it
+is idle.
+
+A bound fires once per stay in its state, and that survives eviction and restarts. It is
+worked out from the instance's own stream: a violation under `warn` is the whole of what there
+was to say, and one under `reject` is owed its escalation until the stream shows that trigger
+committing or being refused for good. An escalation that was turned away for a reason that
+passes, including a runtime that was closing, is delivered by whichever runtime sweeps next,
+under the same trigger id, and no second violation is recorded.
+
+What it costs: one store scan per entity that declares a bound, per sweep. The built-in
+stores answer a scan by reading every instance of the entity that is not resident, so on a
+large store set `sweepMs` with that in mind. An instance that has been told everything its
+bounds have to say is not loaded again until it commits or another bound comes due.
+
+An instance the sweep has loaded stays resident until all its bounds have been read, whatever
+the memory budget says, and cannot be deleted in that time: `forget` raises `KEY_BUSY`. A store
+that answers a scan with part of the answer is reported through `onUnhandled`, because the
+instances it left out were not swept.
+
+Without a store there is nothing to scan, and a bound covers the resident instances, which
+in a memory-only runtime is all of them.
+
 ```
 npm run demo:stuck    # "stuck in deploying for more than five minutes", as query and as constraint
 ```

@@ -1,6 +1,6 @@
 import { assertKnownKeys } from "./config";
 import { EkmanError } from "./errors";
-import type { EkmanEvent } from "./events";
+import type { TransitionEvent } from "./events";
 
 /**
  * Audit sinks: copies of committed events, delivered out of band.
@@ -15,8 +15,13 @@ import type { EkmanEvent } from "./events";
  */
 export interface AuditSink {
   readonly name: string;
-  /** Deliver one committed event. May reject; the runtime retries and then reports. */
-  deliver: (event: EkmanEvent) => void | Promise<void>;
+  /**
+   * Deliver one committed event. May reject; the runtime retries and then reports.
+   *
+   * Commits only: the initialization of an instance and every transition after it. A
+   * refused trigger or a constraint violation changed nothing and is not delivered.
+   */
+  deliver: (event: TransitionEvent) => void | Promise<void>;
   /**
    * How many delivery attempts this sink gets. Defaults to 3.
    *
@@ -74,7 +79,7 @@ export function assertAuditSink(sink: AuditSink): void {
  */
 export async function deliverTo(
   sink: AuditSink,
-  event: EkmanEvent
+  event: TransitionEvent
 ): Promise<Error | undefined> {
   const attempts = sink.maxAttempts ?? DEFAULT_AUDIT_ATTEMPTS;
   let last: Error | undefined;
