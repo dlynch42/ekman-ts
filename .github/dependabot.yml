@@ -1,8 +1,7 @@
 version: 2
 updates:
-  # Actions only. Ekman ships zero runtime dependencies, and its devDependencies
-  # are few enough to update deliberately; pinned action versions are the thing
-  # that goes stale without anyone noticing.
+  # Actions are pinned to commit SHAs, with the release tag in a trailing comment.
+  # This is what moves the pin and keeps the comment true.
   - package-ecosystem: "github-actions"
     directory: "/"
     target-branch: "release"
@@ -12,3 +11,22 @@ updates:
     open-pull-requests-limit: 10
     schedule:
       interval: "monthly"
+
+  # Ekman ships zero runtime dependencies, so everything here is a development
+  # dependency. They still run in CI and in the release gate, and an advisory
+  # against one is not visible unless something is watching. Minor and patch
+  # updates arrive as one PR; a major gets its own.
+  - package-ecosystem: "npm"
+    directory: "/"
+    target-branch: "release"
+    labels:
+      - "dependencies"
+      - "patch"
+    open-pull-requests-limit: 10
+    schedule:
+      interval: "monthly"
+    groups:
+      dev-minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"

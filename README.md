@@ -40,7 +40,7 @@ entrypoint. A runtime you embed, not a platform you operate.
 npm install ekman
 ```
 
-Node 20 or newer. Zero runtime dependencies. ESM and CommonJS entry points are both shipped and
+Node 22.12 or newer. Zero runtime dependencies. ESM and CommonJS entry points are both shipped and
 TypeScript types are bundled, so `import` from an ESM project and `require` from a CommonJS one
 both work with no configuration on your side.
 
@@ -419,7 +419,7 @@ Reports pass or fail per scenario per level, and exits non-zero if a claimed lev
 
 | | |
 |---|---|
-| Node | 20 or newer |
+| Node | 22.12 or newer |
 | Module formats | ESM (`import`) and CommonJS (`require`), both shipped |
 | TypeScript | Types bundled. Resolves under `NodeNext`, `Bundler` and `Node16`. |
 | Runtime dependencies | None |

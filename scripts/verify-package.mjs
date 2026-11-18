@@ -57,8 +57,8 @@ const run = (command, args, options = {}) =>
 
 step("Packing");
 
-// `prepublishOnly` runs only on publish, never on pack, so this packs whatever
-// dist/ currently holds. Build before calling this script.
+// Packing does not build, so this packs whatever dist/ currently holds. Build
+// before calling this script.
 const packOutput = run("npm", ["pack", "--json", "--pack-destination", ROOT], {
   cwd: ROOT,
 });

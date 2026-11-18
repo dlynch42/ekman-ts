@@ -152,7 +152,9 @@ async function execute(scenario: Scenario, failures: string[]): Promise<void> {
         `expected building to fail with ${expectBuildError.code}, but it succeeded`
       );
     } catch (error) {
-      const { code } = error as EkmanError;
+      // Whatever was thrown, which need not be an EkmanError. The cast is how `code` gets
+      // read at all, so its type says string where the value can be undefined.
+      const code: string | undefined = (error as EkmanError).code;
       if (code !== expectBuildError.code) {
         failures.push(
           `expected build error ${expectBuildError.code}, got ${code ?? "a non-Ekman error"}: ${(error as Error).message}`
