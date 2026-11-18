@@ -614,13 +614,18 @@ export class InstanceRecord<
     );
   }
 
-  /** Append a non-commit event: into the stream now, towards the store behind it. */
+  /**
+   * Append a non-commit event: into the stream now, towards the store behind it.
+   *
+   * Not handed to audit sinks. A sink is told what was committed, and a refusal or a
+   * violation changed nothing. Both are in the stream and in telemetry for whoever wants
+   * them.
+   */
   #record(event: EkmanEvent<S, V>): void {
     this.#temporal.apply(event as EkmanEvent);
     if (this.#retainsStream) {
       this.#keep(event);
     }
-    this.#deps.audit(event);
 
     // Not awaited. Nothing downstream depends on it, and a caller being refused should not
     // wait on a disk write to be told so. Ordering against the next commit is preserved by

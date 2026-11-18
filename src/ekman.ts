@@ -8,7 +8,7 @@ import type { CompiledTemporal, TemporalTrigger } from "./constraints";
 import type { DispatchDeps } from "./dispatch";
 import { dispatch } from "./dispatch";
 import { EkmanError } from "./errors";
-import type { EkmanEvent, EventCause } from "./events";
+import type { EkmanEvent, EventCause, TransitionEvent } from "./events";
 import { InstanceRecord } from "./instance";
 import { parseKey } from "./key";
 import type { ResolvedMemoryConfig } from "./memory";
@@ -1127,13 +1127,13 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * sink's `deliver` runs synchronously up to its first await, so started here it would
    * make every commit wait for however long that takes.
    */
-  #fanOut(event: EkmanEvent): void {
+  #fanOut(event: TransitionEvent): void {
     for (const sink of this.#audit) {
       setImmediate(() => this.#deliver(sink, event));
     }
   }
 
-  #deliver(sink: AuditSink, event: EkmanEvent): void {
+  #deliver(sink: AuditSink, event: TransitionEvent): void {
     deliverTo(sink, event)
       .then((failure) => {
         if (failure !== undefined) {

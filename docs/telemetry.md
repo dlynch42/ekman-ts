@@ -91,7 +91,10 @@ const ekman = new Ekman({
 });
 ```
 
-An audit sink receives a copy of every committed event, out of band.
+An audit sink receives a copy of every committed event, out of band. That is the
+initialization of an instance and every transition after it. A refused trigger or a constraint
+violation is not a commit and is not delivered: those are in the instance's
+[history](./queries.md) and in the telemetry events above.
 
 **Audit sinks never gate a commit.** Delivery is asynchronous and at-least-once, and a sink has
 no veto. A sink that throws, hangs forever, or is merely slow cannot delay or fail a commit, and

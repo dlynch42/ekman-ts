@@ -693,7 +693,8 @@ was read back through the store without the assertion having to know it happened
 accounting, not an exact figure, because the exact number depends on key names.
 
 `audit` lists what each sink received, as `<type>@<seq>`, keyed by sink name. Initialization
-is a commit, so it appears as `transition@0`.
+is a commit, so it appears as `transition@0`. A sink receives commits only, so a refused
+trigger or a violation never appears here, though both are in `then.events`.
 
 ### `then.queries`
 

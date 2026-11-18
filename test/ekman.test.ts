@@ -2462,6 +2462,51 @@ describe("audit sinks and the commit path", () => {
     await ekman.close();
   });
 
+  it("hands a sink commits and nothing else", async () => {
+    const seen: string[] = [];
+    const doors = defineEntity("doors", {
+      initial: "open",
+      triggers: ["close", "open"],
+      states: {
+        open: () => transitionTo("closed"),
+        closed: () => transitionTo("open"),
+      },
+      constraints: {
+        transitions: { policy: "warn", allow: { open: ["closed"] } },
+      },
+    });
+    const ekman = new Ekman({
+      entities: [doors],
+      audit: [
+        {
+          name: "trail",
+          deliver: (event) => {
+            seen.push(`${event.type}@${event.seq}`);
+          },
+        },
+      ],
+    });
+
+    await ekman.entities.doors.send("1", { type: "close" });
+    expect(await code(ekman.entities.doors.send("1", { type: "knock" }))).toBe(
+      "UNKNOWN_TRIGGER"
+    );
+    // Not a declared edge, and only warned about, so it commits with a violation.
+    await ekman.entities.doors.send("1", { type: "open" });
+    await tick();
+
+    const { events } = await ekman.entities.doors.history("1");
+    expect(events.map((event) => `${event.type}@${event.seq}`)).toEqual([
+      "transition@0",
+      "transition@1",
+      "rejected@1",
+      "violation@1",
+      "transition@2",
+    ]);
+    expect(seen).toEqual(["transition@0", "transition@1", "transition@2"]);
+    await ekman.close();
+  });
+
   it("is not slowed by a sink that blocks", async () => {
     let blocked = 0;
     const ekman = new Ekman({

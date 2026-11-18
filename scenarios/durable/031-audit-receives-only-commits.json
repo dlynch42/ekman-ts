@@ -1,0 +1,123 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "durable/031-audit-receives-only-commits",
+  "name": "an audit sink is told what was committed and nothing else: a refused trigger and a warned violation are in the stream and are not delivered",
+  "level": "durable",
+  "given": {
+    "runtime": {
+      "store": [
+        {
+          "kind": "file"
+        }
+      ],
+      "audit": [
+        {
+          "name": "trail"
+        }
+      ]
+    },
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "pending",
+        "triggers": ["ship"],
+        "constraints": {
+          "transitions": {
+            "policy": "warn",
+            "allow": {
+              "pending": ["approved"]
+            }
+          }
+        },
+        "states": [
+          {
+            "state": "pending",
+            "cases": [
+              {
+                "when": {
+                  "trigger": "ship"
+                },
+                "do": {
+                  "result": "transitionTo",
+                  "to": "shipped"
+                }
+              }
+            ]
+          },
+          {
+            "state": "approved",
+            "else": {
+              "result": "stay"
+            }
+          },
+          {
+            "state": "shipped",
+            "else": {
+              "result": "stay"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "orders:1",
+        "trigger": {
+          "type": "sneak"
+        }
+      }
+    },
+    {
+      "send": {
+        "key": "orders:1",
+        "trigger": {
+          "type": "ship"
+        }
+      }
+    }
+  ],
+  "then": {
+    "sends": [
+      {
+        "outcome": "rejected",
+        "code": "UNKNOWN_TRIGGER"
+      },
+      {
+        "outcome": "committed",
+        "state": "shipped",
+        "seq": 1
+      }
+    ],
+    "events": {
+      "orders:1": [
+        {
+          "type": "transition",
+          "from": null,
+          "to": "pending",
+          "seq": 0
+        },
+        {
+          "type": "rejected",
+          "seq": 0,
+          "code": "UNKNOWN_TRIGGER"
+        },
+        {
+          "type": "violation",
+          "seq": 0,
+          "policy": "warn"
+        },
+        {
+          "type": "transition",
+          "from": "pending",
+          "to": "shipped",
+          "seq": 1
+        }
+      ]
+    },
+    "audit": {
+      "trail": ["transition@0", "transition@1"]
+    }
+  }
+}
