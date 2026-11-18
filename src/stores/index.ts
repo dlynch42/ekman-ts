@@ -13,6 +13,7 @@ export type {
   LoadResult,
   ReplayedState,
   ScanCriteria,
+  ScanFilter,
   ScanMatch,
   ScanResult,
   StorageSweep,

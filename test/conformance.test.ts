@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { runScenario } from "../runner/run";
 import type { Scenario } from "../runner/scenario";
@@ -7,6 +9,7 @@ import {
   loadScenarios,
   RUN_LEVELS,
 } from "../runner/scenario";
+import { SPEC_VERSION } from "../src/index";
 
 const scenarios = loadScenarios();
 
@@ -29,6 +32,19 @@ function corrupt(id: string, damage: (scenario: any) => void): Scenario {
   damage(copy);
   return copy;
 }
+
+describe("the contract version", () => {
+  it("is the one the README says this package targets", () => {
+    const readme = readFileSync(
+      fileURLToPath(new URL("../README.md", import.meta.url)),
+      "utf8"
+    );
+
+    expect(SPEC_VERSION).toBe("0.1");
+    expect(readme).toContain(`spec ${SPEC_VERSION}**`);
+    expect(readme).toContain("`SPEC_VERSION`");
+  });
+});
 
 describe("conformance suite", () => {
   it("finds scenarios", () => {

@@ -1607,6 +1607,148 @@ const shape = (events: readonly EkmanEvent[]): string[] =>
 const violations = (events: readonly EkmanEvent[]): EkmanEvent[] =>
   events.filter((event) => event.type === "violation");
 
+describe("what a reload brings back", () => {
+  const parcels = defineEntity("parcels", {
+    initial: "packed",
+    states: {
+      packed: (_i, trigger) =>
+        trigger.type === "ship"
+          ? transitionTo("shipped", { carrier: "post", stops: [1, 2] })
+          : stay(),
+      shipped: (parcel, trigger) =>
+        trigger.type === "scan" ? stay({ ...parcel.values, scans: 1 }) : stay(),
+    },
+  });
+
+  /** State, values, sequence and time in state, as a caller can see them. */
+  async function picture(ekman: Ekman<[typeof parcels]>) {
+    const { instances } = await ekman.query({ entity: "parcels" });
+    return {
+      inspected: ekman.entities.parcels.inspect("a"),
+      row: instances.map(({ resident: _resident, ...rest }) => rest),
+    };
+  }
+
+  async function shipped(
+    ekman: Ekman<[typeof parcels]>,
+    clock: ReturnType<typeof frozenClock>
+  ) {
+    await ekman.entities.parcels.send("a", { type: "pack" });
+    clock.advance(1000);
+    await ekman.entities.parcels.send("a", { type: "ship" });
+    clock.advance(1000);
+    // A values-only commit, so time in state still runs from the move.
+    await ekman.entities.parcels.send("a", { type: "scan" });
+    clock.advance(1000);
+  }
+
+  it("is the same instance after an eviction, field for field", async () => {
+    const clock = frozenClock();
+    const store = memoryStore();
+    const resident = new Ekman({ entities: [parcels], store, now: clock.now });
+    await shipped(resident, clock);
+    const before = await picture(resident);
+    await resident.close();
+
+    const evicting = new Ekman({
+      entities: [parcels],
+      store,
+      memory: { maxBytes: 0 },
+      now: clock.now,
+    });
+    // Loaded, dispatched, evicted with a snapshot, then loaded once more.
+    await evicting.entities.parcels.send("a", { type: "noop" });
+    await evicting.entities.parcels.send("a", { type: "noop" });
+    await evicting.close();
+
+    const after = new Ekman({ entities: [parcels], store, now: clock.now });
+    const reloaded = await after.entities.parcels.send("a", { type: "noop" });
+    expect(reloaded).toMatchObject({ state: "shipped", seq: 6 });
+    const seen = await picture(after);
+
+    expect(seen.inspected).toMatchObject({
+      state: "shipped",
+      values: before.inspected?.values,
+    });
+    expect(seen.row).toEqual([
+      { ...before.row[0], seq: 6, enteredAt: 1000, ageMs: 2000 },
+    ]);
+    await after.close();
+  });
+
+  it("is the same instance after a restart over a file store", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ekman-reload-"));
+    const clock = frozenClock();
+    const first = new Ekman({
+      entities: [parcels],
+      store: fileStore(dir),
+      now: clock.now,
+    });
+    await shipped(first, clock);
+    const before = await picture(first);
+    await first.close();
+
+    const second = new Ekman({
+      entities: [parcels],
+      store: fileStore(dir),
+      now: clock.now,
+    });
+    // Not resident yet, so this is the stored row alone.
+    expect((await picture(second)).row).toEqual(before.row);
+
+    await second.entities.parcels.send("a", { type: "noop" });
+    const after = await picture(second);
+    // The trigger that loaded it committed once, and nothing else moved.
+    expect(after.inspected).toEqual({ ...before.inspected, seq: 4 });
+    expect(after.row).toEqual([{ ...before.row[0], seq: 4 }]);
+    await second.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("survives a compaction and then a restart, at the cost of history alone", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ekman-compacted-"));
+    const options = {
+      retention: { perLogBytes: 0, totalBytes: 1, policy: "compact" as const },
+    };
+    const clock = frozenClock();
+    const first = new Ekman({
+      entities: [parcels],
+      store: fileStore(dir, options),
+      now: clock.now,
+    });
+    await shipped(first, clock);
+    const before = await picture(first);
+    expect((await first.sweepStorage()).logs).toBe(1);
+    await first.close();
+
+    const second = new Ekman({
+      entities: [parcels],
+      store: fileStore(dir, options),
+      now: clock.now,
+    });
+    await second.entities.parcels.send("a", { type: "noop" });
+    const after = await picture(second);
+
+    // The trigger that loaded it committed once, and nothing else moved.
+    expect(after.inspected).toEqual({ ...before.inspected, seq: 4 });
+    expect(after.row).toEqual([{ ...before.row[0], seq: 4 }]);
+    const stuck = await second.query({
+      entity: "parcels",
+      state: "shipped",
+      olderThan: 2000,
+    });
+    expect(stuck.instances.map((instance) => instance.key)).toEqual([
+      "parcels:a",
+    ]);
+
+    const history = await second.entities.parcels.history("a");
+    expect(history.complete).toBe(false);
+    expect(history.reasons).toEqual(["compacted"]);
+    await second.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
 describe("time-in-state bounds for instances a store holds", () => {
   it("escalates an instance that was evicted, by loading it", async () => {
     const clock = frozenClock();

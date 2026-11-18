@@ -1,7 +1,7 @@
 import type { EkmanError } from "../errors";
 import type { EkmanEvent } from "../events";
 import type { Store } from "../store";
-import { EMPTY_SEQ } from "../store";
+import { EMPTY_SEQ, replay } from "../store";
 
 /** The assertions the contract makes. Vitest's and Jest's `expect` both satisfy this. */
 export interface ContractMatchers {
@@ -78,6 +78,18 @@ export function storeContract(
       reason: "nope",
     });
 
+  const fired = (key: string, seq: number): EkmanEvent =>
+    Object.freeze({
+      type: "violation" as const,
+      key,
+      seq,
+      at: seq * 1000,
+      cause: { type: "constraint.temporal", id: `f${seq}` },
+      constraint: { kind: "temporal" as const, name: "too-slow" },
+      policy: "warn" as const,
+      reason: "too long",
+    });
+
   const code = async (promise: Promise<unknown>): Promise<string> => {
     try {
       await promise;
@@ -141,6 +153,27 @@ export function storeContract(
     const loaded = await store.load("orders:1");
     expect(loaded?.seq).toBe(0);
     expect(loaded?.events).toHaveLength(1);
+  });
+
+  it(`${name}: lets exactly one of two appends at the same sequence through`, async () => {
+    const store = make();
+    await store.append("orders:1", commit("orders:1", 0, null, "a"), EMPTY_SEQ);
+
+    // Started together, before either has answered. Two writers that both read sequence
+    // 0 is the race a conditional append exists to settle.
+    const outcomes = await Promise.allSettled([
+      store.append("orders:1", commit("orders:1", 1, "a", "b"), 0),
+      store.append("orders:1", commit("orders:1", 1, "a", "c"), 0),
+    ]);
+
+    expect(outcomes.map((outcome) => outcome.status).sort()).toEqual([
+      "fulfilled",
+      "rejected",
+    ]);
+    const refused = outcomes.find((outcome) => outcome.status === "rejected");
+    expect(refused).toMatchObject({ reason: { code: "STORE_CONFLICT" } });
+    expect((await store.load("orders:1"))?.seq).toBe(1);
+    expect(await store.read("orders:1")).toHaveLength(2);
   });
 
   it(`${name}: refuses a first append when the key already exists`, async () => {
@@ -254,6 +287,86 @@ export function storeContract(
     expect(loaded?.snapshot?.seq).toBe(1);
     expect(loaded?.events).toHaveLength(1);
     expect(loaded?.seq).toBe(2);
+  });
+
+  it(`${name}: loads what was refused or violated at the snapshot's own sequence`, async () => {
+    const store = make();
+    await store.append("orders:1", commit("orders:1", 0, null, "a"), EMPTY_SEQ);
+    await store.append("orders:1", commit("orders:1", 1, "a", "b"), 0);
+    await store.append("orders:1", fired("orders:1", 1), 1);
+    await store.snapshot("orders:1", {
+      key: "orders:1",
+      entity: "orders",
+      state: "b",
+      values: { n: 1 },
+      seq: 1,
+      enteredAt: 1000,
+      at: 1000,
+    });
+    await store.append("orders:1", violation("orders:1", 1), 1);
+
+    // Neither advanced the sequence, so no later snapshot can account for them. They are
+    // the only record that a time-in-state bound already fired, and a load that left them
+    // out would let it fire again.
+    const loaded = await store.load("orders:1");
+    expect(loaded?.events.map((event) => event.type)).toEqual([
+      "violation",
+      "violation",
+    ]);
+    expect(loaded?.seq).toBe(1);
+    expect(replay(loaded as NonNullable<typeof loaded>)?.temporal).toEqual({
+      fired: ["too-slow"],
+      owed: {},
+    });
+  });
+
+  it(`${name}: hands back what a snapshot says has already fired`, async () => {
+    const store = make();
+    await store.append("orders:1", commit("orders:1", 0, null, "a"), EMPTY_SEQ);
+    const temporal = {
+      fired: ["too-slow"],
+      owed: { "far-too-slow": { type: "constraint.temporal", id: "t9" } },
+    };
+    await store.snapshot("orders:1", {
+      key: "orders:1",
+      entity: "orders",
+      state: "a",
+      values: { n: 0 },
+      seq: 0,
+      enteredAt: 0,
+      at: 0,
+      temporal,
+    });
+
+    expect((await store.load("orders:1"))?.snapshot?.temporal).toEqual(
+      temporal
+    );
+  });
+
+  it(`${name}: keeps the first snapshot written at a sequence`, async () => {
+    const store = make();
+    await store.append("orders:1", commit("orders:1", 0, null, "a"), EMPTY_SEQ);
+    const base = {
+      key: "orders:1",
+      entity: "orders",
+      state: "a",
+      seq: 0,
+      enteredAt: 0,
+      at: 0,
+    };
+
+    await store.snapshot("orders:1", { ...base, values: { n: 0 } });
+    // The same sequence again, saying something else. A snapshot is a picture of one
+    // commit, so two that disagree cannot both be right, and the store does not choose
+    // the later one over the one it already answered loads with.
+    await store.snapshot("orders:1", { ...base, values: { n: 99 }, at: 5 });
+
+    expect((await store.load("orders:1"))?.snapshot).toMatchObject({
+      seq: 0,
+      values: { n: 0 },
+      at: 0,
+    });
+    expect((await store.load("orders:1"))?.seq).toBe(0);
   });
 
   it(`${name}: is idempotent when the same snapshot is written twice`, async () => {
@@ -429,6 +542,23 @@ export function storeContract(
     expect(stuck.matches.map((m) => m.key)).toEqual(["orders:1"]);
   });
 
+  it(`${name}: leaves out the keys a scan is told to skip`, async () => {
+    const store = make();
+    await store.append("orders:1", commit("orders:1", 0, null, "a"), EMPTY_SEQ);
+    await store.append("orders:2", commit("orders:2", 0, null, "a"), EMPTY_SEQ);
+    await store.append("orders:3", commit("orders:3", 0, null, "a"), EMPTY_SEQ);
+
+    // The caller already has an answer for these, so a row for one would be discarded.
+    const scanned = await store.scan({
+      entity: "orders",
+      now: 0,
+      skip: new Set(["orders:1", "orders:3"]),
+    });
+
+    expect(scanned.matches.map((match) => match.key)).toEqual(["orders:2"]);
+    expect(scanned.complete).toBe(true);
+  });
+
   it(`${name}: reports an answer it truncated as incomplete`, async () => {
     const store = make();
     await store.append("orders:1", commit("orders:1", 0, null, "a"), EMPTY_SEQ);
@@ -525,6 +655,18 @@ export function storeContract(
     expect((await store.load("orders:1"))?.seq).toBe(0);
   });
 
+  it(`${name}: forgetting a key twice is not an error`, async () => {
+    const store = make();
+    if (store.forget === undefined) {
+      return;
+    }
+    await store.append("orders:1", commit("orders:1", 0, null, "a"), EMPTY_SEQ);
+
+    expect(await store.forget("orders:1")).toBeUndefined();
+    expect(await store.forget("orders:1")).toBeUndefined();
+    expect(await store.load("orders:1")).toBeUndefined();
+  });
+
   it(`${name}: forgetting a key it never held is not an error`, async () => {
     const store = make();
     // So a sweep that dies halfway behaves the same way when it is retried.
@@ -572,5 +714,46 @@ export function storeContract(
     expect(loaded?.seq).toBe(2);
     await store.append("orders:1", commit("orders:1", 3, "c", "d", 3000), 2);
     expect((await store.load("orders:1"))?.seq).toBe(3);
+  });
+
+  it(`${name}: compacting keeps what a key replays to, and what was violated`, async () => {
+    const store = make();
+    if (store.compact === undefined) {
+      return;
+    }
+
+    await store.append(
+      "orders:1",
+      commit("orders:1", 0, null, "a", 0),
+      EMPTY_SEQ
+    );
+    await store.append("orders:1", commit("orders:1", 1, "a", "b", 1000), 0);
+    // A values-only commit, so time in state still runs from the move at 1000.
+    await store.append("orders:1", commit("orders:1", 2, "b", "b", 2000), 1);
+    await store.append("orders:1", fired("orders:1", 2), 2);
+    const loadedBefore = await store.load("orders:1");
+    const before = replay(loadedBefore as NonNullable<typeof loadedBefore>);
+
+    await store.compact();
+
+    // State, values, sequence, time in state and what has already fired: everything the
+    // next handler and the next sweep decide on. A violation is history that compaction
+    // is not allowed to take, because nothing else says the constraint did not hold.
+    const loadedAfter = await store.load("orders:1");
+    expect(replay(loadedAfter as NonNullable<typeof loadedAfter>)).toEqual(
+      before
+    );
+    expect(before).toMatchObject({
+      state: "b",
+      values: { n: 2 },
+      seq: 2,
+      enteredAt: 1000,
+      temporal: { fired: ["too-slow"], owed: {} },
+    });
+    expect(
+      (await store.read("orders:1")).filter(
+        (event) => event.type === "violation"
+      )
+    ).toHaveLength(1);
   });
 }

@@ -79,12 +79,14 @@ export type {
   TransitionToResult,
 } from "./results";
 export { fail, stay, transitionTo } from "./results";
+export { SPEC_VERSION } from "./spec";
 export type { Coordination, StoreKind, StoreLayer, StoreSpec } from "./stack";
 export { createStore } from "./stack";
 export type {
   LoadResult,
   ReplayedState,
   ScanCriteria,
+  ScanFilter,
   ScanMatch,
   ScanResult,
   StorageSweep,

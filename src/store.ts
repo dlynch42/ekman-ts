@@ -156,13 +156,16 @@ export interface ScanMatch {
   readonly enteredAt: number;
 }
 
+/** A scan criterion a store may be unable to apply. */
+export type ScanFilter = "state" | "olderThan";
+
 export interface ScanResult {
   readonly matches: readonly ScanMatch[];
   /**
    * Criteria this store could not evaluate, named so the runtime can report a partial
    * answer as partial. A store that quietly ignores a filter turns a query into a lie.
    */
-  readonly unsupported: readonly string[];
+  readonly unsupported: readonly ScanFilter[];
   /** False when the answer was truncated, by a limit or by anything else. */
   readonly complete: boolean;
 }
@@ -243,8 +246,13 @@ export interface Store {
    */
   readonly compact?: () => Promise<StoreCompaction>;
 
-  /** What this store is holding, when it accounts for itself. */
-  readonly usage?: StoreUsage;
+  /**
+   * What this store is holding, when it accounts for itself.
+   *
+   * A method, because measuring is work: a store may have to walk what it holds to
+   * answer, and a property that does that on every read hides the cost from its caller.
+   */
+  readonly usage?: () => StoreUsage;
 
   /** Release anything held open. Optional, because a memory store holds nothing. */
   readonly close?: () => Promise<void>;

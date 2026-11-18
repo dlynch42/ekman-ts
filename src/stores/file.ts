@@ -876,7 +876,7 @@ export class FileStore implements Store {
   }
 
   /** What this store is holding, and what it is allowed to hold. */
-  get usage(): StoreUsage {
+  usage(): StoreUsage {
     const bytes = this.#attempt("measure its logs", undefined, () =>
       this.#seeded()
     );

@@ -24,7 +24,13 @@ import type {
 import { mergeRestores, parseDuration } from "./query";
 import type { ResolvedStack } from "./stack";
 import { assertCoordination, resolveStack } from "./stack";
-import type { ScanCriteria, ScanMatch, StorageSweep, Store } from "./store";
+import type {
+  ScanCriteria,
+  ScanFilter,
+  ScanMatch,
+  StorageSweep,
+  Store,
+} from "./store";
 import { EMPTY_SEQ } from "./store";
 import type { TelemetryEvent } from "./telemetry";
 import {
@@ -702,7 +708,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     let maxBytes: number | null = null;
 
     for (const layer of this.#stack.layers) {
-      const { usage } = layer;
+      const usage = layer.usage?.();
       if (usage === undefined) {
         continue;
       }
@@ -1251,16 +1257,17 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
         overBudget.push(layer.name);
       }
 
+      // Read after the pass, so this is what the layer holds now rather than what it held
+      // when the pass started.
+      const usage = layer.usage?.();
       this.#emit({
         type: "storage.swept",
         at: telemetryNow(),
         store: layer.name,
         logs: swept.logs,
         reclaimed: swept.reclaimed,
-        // Read after the pass, so this is what the layer holds now rather than what it
-        // held when the pass started.
-        bytes: layer.usage?.bytes ?? 0,
-        maxBytes: layer.usage?.maxBytes ?? null,
+        bytes: usage?.bytes ?? 0,
+        maxBytes: usage?.maxBytes ?? null,
         withinBudget: swept.withinBudget,
       });
     }
@@ -1618,6 +1625,10 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * A store that could not filter says so and hands back more than was asked for. The
    * filter is finished here, so a query and a sweep both get exactly the rows they asked
    * about, and `filtered` says that it had to be.
+   *
+   * What the store declared it cannot do counts as well as what this answer reported, so
+   * a store that declares no filter by state and then forgets to say so in an answer is
+   * still filtered. The declaration and the answer cannot disagree.
    */
   async #scanStore(
     authority: Store,
@@ -1628,7 +1639,15 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     filtered: boolean;
   }> {
     const result = await authority.scan(criteria);
-    const unsupported = new Set(result.unsupported);
+    const { state, olderThanMs, now } = criteria;
+    const declared = authority.capabilities.scan;
+    const unsupported = new Set<ScanFilter>(result.unsupported);
+    if (!declared.byState && state !== undefined) {
+      unsupported.add("state");
+    }
+    if (!declared.olderThan && olderThanMs !== undefined) {
+      unsupported.add("olderThan");
+    }
     if (unsupported.size === 0) {
       return {
         matches: result.matches,
@@ -1637,7 +1656,6 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       };
     }
 
-    const { state, olderThanMs, now } = criteria;
     const matches = result.matches.filter((match) => {
       const wrongState =
         unsupported.has("state") &&

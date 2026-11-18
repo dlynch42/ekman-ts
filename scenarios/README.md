@@ -434,6 +434,10 @@ fresh one opens over the same durable bytes. Everything resident is lost; everyt
 committed to a durable store is not. Runners rebuild durable layers rather than reusing the
 objects, so whatever a layer was caching in memory goes too.
 
+The declared clock is not restarted. It carries on from where it was, as a wall clock does
+across a real restart, so time in state includes the time the process was down: an instance
+that entered a state ten minutes before a `restart` is ten minutes old after it.
+
 An ephemeral layer necessarily survives a restart in a runner, because there is nothing to
 rebuild it from. That is not a claim about durability, and no scenario should make one:
 assert what a **durable** layer brings back.

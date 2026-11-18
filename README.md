@@ -290,7 +290,7 @@ Full surface in [docs/api.md](./docs/api.md). The parts you need first:
 | Diagrams | `analyze`, `toMermaid`, `toDot`, `observeEdges`, `allowFrom` |
 | Stores | `createStore`, `defaultLogDir`, `replay`, `latestSeq`, `scanKeys`, `EMPTY_SEQ` |
 | Option lists | `OVERFLOW_POLICIES`, `EVICTION_POLICIES`, `RETENTION_POLICIES`, `DEFAULT_CAPACITY` |
-| Misc | `parseDuration`, `accountBytes`, `DEFAULT_TEMPORAL_TRIGGER`, `TELEMETRY_FALLBACK` |
+| Misc | `parseDuration`, `accountBytes`, `DEFAULT_TEMPORAL_TRIGGER`, `TELEMETRY_FALLBACK`, `SPEC_VERSION` |
 
 That is every runtime export. The types they take and return are exported alongside them:
 the config shapes (`EkmanConfig`, `EntityConfig`, `ExecutionPolicy`, `StorageConfig`), the
@@ -397,7 +397,7 @@ Ekman's behaviour is defined by a language-agnostic scenario suite in
 [`scenarios/`](./scenarios), which every implementation copies verbatim and runs through its own
 public API. Passing the scenarios at a level is what it means to conform at that level.
 
-This package targets **Ekman spec 0.1**.
+This package targets **Ekman spec 0.1**, which it also exports as `SPEC_VERSION`.
 
 | Level | Status | Covers |
 |---|---|---|

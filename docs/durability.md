@@ -287,6 +287,15 @@ Two things about `load` and `snapshot` are easy to get wrong:
 - A snapshot may carry a `temporal` field, which says what the instance's bounds had already
   said when it was taken. Store it and hand it back as given. `replay` reads it.
 
+Two declarations the runtime holds you to:
+
+- `capabilities.scan` says whether your `scan` applies the `state` and `olderThan` criteria. A
+  scan that could not apply one names it in `unsupported`, as `"state"` or `"olderThan"`, and
+  the runtime finishes the filter and reports the answer as partial. If you declare that you
+  cannot filter, the runtime filters whether or not an answer says so.
+- `usage` is optional, and a method: `usage(): StoreUsage`. Implement it when the store can
+  say what it holds. `ekman.storageUsage` sums it across the stack.
+
 ## Next
 
 - [Memory and eviction](./memory.md) for the other budget: resident bytes rather than disk bytes.

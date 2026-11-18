@@ -325,6 +325,45 @@ describe("querying", () => {
     await ekman.close();
   });
 
+  it("holds a store to what it declared, when its answer forgets to say so", async () => {
+    // Declares that it cannot filter, hands back every row, and reports nothing as
+    // unsupported. The declaration is enough for the runtime to finish the filter.
+    const inner = memoryStore();
+    const forgetful = wrap(inner, {
+      capabilities: {
+        ...inner.capabilities,
+        scan: { byState: false, olderThan: false },
+      },
+      scan: (criteria: ScanCriteria): Promise<ScanResult> =>
+        inner.scan({ entity: criteria.entity, now: criteria.now }),
+    });
+
+    const time = clock();
+    const ekman = new Ekman({
+      entities: [orders],
+      store: forgetful,
+      memory: { maxBytes: 0 },
+      now: time.now,
+    });
+    await ekman.entities.orders.send("open-one", { type: "t" });
+    await ekman.entities.orders.send("closed-one", { type: "close" });
+    time.advance(5000);
+
+    const result = await ekman.query({ entity: "orders", state: "open" });
+    expect(result.instances.map((i) => i.key)).toEqual(["orders:open-one"]);
+    expect(result.reasons).toContain("unsupported-criteria");
+
+    const aged = await ekman.query({ entity: "orders", olderThan: 10_000 });
+    expect(aged.instances).toEqual([]);
+    expect(aged.reasons).toContain("unsupported-criteria");
+
+    // Nothing was asked that it cannot do, so nothing is reported.
+    const all = await ekman.query({ entity: "orders" });
+    expect(all.instances).toHaveLength(2);
+    expect(all.reasons).not.toContain("unsupported-criteria");
+    await ekman.close();
+  });
+
   it("reports a store that truncated its own scan", async () => {
     const inner = memoryStore();
     const truncating = wrap(inner, {
