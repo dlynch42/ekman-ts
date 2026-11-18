@@ -138,6 +138,11 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   #closed: Promise<void> | undefined;
   /** A storage sweep in progress, settled either way, for a shutdown to wait on. */
   #storageSweep: Promise<void> | undefined;
+  /**
+   * The time-in-state pass under way, if one is. Waited for at shutdown, because a pass
+   * loads instances and records violations, and neither should meet a closed store.
+   */
+  #temporalSweep: Promise<void> | undefined;
   #triggerSeq = 0;
 
   constructor(config: EkmanConfig<D> = {}) {
@@ -369,9 +374,9 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     if (instance !== undefined && !instance.idle) {
       throw new EkmanError(
         "KEY_BUSY",
-        `${JSON.stringify(parsed)} has a handler in flight, so it was not forgotten. ` +
-          "Deleting it now would leave that attempt committing into a key that no " +
-          "longer exists. Retry once it is idle.",
+        `${JSON.stringify(parsed)} has a handler in flight or is being evaluated by a ` +
+          "sweep, so it was not forgotten. Deleting it now would leave that work " +
+          "committing into a key that no longer exists. Retry once it is idle.",
         { key: parsed }
       );
     }
@@ -567,10 +572,13 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     }
 
     this.#sweeping = true;
+    const sweeping = this.#sweepOnce();
+    this.#temporalSweep = sweeping.then(noop, noop);
     try {
-      return await this.#sweepOnce();
+      return await sweeping;
     } finally {
       this.#sweeping = false;
+      this.#temporalSweep = undefined;
     }
   }
 
@@ -615,8 +623,10 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * `RUNTIME_CLOSED`), no sweep runs, and a retry waiting out its backoff is abandoned
    * rather than started. A handler already running is left to finish and commit, and
    * refusals and violations still on their way to the store are allowed to land. So are a
-   * `forget()` and a storage sweep that had already begun. Only then are the store layers
-   * closed, so none of that work meets a closed connection.
+   * `forget()`, a storage sweep and a time-in-state sweep that had already begun. The
+   * last loads nothing more once this is called and ends as soon as the escalation it is
+   * delivering settles. Only then are the store layers closed, so none of that work meets
+   * a closed connection.
    *
    * Two kinds of store write are not waited for, by design: the snapshot an eviction
    * leaves behind and an append to a cache layer. Both are optimizations whose loss costs
@@ -660,6 +670,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
         ),
         ...this.#forgetting.values(),
         this.#storageSweep,
+        this.#temporalSweep,
       ]),
       timeoutMs
     );
@@ -1286,7 +1297,9 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
 
     for (const definition of this.#definitions.values()) {
       const byState = constraintsOf(definition)?.temporalByState;
-      if (byState === undefined) {
+      // An entity with guards or a transition graph and no time bound has an empty map
+      // here, and nothing to sweep. Asking its store anyway would read every instance.
+      if (byState === undefined || byState.size === 0) {
         continue;
       }
 
@@ -1348,6 +1361,20 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
         skip,
       });
       due = scanned.matches;
+      if (!scanned.complete) {
+        // Said out loud, because the instances the store left out are not swept and
+        // nothing else would ever mention them.
+        this.#onUnhandled(
+          new EkmanError(
+            "NOT_IMPLEMENTED",
+            `store "${authority.name}" answered a scan of ${JSON.stringify(definition.name)} ` +
+              "with part of the answer, and a sweep has no way to ask for the rest. " +
+              "Time-in-state bounds were evaluated for the instances it returned and " +
+              "for no others it holds."
+          ),
+          { source: "sweep" }
+        );
+      }
     } catch (error) {
       this.#onUnhandled(error, { source: "sweep" });
       return 0;
@@ -1431,33 +1458,41 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       return 0;
     }
 
+    // Held from before the load until every bound has been read. Nothing is queued on
+    // the record, so without this it looks idle throughout: it could be evicted or
+    // deleted while it loads, and an escalation's own turn ending would release it with
+    // its other bounds still to evaluate.
+    const unpin = instance.pin();
     try {
       await this.#hydrate(instance);
+      if (
+        instance.unloaded ||
+        this.#closing.signal.aborted ||
+        this.#instances.get(key) !== instance
+      ) {
+        // Nothing stored after all, or the runtime began to close while it loaded, in
+        // which case nothing more is written on its behalf.
+        return 0;
+      }
+
+      const fired = await this.#sweepInstance(key, state, constraints, at);
+
+      if (instance.state === state && !instance.needsHydration) {
+        noted.add(key);
+        this.#settled.set(key, {
+          seq: instance.seq,
+          enteredAt: instance.enteredAt,
+          dueAt: nextDue(instance, constraints, at),
+        });
+      }
+      return fired;
     } catch (error) {
       this.#onUnhandled(error, { source: "sweep", key });
-      this.#rest(instance);
       return 0;
-    }
-
-    if (instance.unloaded || this.#instances.get(key) !== instance) {
-      // Nothing stored after all, or the record was released while it loaded: evicted to
-      // make room, or deleted. Either way there is nothing here to evaluate.
+    } finally {
+      unpin();
       this.#rest(instance);
-      return 0;
     }
-
-    const fired = await this.#sweepInstance(key, state, constraints, at);
-
-    if (instance.state === state && !instance.needsHydration) {
-      noted.add(key);
-      this.#settled.set(key, {
-        seq: instance.seq,
-        enteredAt: instance.enteredAt,
-        dueAt: nextDue(instance, constraints, at),
-      });
-    }
-    this.#rest(instance);
-    return fired;
   }
 
   /**
@@ -1468,7 +1503,9 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * past the budget until some other key went idle.
    */
   #rest(instance: AnyInstance): void {
-    if (this.#instances.get(instance.key) === instance && instance.idle) {
+    // Not while a trigger that arrived in the meantime is still being handled. Its own
+    // turn ending is what offers the record then.
+    if (instance.idle) {
       this.#onIdle(instance);
     }
   }

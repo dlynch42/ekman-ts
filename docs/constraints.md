@@ -194,6 +194,11 @@ stores answer a scan by reading every instance of the entity that is not residen
 large store set `sweepMs` with that in mind. An instance that has been told everything its
 bounds have to say is not loaded again until it commits or another bound comes due.
 
+An instance the sweep has loaded stays resident until all its bounds have been read, whatever
+the memory budget says, and cannot be deleted in that time: `forget` raises `KEY_BUSY`. A store
+that answers a scan with part of the answer is reported through `onUnhandled`, because the
+instances it left out were not swept.
+
 Without a store there is nothing to scan, and a bound covers the resident instances, which
 in a memory-only runtime is all of them.
 

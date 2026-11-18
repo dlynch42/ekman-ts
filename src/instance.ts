@@ -96,6 +96,8 @@ export class InstanceRecord<
    */
   readonly #temporal = new LatchFold();
   #stateEntry = 0;
+  /** How many callers are holding this record resident. See `pin`. */
+  #pins = 0;
 
   /**
    * Whether this record still has to be reconciled with the store.
@@ -351,7 +353,22 @@ export class InstanceRecord<
    * waiting behind it.
    */
   get idle(): boolean {
-    return this.inbox.idle;
+    return this.inbox.idle && this.#pins === 0;
+  }
+
+  /**
+   * Keep this record from being evicted or deleted until the returned function is called.
+   *
+   * For work on a record that happens outside its inbox, where nothing else says the
+   * record is in use: a sweep loading it and evaluating its bounds one after another.
+   * Without this an escalation's own inbox turn ends, the key goes idle, and the record
+   * is released with the rest of its bounds still unread.
+   */
+  pin(): () => void {
+    this.#pins += 1;
+    return () => {
+      this.#pins -= 1;
+    };
   }
 
   /**

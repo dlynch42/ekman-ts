@@ -61,7 +61,7 @@ time a sender sees one of these.
 | `STORE_FULL` | A store is at its retention budget and its policy refuses new instances. Instances it already holds keep committing. | not until space is reclaimed | 503 |
 | `STORE_UNAVAILABLE` | The store could not do what was asked: the commit authority could not be reached, or the file store met a filesystem failure or a corrupt log. The commit did not happen. The message names the store and the key, never a path. | yes, once the store is back | 503 |
 | `STORE_CONFLICT` | A conditional append found the key at a different sequence. Nothing was written. | yes: the key is reloaded, so the next send is handled on its current state | 409 |
-| `KEY_BUSY` | An operation needed the key idle and it was not. Only `forget` raises this. | yes, once the key is idle | 409 |
+| `KEY_BUSY` | An operation needed the key idle and it was not: a handler was in flight, or a sweep was evaluating it. Only `forget` raises this. | yes, once the key is idle | 409 |
 | `RUNTIME_CLOSED` | The runtime has been closed, so the trigger was not accepted, or a retry that was waiting was abandoned. | not against this runtime; a replacement process is usually starting | 503 |
 
 ### Configuration was wrong

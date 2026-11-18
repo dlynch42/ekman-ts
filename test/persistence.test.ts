@@ -2387,9 +2387,32 @@ describe("time-in-state bounds for instances a store holds", () => {
     await ekman.close();
   });
 
-  it("leaves nothing behind when a record is evicted while the sweep is loading it", async () => {
+  /** A store over `inner` whose first load of one key waits to be let through. */
+  function slowToLoad(
+    inner: MemoryStore,
+    slow: string
+  ): { store: Store; answer: () => void } {
+    let answer: () => void = () => undefined;
+    const held = new Promise<void>((done) => {
+      answer = done;
+    });
+    let loads = 0;
+    return {
+      store: wrap(inner, {
+        load: (key) => {
+          loads += key === slow ? 1 : 0;
+          return key === slow && loads === 1
+            ? held.then(() => inner.load(key))
+            : inner.load(key);
+        },
+      }),
+      answer: () => answer(),
+    };
+  }
+
+  /** A store holding one `stalling` instance that entered `deploying` at time 0. */
+  async function stalled(clock: ReturnType<typeof frozenClock>) {
     const inner = memoryStore();
-    const clock = frozenClock();
     const first = new Ekman({
       entities: [stalling],
       store: inner,
@@ -2397,21 +2420,13 @@ describe("time-in-state bounds for instances a store holds", () => {
     });
     await first.entities.stalling.send("a", { type: "start" });
     await first.close();
+    return inner;
+  }
 
-    let answer: () => void = () => undefined;
-    const held = new Promise<void>((done) => {
-      answer = done;
-    });
-    // Only the first load of the key is held, which is the sweep's.
-    let loads = 0;
-    const store = wrap(inner, {
-      load: (key) => {
-        loads += key === "stalling:a" ? 1 : 0;
-        return key === "stalling:a" && loads === 1
-          ? held.then(() => inner.load(key))
-          : inner.load(key);
-      },
-    });
+  it("keeps a record resident while the sweep is loading it, however cold", async () => {
+    const clock = frozenClock();
+    const inner = await stalled(clock);
+    const { store, answer } = slowToLoad(inner, "stalling:a");
     const second = new Ekman({
       entities: [stalling, orders],
       store,
@@ -2424,16 +2439,198 @@ describe("time-in-state bounds for instances a store holds", () => {
     await settle();
     // Another key goes idle over budget, and the record still loading is the coldest.
     await second.entities.orders.send("1", { type: "poke" });
+    expect(second.residentKeys).toEqual(["stalling:a"]);
+    answer();
+
+    expect(await swept).toBe(1);
+    // Released once its bounds were read, and nothing is left counted against the budget.
     expect(second.residentKeys).toEqual([]);
+    expect(second.memoryUsage.instances).toBe(0);
+    await second.close();
+  });
+
+  it("refuses to delete an instance the sweep is loading", async () => {
+    const clock = frozenClock();
+    const inner = await stalled(clock);
+    const { store, answer } = slowToLoad(inner, "stalling:a");
+    const second = new Ekman({ entities: [stalling], store, now: clock.now });
+    clock.advance(100);
+
+    const swept = second.sweep();
+    await settle();
+    const refused = await second
+      .forget("stalling:a")
+      .catch((error: EkmanError) => error.code);
+    answer();
+
+    expect(refused).toBe("KEY_BUSY");
+    expect(await swept).toBe(1);
+    expect(await inner.load("stalling:a")).toBeDefined();
+    await second.close();
+  });
+
+  it("is waited for by a shutdown, and writes nothing once the runtime is closing", async () => {
+    const clock = frozenClock();
+    const inner = await stalled(clock);
+    const { store, answer } = slowToLoad(inner, "stalling:a");
+    const second = new Ekman({ entities: [stalling], store, now: clock.now });
+    clock.advance(100);
+
+    const swept = second.sweep();
+    await settle();
+    let closed = false;
+    const closing = second.close().then(() => {
+      closed = true;
+    });
+    await settle();
+    // The layers are not closed under a load the sweep is still waiting on.
+    expect(closed).toBe(false);
     answer();
 
     expect(await swept).toBe(0);
-    expect(second.residentKeys).toEqual([]);
-    expect(second.memoryUsage.instances).toBe(0);
+    await closing;
+    expect(violations(await inner.read("stalling:a"))).toEqual([]);
+  });
 
-    // Not indexed as resident either, so the next pass finds it in the store.
-    expect(await second.sweep()).toBe(1);
+  it("reads every bound on a stored instance, though the first escalation's turn ends", async () => {
+    const twice = defineEntity("twice", {
+      initial: "waiting",
+      states: {
+        waiting: {
+          timeoutMs: 10,
+          handler: async (_i, trigger) => {
+            if (trigger.constraint === "first") {
+              await new Promise((done) => setTimeout(done, 40));
+            }
+            return stay({ touched: true });
+          },
+        },
+      },
+      constraints: {
+        temporal: [
+          { name: "first", in: "waiting", within: 100 },
+          { name: "second", in: "waiting", within: 100 },
+        ],
+      },
+    });
+    const clock = frozenClock();
+    const store = memoryStore();
+    // Nothing stays resident, so the record would be released the moment the first
+    // escalation's turn ended, with the second bound still unread.
+    const ekman = new Ekman({
+      entities: [twice],
+      store,
+      memory: { maxBytes: 0 },
+      now: clock.now,
+      onUnhandled: () => undefined,
+    });
+    await ekman.entities.twice.send("a", { type: "start" });
+    clock.advance(100);
+
+    expect(await ekman.sweep()).toBe(2);
+    expect(
+      violations(await store.read("twice:a")).map(
+        (event) => event.type === "violation" && event.constraint.name
+      )
+    ).toEqual(["first", "second"]);
+    expect(ekman.residentKeys).toEqual([]);
+    await ekman.close();
+  });
+
+  it("leaves a record alone when a trigger that arrived meanwhile is still running", async () => {
+    const busy = defineEntity("busy", {
+      initial: "waiting",
+      states: {
+        waiting: async (_i, trigger) => {
+          if (trigger.type === "slow") {
+            await new Promise((done) => setTimeout(done, 20));
+          }
+          return stay({ touched: true });
+        },
+      },
+      constraints: {
+        temporal: [
+          { name: "too-slow", in: "waiting", within: 100, policy: "warn" },
+        ],
+      },
+    });
+    const clock = frozenClock();
+    const inner = memoryStore();
+    const first = new Ekman({ entities: [busy], store: inner, now: clock.now });
+    await first.entities.busy.send("a", { type: "start" });
+    await first.close();
+
+    const { store, answer } = slowToLoad(inner, "busy:a");
+    const second = new Ekman({
+      entities: [busy],
+      store,
+      memory: { maxBytes: 0 },
+      now: clock.now,
+    });
+    clock.advance(100);
+
+    const swept = second.sweep();
+    await settle();
+    const sent = second.entities.busy.send("a", { type: "slow" });
+    answer();
+
+    // The pass ends with the handler still running, and does not release the record
+    // from under it.
+    expect(await swept).toBe(1);
+    expect(second.residentKeys).toEqual(["busy:a"]);
+    expect(await sent).toMatchObject({ seq: 2 });
+    expect(second.residentKeys).toEqual([]);
     await second.close();
+  });
+
+  it("says so when a store answers a scan with part of the answer", async () => {
+    const clock = frozenClock();
+    const inner = await stalled(clock);
+    const store: Store = {
+      ...wrap(inner, {}),
+      scan: async (criteria) => ({
+        ...(await inner.scan(criteria)),
+        complete: false,
+      }),
+    };
+    const unhandled: [unknown, unknown][] = [];
+    const second = new Ekman({
+      entities: [stalling],
+      store,
+      now: clock.now,
+      onUnhandled: (error, context) => unhandled.push([error, context]),
+    });
+    clock.advance(100);
+
+    // What it did return is still swept.
+    expect(await second.sweep()).toBe(1);
+    const [[failure, about] = []] = unhandled;
+    expect(failure).toMatchObject({ code: "NOT_IMPLEMENTED" });
+    expect(about).toEqual({ source: "sweep" });
+    await second.close();
+  });
+
+  it("does not ask the store about an entity that has no time bound", async () => {
+    const gated = defineEntity("gated", {
+      initial: "open",
+      states: {
+        open: () => transitionTo("closed"),
+        closed: () => stay(),
+      },
+      constraints: { transitions: { allow: { open: ["closed"] } } },
+    });
+    const inner = memoryStore();
+    const scan = vi.fn(inner.scan.bind(inner));
+    const ekman = new Ekman({
+      entities: [gated],
+      store: { ...wrap(inner, {}), scan },
+      memory: { maxBytes: 0 },
+    });
+    await ekman.entities.gated.send("a", { type: "go" });
+
+    expect(await ekman.sweep()).toBe(0);
+    expect(scan).not.toHaveBeenCalled();
+    await ekman.close();
   });
 
   it("takes in what another writer's stream says has fired, when the instance did not move", async () => {
