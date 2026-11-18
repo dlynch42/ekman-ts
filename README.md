@@ -46,7 +46,7 @@ both work with no configuration on your side.
 
 ## Quickstart
 
-```ts
+```ts check
 import { defineEntity, Ekman, isTransitionEvent, stay, transitionTo } from "ekman";
 
 /** Stand-in for whatever actually takes the money. */
@@ -137,7 +137,10 @@ Each of these has a full page in [docs/](./docs).
 
 ### Entities and handlers
 
-```ts
+<!-- check-docs:
+import { defineEntity, stay, transitionTo } from "ekman";
+-->
+```ts check
 type OrderTrigger = { type: "pay"; amount: number } | { type: "refund" };
 
 const orders = defineEntity.withTriggers<OrderTrigger>()("orders", {
@@ -292,8 +295,9 @@ Full surface in [docs/api.md](./docs/api.md). The parts you need first:
 That is every runtime export. The types they take and return are exported alongside them:
 the config shapes (`EkmanConfig`, `EntityConfig`, `ExecutionPolicy`, `StorageConfig`), the
 results (`CommitResult`, `QueryResult`, `StorageSweep`), every event and telemetry event,
-`TemporalTrigger`, the trigger a time-in-state bound delivers, and `StateGraph`, the read-only
-view of an entity's states.
+`TemporalTrigger`, the trigger a time-in-state bound delivers, `UnhandledContext`, what
+`onUnhandled` is told about a failure, and `StateGraph`, the read-only view of an entity's
+states.
 
 Store adapters import from `ekman/store`, which carries the `Store` types, the helpers
 `replay`, `latestSeq`, `previousSeq`, `scanKeys` and `EMPTY_SEQ`, and `storeContract`, the

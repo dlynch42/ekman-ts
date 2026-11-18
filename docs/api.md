@@ -46,7 +46,7 @@ the longest delay a timer can hold.
 | `telemetry` | map of event name to handler | none | [Telemetry](./telemetry.md) |
 | `coordination` | `"single"` \| `"multi"` | `"single"` | below |
 | `now` | `() => number` | `Date.now` | below |
-| `onUnhandled` | `(error) => void` | none | [Telemetry](./telemetry.md#unhandled-errors) |
+| `onUnhandled` | `(error, { source, key? }) => void` | logs to stderr, naming the source | [Telemetry](./telemetry.md#unhandled-errors) |
 
 ### `coordination`
 
@@ -70,13 +70,13 @@ not useful, so a call made while one is running returns 0 immediately rather tha
 |---|---|---|
 | `send(key, trigger)` | `Promise<CommitResult>` | Deliver a trigger. Resolves at commit with the committed state, values and sequence. Rejects on refusal or failure. |
 | `post(key, trigger)` | `void` | Fire and forget. Wraps `send`; failures go to `onUnhandled` rather than becoming an unhandled rejection. |
-| `inspect(key)` | `InstanceSnapshot \| undefined` | **Synchronous.** Current committed state of a resident instance. Does not touch the store and does not reload. |
+| `inspect(key)` | `InstanceSnapshot \| undefined` | **Synchronous.** Current committed state of a resident instance. Does not touch the store and does not reload, so it is `undefined` for an instance that was evicted or is still loading. |
 | `history(key)` | `Promise<HistoryResult>` | The per-key ordered stream, read through the commit authority. Rejects with `UNKNOWN_ENTITY` for an entity that is not registered. |
 | `query(criteria)` | `Promise<QueryResult>` | Instances by entity, state and time in state. Rejects with `UNKNOWN_ENTITY` for an entity that is not registered. |
 | `forget(key)` | `Promise<void>` | Delete an instance outright, from memory and every store layer. Rejects with `UNKNOWN_ENTITY` for an entity that is not registered. |
 | `sweep()` | `Promise<number>` | Evaluate every time-in-state constraint once and deliver whatever escalations are due. Returns how many fired. |
 | `sweepStorage()` | `Promise<StorageSweep>` | Run the store's retention pass. Returns `{ logs, reclaimed, overBudget }`. |
-| `close()` | `Promise<void>` | Stop sweep timers and release the runtime. |
+| `close(options?)` | `Promise<void>` | Refuse new triggers, let in-flight work land up to `timeoutMs` (30 seconds by default), then close the store layers. See [below](#shutting-down). |
 | `define(definition)` | `EntityHandle` | Register an already-defined entity after construction. |
 | `entityNames` | `readonly string[]` | Registered entity names. |
 | `residentKeys` | `readonly string[]` | Keys currently in memory. |
@@ -107,9 +107,12 @@ await orders.forget("a-1");
 orders.key("a-1");                      // "orders:a-1"
 ```
 
-Each handle carries its entity's own state, values and trigger types, so a typo'd state name or a
-missing value field is a compile error at the call site rather than a refusal at runtime. Handles
-address instances **by id**; the runtime's own methods take the **full key**.
+Each handle carries its entity's own state, values and trigger types. What `send`, `inspect` and
+`history` return is typed with them, and with a [trigger union](./entities.md#typed-triggers)
+`send` checks what you pass it, so a missing value field or a payload outside the union is a
+compile error at the call site rather than a refusal at runtime. The `state` in a `query` is a
+plain string: a state name the entity does not have matches nothing and is not a compile error.
+Handles address instances **by id**; the runtime's own methods take the **full key**.
 
 ```ts
 await ekman.entities.orders.send("a-1", trigger);   // by id

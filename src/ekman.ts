@@ -44,8 +44,10 @@ import type {
   EntityHandle,
   EntityHandles,
   InstanceSnapshot,
+  OnUnhandled,
   Trigger,
   TriggerLike,
+  UnhandledContext,
   Values,
 } from "./types";
 
@@ -79,7 +81,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   readonly #definitions = new Map<string, AnyDefinition>();
   readonly #instances = new Map<string, AnyInstance>();
   readonly #now: () => number;
-  readonly #onUnhandled: (error: unknown) => void;
+  readonly #onUnhandled: OnUnhandled;
   readonly #runtime: RuntimeDeps;
   readonly #deps: DispatchDeps;
   /** Where every resident instance sits. Read by temporal constraints and by queries. */
@@ -150,7 +152,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     this.#runtime = {
       now: () => this.#now(),
       telemetry: config.telemetry,
-      onUnhandled: (error) => this.#onUnhandled(error),
+      onUnhandled: (error, context) => this.#onUnhandled(error, context),
       inbox: resolveInboxConfig(config.inbox),
       stack: this.#stack,
       caches: this.#caches,
@@ -262,10 +264,15 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * disappearing. Silence is the one thing this runtime should never do.
    */
   post(key: string, trigger: Trigger): void {
-    this.send(key, trigger).catch(this.#onUnhandled);
+    this.send(key, trigger).catch(this.#unhandled("post", key));
   }
 
-  /** Current committed state, or undefined if nothing has addressed this key yet. */
+  /**
+   * Current committed state, read from memory without touching the store.
+   *
+   * Undefined when the instance is not resident: nothing has addressed the key yet, it was
+   * evicted, or it is still being loaded.
+   */
   inspect<S extends string = string, V extends Values = Values>(
     key: string
   ): InstanceSnapshot<S, V> | undefined {
@@ -276,13 +283,6 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     return instance.snapshot() as InstanceSnapshot<S, V>;
   }
 
-  /**
-   * The per-key ordered event stream: transitions, refusals, violations and restores.
-   *
-   * Reads through the commit authority when one is configured, so it covers the instance's
-   * whole life and not only what this process happened to see. With no store it answers
-   * from what is resident, and says so: `complete` is false and `reasons` explains why.
-   */
   /**
    * Delete an instance outright: its resident state and its stream in every layer.
    *
@@ -385,6 +385,13 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     });
   }
 
+  /**
+   * The per-key ordered event stream: transitions, refusals, violations and restores.
+   *
+   * Reads through the commit authority when one is configured, so it covers the instance's
+   * whole life and not only what this process happened to see. With no store it answers
+   * from what is resident, and says so: `complete` is false and `reasons` explains why.
+   */
   async history<S extends string = string, V extends Values = Values>(
     key: string
   ): Promise<HistoryResult<S, V>> {
@@ -697,7 +704,8 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     if (existing !== undefined) {
       throw new EkmanError(
         "DUPLICATE_ENTITY",
-        `entity "${definition.name}" is already registered with this runtime`
+        `entity "${definition.name}" is already registered with this runtime. It was ` +
+          "already passed in entities, or define() was called twice for it."
       );
     }
 
@@ -844,13 +852,6 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     );
   }
 
-  /**
-   * Run one dequeued trigger.
-   *
-   * Thin on purpose. The attempt lifecycle telemetry is emitted by `dispatch`, which is
-   * the layer that owns the attempt loop and therefore the only one that knows which
-   * attempt started, retried, or settled the trigger.
-   */
   /**
    * Run one dequeued trigger.
    *
@@ -1057,7 +1058,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
         instance.key,
         authority
           .snapshot(instance.key, instance.storeSnapshot(this.#now()))
-          .catch(this.#onUnhandled)
+          .catch(this.#unhandled("snapshot", instance.key))
       );
     }
 
@@ -1107,7 +1108,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
           });
         }
       })
-      .catch(this.#onUnhandled);
+      .catch(this.#unhandled("audit", event.key));
   }
 
   #startSweeping(sweepMs: number | undefined): void {
@@ -1124,7 +1125,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     }
 
     this.#sweepTimer = setInterval(() => {
-      this.sweep().catch(this.#onUnhandled);
+      this.sweep().catch(this.#unhandled("sweep"));
     }, sweepMs);
 
     // Sweeping is background work. A runtime that is otherwise finished should be allowed
@@ -1158,7 +1159,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     }
 
     this.#storageSweepTimer = setInterval(() => {
-      this.sweepStorage().catch(this.#onUnhandled);
+      this.sweepStorage().catch(this.#unhandled("storage-sweep"));
     }, sweepMs);
 
     // Housekeeping, exactly as the temporal sweep is: a runtime that is otherwise finished
@@ -1463,7 +1464,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       await this.send(instance.key, trigger);
     } catch (error) {
       outcome = refusalOutcome(error);
-      this.#onUnhandled(error);
+      this.#onUnhandled(error, { source: "escalation", key: instance.key });
     }
 
     if (outcome === "refused-transiently") {
@@ -1525,6 +1526,15 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
 
   #emit(event: TelemetryEvent): void {
     emit(this.#runtime.telemetry, event, this.#onUnhandled);
+  }
+
+  /** A rejection handler that reports to `onUnhandled` with where the failure came from. */
+  #unhandled(
+    source: UnhandledContext["source"],
+    key?: string
+  ): (error: unknown) => void {
+    const context = key === undefined ? { source } : { source, key };
+    return (error) => this.#onUnhandled(error, context);
   }
 }
 
@@ -1699,6 +1709,10 @@ function noop(): void {
   // Deliberately empty: settles a promise whose outcome is somebody else's to report.
 }
 
-function defaultOnUnhandled(error: unknown): void {
-  console.error("[ekman] unhandled failure from post()", error);
+function defaultOnUnhandled(error: unknown, context: UnhandledContext): void {
+  const where =
+    context.key === undefined
+      ? context.source
+      : `${context.source} for ${context.key}`;
+  console.error(`[ekman] unhandled failure (${where})`, error);
 }

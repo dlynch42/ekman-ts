@@ -20,7 +20,7 @@ export function testDeps(
   options: {
     now?: (() => number) | undefined;
     telemetry?: TelemetrySink | undefined;
-    onUnhandled?: ((error: unknown) => void) | undefined;
+    onUnhandled?: RuntimeDeps["onUnhandled"] | undefined;
     audit?: ((event: EkmanEvent) => void) | undefined;
     committed?: RuntimeDeps["committed"] | undefined;
     inbox?: InboxConfig | undefined;

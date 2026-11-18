@@ -145,7 +145,9 @@ export class Inbox {
       // The drain settles each entry's own promise, so nothing awaits it here. If the
       // loop itself ever breaks there is no caller to receive that, and it goes where
       // every other uncaught runtime failure does rather than becoming a bare rejection.
-      this.#drain().catch(this.#deps.onUnhandled);
+      this.#drain().catch((error: unknown) => {
+        this.#deps.onUnhandled(error, { source: "inbox", key: this.#key });
+      });
     }
 
     return settled;

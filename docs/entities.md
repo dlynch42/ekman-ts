@@ -2,7 +2,10 @@
 
 [Back to the docs index](./README.md)
 
-```ts
+<!-- check-docs:
+declare const chargeCard: (cents: number) => Promise<string>;
+-->
+```ts check
 import { defineEntity, stay, transitionTo } from "ekman";
 
 type OrderTrigger = { type: "pay"; amount: number } | { type: "cancel" };
@@ -51,7 +54,10 @@ If you want a named type, declare it as an `interface` extending `Record<string,
 since an `interface` has no implicit index signature of its own, and annotate a constant with
 it:
 
-```ts
+<!-- check-docs:
+import { defineEntity, stay } from "ekman";
+-->
+```ts check
 export interface OrderValues extends Record<string, unknown> {
   total: number;
   receipt: string;
@@ -62,7 +68,7 @@ const initialOrder: OrderValues = { total: 0, receipt: "" };
 export const orders = defineEntity("orders", {
   initial: "pending",
   values: initialOrder,
-  states: { /* ... */ },
+  states: { pending: (order) => stay(order.values) },
 });
 ```
 
@@ -75,7 +81,10 @@ compiles and is `undefined` at runtime.
 By default a trigger is `{ type: string }` plus arbitrary fields, all `unknown`. Give the entity
 a union of what it can be sent and the payloads are typed everywhere:
 
-```ts
+<!-- check-docs:
+import { defineEntity, stay, transitionTo } from "ekman";
+-->
+```ts check
 type OrderTrigger =
   | { type: "pay"; amount: number }
   | { type: "refund"; reason: string };
@@ -156,6 +165,11 @@ values makes it domain state.
 
 `ctx.signal` is an `AbortSignal` that aborts when the attempt times out. Watching it is optional:
 a handler that ignores it is covered by the fence instead. See [Execution](./execution.md).
+
+A handler that creates or calls something outside the runtime, such as a process, a queue
+consumer or a payment, should read [Handlers that own external resources](./external-resources.md).
+A handler must not await a `send()` to its own key; see
+[Reentrancy](./ordering.md#reentrancy-do-not-await-a-send-to-your-own-key).
 
 ## Results
 

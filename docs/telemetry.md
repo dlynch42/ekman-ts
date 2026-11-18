@@ -43,7 +43,7 @@ rejects the error goes to `onUnhandled` rather than becoming an unhandled reject
 
 | Event | Fires when |
 |---|---|
-| `inbox.enqueued` | A trigger was queued behind work already in flight. |
+| `inbox.enqueued` | A trigger was accepted into the inbox. Fires for every accepted trigger, including one that goes straight to its handler. Carries `depth`. |
 | `inbox.rejected` | The inbox was full and the policy is `reject`. The trigger did not land. |
 | `inbox.dropped` | The inbox was full and a policy dropped a trigger on purpose. |
 | `handler.started` | An attempt began. |
@@ -64,7 +64,13 @@ rejects the error goes to `onUnhandled` rather than becoming an unhandled reject
 | `storage.swept` | A store's retention pass ran. |
 | `runtime.closed` | `close()` finished waiting for in-flight work. Carries `drained` and `pending`. |
 
-Two of these are worth understanding rather than just counting.
+Three of these are worth understanding rather than just counting.
+
+**`inbox.enqueued` is not a contention signal on its own; its `depth` is.** `depth` is how many
+triggers are waiting once this one is in, counting this one and not counting the one being
+handled. Above 1, this trigger is behind others that are still waiting. At 1 it is first in
+line, which is either an idle key, where it runs at once, or a key with one handler in flight.
+To tell those two apart, pair it with `handler.started`.
 
 **`commit.fenced` is the fence doing its job.** Seeing it in a system with timeouts is normal,
 not alarming. It means an abandoned handler finished and its result was correctly refused.
@@ -107,12 +113,34 @@ npm run demo:audit   # one sink that throws, one that hangs, one that is slow. E
 ## Unhandled errors
 
 ```ts
-onUnhandled: (error) => console.error("[ekman] unhandled", error),
+onUnhandled: (error, { source, key }) => log.error({ source, key, error }, "ekman unhandled"),
 ```
 
-Nothing should reach this. It exists so that if something does, it is visible rather than
-becoming an unhandled rejection with no context. `post()` routes its failures here, since a
-fire-and-forget send has no caller to reject.
+A failure with no caller to reject goes here, so it is visible rather than an unhandled
+rejection with no context. The second argument says where it came from:
+
+| `source` | What failed | `key` |
+|---|---|---|
+| `post` | A fire-and-forget send was refused, or its handler failed. Includes a `post()` after `close()`. | yes |
+| `telemetry` | A telemetry handler threw or rejected. | when the event has one |
+| `escalation` | A time-in-state bound fired and its trigger was refused. | yes |
+| `sweep` | An automatic time-in-state sweep failed. | no |
+| `storage-sweep` | An automatic storage sweep failed. | no |
+| `snapshot` | The snapshot written when an instance is evicted failed. The events are already stored, so this costs replay time and no state. | yes |
+| `persist` | A refusal or a violation could not be written to the store. | yes |
+| `audit` | Delivery to an audit sink failed outside the sink's own retries. A sink that simply keeps failing is reported as `audit.failed` telemetry instead. | yes |
+| `inbox` | A key's queue stopped draining. | yes |
+
+Some of these are routine. A `post` that a constraint refuses lands here every time. An
+escalation that is refused for a passing reason, such as a full inbox, is retried by the next
+sweep and reported here each time it is refused. A failing cache layer does not come here at
+all: it is reported as `store.cacheFailed`.
+
+The default writes one line to stderr, naming the source and the key:
+
+```
+[ekman] unhandled failure (post for orders:a-1) EkmanError: ...
+```
 
 ## Next
 

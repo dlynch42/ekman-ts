@@ -146,6 +146,7 @@ export type {
   HandlerContext,
   InboxConfig,
   InstanceSnapshot,
+  OnUnhandled,
   OverflowPolicy,
   StateConfig,
   StateEntry,
@@ -155,6 +156,7 @@ export type {
   TemporalConfig,
   Trigger,
   TriggerLike,
+  UnhandledContext,
   UnknownPolicy,
   Values,
 } from "./types";

@@ -104,10 +104,19 @@ store: "file"                              // .ekman/logs/
 store: { kind: "file", dir: "/var/lib/app" }
 ```
 
-`.ekman/logs/` is found by walking up from the working directory to the nearest `package.json`,
-so the same service finds the same state however it was launched. A deployment with no
-`package.json` beside it, such as a bundled single-file build, should name the path explicitly
-rather than take the default.
+The default directory depends on where the process was started. `.ekman/logs/` is placed beside
+the nearest `package.json` at or above the **working directory**, and in the working directory
+itself when there is none. Starting the same service from somewhere else can therefore find a
+different, empty store:
+
+- A service unit with `WorkingDirectory=/` and no `package.json` above it writes to `/.ekman/logs`.
+- In a monorepo, starting from a package directory and starting from the repository root resolve
+  to two different directories.
+- A bundled single-file build or a container image often has no `package.json` beside it.
+- On a read-only filesystem the directory cannot be created, and the runtime refuses to start
+  with `INVALID_CONFIG`.
+
+In production, name the path with `dir` and do not take the default.
 
 One log per key, in a directory per entity:
 

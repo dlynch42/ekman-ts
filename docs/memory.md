@@ -24,9 +24,23 @@ itself, which is the property that matters for a budget you can test against.
 
 Supply your own basis if you need a different one:
 
-```ts
-memory: { maxBytes: 32 * 1024 * 1024, sizeOf: (values) => values.blob.byteLength },
+<!-- check-docs:
+import { Ekman } from "ekman";
+import type { AnyEntityDefinition } from "ekman";
+declare const orders: AnyEntityDefinition;
+-->
+```ts check
+const ekman = new Ekman({
+  entities: [orders],
+  memory: {
+    maxBytes: 32 * 1024 * 1024,
+    sizeOf: (values) => (values.blob as Uint8Array).byteLength,
+  },
+});
 ```
+
+`values` is the open `Values` map here, since one function sizes every entity's instances, so a
+field is read with a cast or a type guard.
 
 `ekman.memoryUsage` reports `{ bytes, instances, maxBytes }` at any time.
 

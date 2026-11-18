@@ -66,9 +66,11 @@ Each PR wants two labels. The topic labels (`spec`, `runtime`, `constraints`, `s
 
 The label set itself lives in `.autorc` and is applied to the repository with `npx auto create-labels`.
 
+A PR whose change a user will notice should carry a `## Release Notes` section in its body. `auto` copies that section into the changelog in place of the PR title, so an entry reads as a note to someone upgrading and not as a commit subject.
+
 ## Getting set up
 
-Ekman is a TypeScript project and requires Node.js 20 or newer. It has no runtime dependencies, and the file store writes under `.ekman/` in the working directory.
+Ekman is a TypeScript project and requires Node.js 20 or newer. It has no runtime dependencies, and the file store writes under `.ekman/` beside the nearest `package.json` at or above the working directory, which for a checkout of this repository is its root.
 
 ```bash
 git clone https://github.com/dlynch42/ekman-ts

@@ -276,3 +276,28 @@ describe("waiting for an inbox to go idle", () => {
     expect(inbox.idle).toBe(true);
   });
 });
+
+describe("a drain that breaks", () => {
+  it("is reported with the key it was draining, not left as a bare rejection", async () => {
+    const onUnhandled = vi.fn();
+    const broken = new Error("eviction blew up");
+    const inbox = new Inbox({
+      key: "orders:1",
+      entity: "orders",
+      deps: testDeps({ onUnhandled }),
+      // The last thing a drain does. Throwing here is the one way the loop itself fails.
+      onIdle: () => {
+        throw broken;
+      },
+      record: () => undefined,
+    });
+
+    await inbox.enqueue(trigger("t1"), () => Promise.resolve(committed(1)));
+
+    await vi.waitFor(() => expect(onUnhandled).toHaveBeenCalledTimes(1));
+    expect(onUnhandled).toHaveBeenCalledWith(broken, {
+      source: "inbox",
+      key: "orders:1",
+    });
+  });
+});

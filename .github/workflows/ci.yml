@@ -29,6 +29,9 @@ jobs:
         run: npm run lint
       - name: Typecheck
         run: npm run typecheck
+      # The samples in README.md and docs/ that are tagged for it, compiled against src/.
+      - name: Typecheck doc samples
+        run: npm run check:docs
 
   test:
     name: Test (Node ${{ matrix.node-version }})

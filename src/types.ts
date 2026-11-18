@@ -296,7 +296,7 @@ export interface EntityHandle<
   key: (id: string) => string;
   /** Resolves at commit. Rejects on a failed handler or a refused trigger. */
   send: (id: string, trigger: T) => Promise<CommitResult<S, V>>;
-  /** Fire and forget. Wraps `send` and swallows nothing: failures surface as telemetry. */
+  /** Fire and forget. Wraps `send` and swallows nothing: a failure goes to `onUnhandled`. */
   post: (id: string, trigger: T) => void;
   inspect: (id: string) => InstanceSnapshot<S, V> | undefined;
   /** The full per-key stream, read through the store when one is configured. */
@@ -479,10 +479,46 @@ export interface EkmanConfig<
   /** Time source, in milliseconds. Defaults to `Date.now`. Injected by tests. */
   readonly now?: () => number;
   /**
-   * Where a failure from `post()` goes. There is no caller to reject, and dropping it
-   * silently is exactly the failure mode this runtime exists to prevent.
+   * Where a failure with no caller to reject goes: a `post()` that failed, a telemetry
+   * handler that threw, an escalation that could not be delivered, a sweep that failed, a
+   * snapshot or a refusal that could not be written. Dropping one silently is exactly the
+   * failure mode this runtime exists to prevent.
    *
-   * Defaults to logging on stderr. Replace it to route into your own telemetry.
+   * Defaults to logging on stderr with the source named. Replace it to route into your own
+   * telemetry.
    */
-  readonly onUnhandled?: (error: unknown) => void;
+  readonly onUnhandled?: OnUnhandled;
 }
+
+/** Where a failure nobody was waiting on came from. */
+export interface UnhandledContext {
+  /**
+   * What was being done when it failed.
+   *
+   * - `post`: a fire-and-forget send was refused or its handler failed.
+   * - `telemetry`: a telemetry handler threw or rejected.
+   * - `escalation`: a time-in-state bound fired and its trigger was refused.
+   * - `sweep`: an automatic time-in-state sweep failed.
+   * - `storage-sweep`: an automatic storage sweep failed.
+   * - `snapshot`: the snapshot written when an instance is evicted failed.
+   * - `persist`: a refusal or a violation could not be written to the store.
+   * - `audit`: delivering to an audit sink failed in a way the sink's own retries did
+   *   not cover.
+   * - `inbox`: a key's queue stopped draining.
+   */
+  readonly source:
+    | "post"
+    | "telemetry"
+    | "escalation"
+    | "sweep"
+    | "storage-sweep"
+    | "snapshot"
+    | "persist"
+    | "audit"
+    | "inbox";
+  /** The key it concerned, when it concerned one. */
+  readonly key?: string;
+}
+
+/** Receives a failure nobody was waiting on, and where it came from. */
+export type OnUnhandled = (error: unknown, context: UnhandledContext) => void;

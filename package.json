@@ -54,6 +54,7 @@
     "test:coverage": "vitest run --coverage",
     "conformance": "tsx runner/cli.ts",
     "verify:package": "node scripts/verify-package.mjs",
+    "check:docs": "node scripts/check-docs.mjs",
     "bench": "tsx benchmarks/run.ts",
     "bench:commit-rate": "tsx benchmarks/run.ts commit-rate",
     "bench:constraints": "tsx benchmarks/run.ts constraints",
