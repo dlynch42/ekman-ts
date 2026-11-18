@@ -62,6 +62,7 @@ describe("EkmanError", () => {
       "INITIAL_STATE_NOT_IN_STATES",
       "INVALID_CONFIG",
       "NOT_IMPLEMENTED",
+      "RUNTIME_CLOSED",
     ]);
   });
 });

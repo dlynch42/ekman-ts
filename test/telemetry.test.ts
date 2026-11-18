@@ -73,7 +73,10 @@ describe("emit", () => {
     // Telemetry observes the runtime. A broken observer must not take down the
     // dispatch that reported to it.
     expect(() => emit(sink, dropped, onUnhandled)).not.toThrow();
-    expect(onUnhandled).toHaveBeenCalledWith(boom);
+    expect(onUnhandled).toHaveBeenCalledWith(boom, {
+      source: "telemetry",
+      key: "orders:1",
+    });
   });
 });
 
@@ -96,5 +99,39 @@ describe("triggerRef", () => {
         secret: "do not log me",
       } as never)
     ).toEqual({ type: "approve", id: "t7" });
+  });
+});
+
+describe("a telemetry handler that is async", () => {
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+  it("has its rejection reported rather than left unhandled", async () => {
+    const onUnhandled = vi.fn();
+    const unhandledRejection = vi.fn();
+    process.once("unhandledRejection", unhandledRejection);
+    const failure = new Error("exporter is down");
+
+    emit(
+      { "inbox.dropped": () => Promise.reject(failure) },
+      dropped,
+      onUnhandled
+    );
+    await tick();
+    process.off("unhandledRejection", unhandledRejection);
+
+    expect(onUnhandled).toHaveBeenCalledWith(failure, {
+      source: "telemetry",
+      key: "orders:1",
+    });
+    expect(unhandledRejection).not.toHaveBeenCalled();
+  });
+
+  it("is left alone when it resolves", async () => {
+    const onUnhandled = vi.fn();
+
+    emit({ "*": () => Promise.resolve() }, dropped, onUnhandled);
+    await tick();
+
+    expect(onUnhandled).not.toHaveBeenCalled();
   });
 });

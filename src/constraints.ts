@@ -29,6 +29,35 @@ export type ViolationPolicy = "reject" | "warn" | "off";
 /** The default trigger type an escalating temporal constraint delivers. */
 export const DEFAULT_TEMPORAL_TRIGGER = "constraint.temporal";
 
+/**
+ * The trigger a time-in-state bound delivers when it fires.
+ *
+ * An entity with a typed trigger union and a bound adds this to the union, so a handler can
+ * narrow on `trigger.type` and read `escalateTo` as a state:
+ *
+ * ```ts
+ * type DeployTrigger = { type: "deploy"; region: string } | TemporalTrigger<State>;
+ * ```
+ *
+ * `K` is the bound's `trigger` name, for a bound that sets one.
+ */
+// biome-ignore lint/style/useConsistentTypeDefinitions: an interface has no implicit index signature, so the runtime could not hand one to `send` as a `Trigger`
+export type TemporalTrigger<
+  S extends string = string,
+  K extends string = typeof DEFAULT_TEMPORAL_TRIGGER,
+> = {
+  readonly type: K;
+  readonly id?: string;
+  /** The name of the bound that fired. */
+  readonly constraint: string;
+  /** The state the instance has been sitting in. */
+  readonly state: S;
+  /** How long it has been there, in milliseconds. */
+  readonly sinceMs: number;
+  /** The state the bound asks for, when it names one. The handler decides whether to go. */
+  readonly escalateTo?: S;
+};
+
 const POLICIES: readonly ViolationPolicy[] = ["reject", "warn", "off"];
 
 /** The state and values a result is asking to commit. */
@@ -129,7 +158,10 @@ export interface InvariantConstraint<
  * it again.
  */
 export interface TemporalConstraint<S extends string = string> {
-  /** Defaults to `temporal:<in>`. */
+  /**
+   * Defaults to `temporal:<in>:<within>`. Names must be distinct within an entity, because
+   * "already fired" is tracked by name.
+   */
   readonly name?: string;
   /** The state being watched. */
   readonly in: S;
@@ -432,7 +464,8 @@ function compileTemporal<S extends string>(
     if (policy !== "off") {
       compiled.push(
         Object.freeze({
-          name: constraint.name ?? `temporal:${constraint.in}`,
+          name:
+            constraint.name ?? `temporal:${constraint.in}:${constraint.within}`,
           in: constraint.in,
           within: constraint.within,
           escalateTo: constraint.escalateTo,
@@ -443,7 +476,33 @@ function compileTemporal<S extends string>(
     }
   }
 
+  assertDistinctNames(entity, compiled);
   return compiled;
+}
+
+/**
+ * Refuse two temporal constraints with one name.
+ *
+ * A constraint fires once per entry into its state, and which ones have fired is tracked
+ * by name. Two sharing a name would share that record, so the second would never fire.
+ */
+function assertDistinctNames(
+  entity: string,
+  compiled: readonly CompiledTemporal[]
+): void {
+  const names = new Set<string>();
+
+  for (const bound of compiled) {
+    if (names.has(bound.name)) {
+      throw invalid(
+        entity,
+        `two temporal constraints share the name "${bound.name}". Each is tracked by ` +
+          "name so that it fires once per entry into its state, so names must be " +
+          "distinct. Give one of them a `name`."
+      );
+    }
+    names.add(bound.name);
+  }
 }
 
 /**

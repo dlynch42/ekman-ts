@@ -16,6 +16,7 @@ const ABSENCE_OF_A_STORE = /names the absence/;
 const NOT_A_COORDINATION = /is not recognized/;
 const NEEDS_MULTI_WRITER = /declares it cannot/;
 const NOTHING_TO_COORDINATE = /no store is configured/;
+const CACHE_UNDER_MULTI = /cache layer "memory" would be read before/;
 
 const dirs: string[] = [];
 function freshDir(): string {
@@ -46,6 +47,10 @@ const code = (run: () => unknown): string => {
   }
   return "no-throw";
 };
+
+const UNCONDITIONAL_AUTHORITY =
+  /"truth" is the commit authority behind a cache layer, and it does not declare a conditional append/;
+const BEHIND_SEVERAL = /behind cache layers/;
 
 describe("resolving a store stack", () => {
   it("is empty when no store is configured, which is a valid mode", () => {
@@ -134,6 +139,86 @@ describe("resolving a store stack", () => {
       memoryStore({ name: "b" }),
     ]);
     expect(stack.durable).toBe(false);
+  });
+
+  describe("a layer that would be a cache", () => {
+    const lacking = (
+      capabilities: Partial<Store["capabilities"]>,
+      methods: Partial<Store> = {}
+    ): Store => {
+      const inner = memoryStore({ name: "front" });
+      return {
+        name: inner.name,
+        capabilities: { ...inner.capabilities, ...capabilities },
+        append: inner.append.bind(inner),
+        load: inner.load.bind(inner),
+        read: inner.read.bind(inner),
+        snapshot: inner.snapshot.bind(inner),
+        scan: inner.scan.bind(inner),
+        forget: inner.forget.bind(inner),
+        ...methods,
+      };
+    };
+    const refusal = (layer: Store): string => {
+      try {
+        resolveStack([layer, durable()]);
+      } catch (error) {
+        return isEkmanError(error) && error.code === "INVALID_CONFIG"
+          ? error.message
+          : "not a configuration refusal";
+      }
+      return "accepted";
+    };
+
+    it("is refused without a conditional append, which is what keeps it in step", () => {
+      const message = refusal(lacking({ conditionalAppend: false }));
+      expect(message).toContain('store layer "front"');
+      expect(message).toContain("does not declare a conditional append.");
+    });
+
+    it("is refused when it cannot delete a key, which is how it is cleared", () => {
+      expect(refusal(lacking({ forget: false }))).toContain(
+        "does not declare forget."
+      );
+      // Declaring it is not having it.
+      const { forget: _forget, ...withoutTheMethod } = lacking({});
+      expect(refusal(withoutTheMethod)).toContain("does not declare forget.");
+    });
+
+    it("is refused in front of an authority that cannot refuse a stale commit", () => {
+      const inner = memoryStore({ name: "truth", authority: true });
+      const unconditional: Store = {
+        name: inner.name,
+        authority: true,
+        capabilities: { ...inner.capabilities, conditionalAppend: false },
+        append: inner.append.bind(inner),
+        load: inner.load.bind(inner),
+        read: inner.read.bind(inner),
+        snapshot: inner.snapshot.bind(inner),
+        scan: inner.scan.bind(inner),
+        forget: inner.forget.bind(inner),
+      };
+
+      expect(() => resolveStack([lacking({}), unconditional])).toThrow(
+        UNCONDITIONAL_AUTHORITY
+      );
+      expect(() =>
+        resolveStack([lacking({}), memoryStore({ name: "mid" }), unconditional])
+      ).toThrow(BEHIND_SEVERAL);
+      // On its own it has no cache to be misled by.
+      expect(resolveStack([unconditional]).authority).toBe(unconditional);
+    });
+
+    it("is told everything it lacks at once", () => {
+      expect(
+        refusal(lacking({ conditionalAppend: false, forget: false }))
+      ).toContain("does not declare a conditional append or forget.");
+    });
+
+    it("is accepted as the only layer, where nothing is read ahead of it", () => {
+      const alone = lacking({ conditionalAppend: false, forget: false });
+      expect(resolveStack(alone).authority).toBe(alone);
+    });
   });
 
   it("keeps the declared order in layers", () => {
@@ -235,6 +320,12 @@ describe("coordination", () => {
     expect(() => assertCoordination(stack, "multi")).toThrow(
       NEEDS_MULTI_WRITER
     );
+  });
+
+  it("refuses multi-runtime with a cache layer, which would not know what the others wrote", () => {
+    const stack = resolveStack(["memory", durable()]);
+    expect(() => assertCoordination(stack, "multi")).toThrow(CACHE_UNDER_MULTI);
+    expect(() => assertCoordination(stack, "single")).not.toThrow();
   });
 
   it("refuses multi-runtime with nothing to coordinate through", () => {

@@ -56,7 +56,13 @@ export type Partiality =
    * Current state, values and sequence are unaffected: everything dropped had already
    * been folded into the snapshot. What is missing is the middle of the history.
    */
-  | "compacted";
+  | "compacted"
+  /**
+   * Nothing durable holds the stream, and the instance has committed more events than a
+   * runtime keeps in memory per key, so the oldest are gone. Current state, values and
+   * sequence are unaffected.
+   */
+  | "history-capped";
 
 export interface QueryResult {
   readonly instances: readonly QueryMatch[];

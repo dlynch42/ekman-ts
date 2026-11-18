@@ -11,19 +11,19 @@ import type {
   HandlerResult,
   InstanceSnapshot,
   ProposedCommit,
+  ReplayedState,
   Store,
   Trigger,
 } from "../src/index";
 import {
+  createStore,
   defineEntity,
   fail,
+  replay,
   statesFromEntries,
   stay,
   transitionTo,
 } from "../src/index";
-import { fileStore } from "../src/stores/file";
-import type { MemoryStore } from "../src/stores/memory";
-import { memoryStore } from "../src/stores/memory";
 import type {
   AuditSpec,
   CheckSpec,
@@ -211,12 +211,26 @@ export class ScenarioStorage {
         // A memory layer cannot survive a restart, so one instance is kept and reused.
         // That is not cheating: it models a cache that happened to still be warm, and
         // nothing durable is being claimed for it.
-        this.#memory[index] ??= memoryStore(options);
+        this.#memory[index] ??= createStore({ kind: "memory", ...options });
         return this.#memory[index];
       }
 
-      return fileStore(this.#dir(index), options);
+      return createStore({ kind: "file", dir: this.#dir(index), ...options });
     });
+  }
+
+  /**
+   * What the commit authority holds for a key, without making it resident.
+   *
+   * Read the way a reload reads it, snapshot included, so a stream whose transitions were
+   * folded into a snapshot still yields its state, sequence and values.
+   */
+  async committed(key: string): Promise<ReplayedState | undefined> {
+    if (!this.configured) {
+      return;
+    }
+    const loaded = await authorityOf(this.build())?.load(key);
+    return loaded === undefined ? undefined : replay(loaded);
   }
 
   cleanup(): void {
@@ -226,7 +240,7 @@ export class ScenarioStorage {
     this.#dirs.clear();
   }
 
-  readonly #memory: (MemoryStore | undefined)[] = [];
+  readonly #memory: (Store | undefined)[] = [];
 
   #dir(index: number): string {
     let dir = this.#dirs.get(index);
@@ -236,6 +250,20 @@ export class ScenarioStorage {
     }
     return dir;
   }
+}
+
+/**
+ * The layer that owns the truth, picked the way the runtime picks it: the one that claims
+ * it, else the last durable one, else the last.
+ */
+function authorityOf(layers: readonly Store[]): Store | undefined {
+  return (
+    layers.find((layer) => layer.authority === true) ??
+    [...layers]
+      .reverse()
+      .find((layer) => layer.capabilities.durability === "durable") ??
+    layers.at(-1)
+  );
 }
 
 /** Audit sinks that record what they were given, and can be told to fail first. */

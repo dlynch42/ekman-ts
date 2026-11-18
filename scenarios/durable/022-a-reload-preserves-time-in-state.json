@@ -1,0 +1,104 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "durable/022-a-reload-preserves-time-in-state",
+  "name": "time in state survives a restart and keeps running through it: an instance that entered a state before the process stopped is as old as the clock says, downtime included",
+  "level": "durable",
+  "given": {
+    "runtime": {
+      "store": [
+        {
+          "kind": "file"
+        }
+      ],
+      "clock": {
+        "start": 0,
+        "stepMs": 0
+      }
+    },
+    "entities": [
+      {
+        "name": "deployments",
+        "initial": "deploying",
+        "states": [
+          {
+            "state": "deploying",
+            "cases": [
+              {
+                "when": {
+                  "trigger": "finish"
+                },
+                "do": {
+                  "result": "transitionTo",
+                  "to": "live"
+                }
+              }
+            ],
+            "else": {
+              "result": "stay"
+            }
+          },
+          {
+            "state": "live",
+            "else": {
+              "result": "stay"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "deployments:a",
+        "trigger": {
+          "type": "start"
+        }
+      }
+    },
+    {
+      "advance": 600000
+    },
+    {
+      "restart": true
+    },
+    {
+      "send": {
+        "key": "deployments:b",
+        "trigger": {
+          "type": "start"
+        }
+      }
+    },
+    {
+      "advance": 60000
+    }
+  ],
+  "then": {
+    "queries": [
+      {
+        "entity": "deployments",
+        "state": "deploying",
+        "olderThan": "5m",
+        "keys": ["deployments:a"]
+      },
+      {
+        "entity": "deployments",
+        "state": "deploying",
+        "olderThan": 660000,
+        "keys": ["deployments:a"]
+      },
+      {
+        "entity": "deployments",
+        "state": "deploying",
+        "olderThan": 660001,
+        "keys": []
+      },
+      {
+        "entity": "deployments",
+        "state": "deploying",
+        "keys": ["deployments:a", "deployments:b"]
+      }
+    ]
+  }
+}

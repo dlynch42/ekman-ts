@@ -245,6 +245,13 @@ export interface Then {
    * asserted, so "started before settled" is provable.
    */
   readonly telemetry?: readonly Record<string, unknown>[];
+  /**
+   * Telemetry matchers that must match nothing that was emitted.
+   *
+   * The subsequence above can only say an event happened. This is how a scenario says one
+   * did not, which is the whole claim when the behaviour under test is a refusal to act.
+   */
+  readonly telemetryAbsent?: readonly Record<string, unknown>[];
   readonly state?: Readonly<Record<string, StateExpectation | null>>;
   readonly buildError?: { readonly code: string };
   /**
@@ -314,6 +321,12 @@ export function isSendStep(
   return "send" in step;
 }
 
+export function isDrainStep(
+  step: Step
+): step is Extract<Step, { drain: true }> {
+  return "drain" in step && step.drain === true;
+}
+
 export function isWaitStep(
   step: Step
 ): step is Extract<Step, { wait: number }> {
@@ -344,10 +357,87 @@ export function isForgetStep(
   return "forget" in step;
 }
 
+/**
+ * Whether a step is exactly one of the kinds the runner knows, written the way that kind
+ * is written.
+ *
+ * The predicates above only ask which key is present, which is all the runner needs to
+ * dispatch a step it already trusts. This is the check that earns the trust: without it
+ * `{ "sweep": false }` would sweep, and a step naming two kinds would silently run one.
+ */
+export function isWellFormedStep(step: unknown): step is Step {
+  if (typeof step !== "object" || step === null) {
+    return false;
+  }
+
+  const { await: awaited, ...rest } = step as Record<string, unknown>;
+  const [kind, ...others] = Object.keys(rest);
+  if (kind === undefined || others.length > 0) {
+    return false;
+  }
+
+  const value = rest[kind];
+  if (kind === "send") {
+    return (
+      (awaited === undefined || typeof awaited === "boolean") &&
+      hasStringKey(value) &&
+      hasTypedTrigger(value)
+    );
+  }
+  if (awaited !== undefined) {
+    return false;
+  }
+  if (kind === "forget") {
+    return hasStringKey(value);
+  }
+  if (kind === "wait" || kind === "advance") {
+    return typeof value === "number" && value >= 0;
+  }
+  return FLAG_STEPS.has(kind) && value === true;
+}
+
+const FLAG_STEPS: ReadonlySet<string> = new Set(["drain", "sweep", "restart"]);
+
+function hasStringKey(value: unknown): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { key?: unknown }).key === "string"
+  );
+}
+
+/** A trigger is an object naming its type. Anything less would reach the runtime as one. */
+function hasTypedTrigger(value: unknown): boolean {
+  const { trigger } = value as { trigger?: unknown };
+  return (
+    typeof trigger === "object" &&
+    trigger !== null &&
+    typeof (trigger as { type?: unknown }).type === "string"
+  );
+}
+
 /** The scenarios directory, resolved relative to this file so the cwd does not matter. */
 export const SCENARIOS_DIR = fileURLToPath(
   new URL("../scenarios", import.meta.url)
 );
+
+/**
+ * Every telemetry event name a matcher may ask for, read from the scenario schema.
+ *
+ * Read rather than repeated, so the schema stays the one list. A matcher is checked
+ * against it before a scenario runs, because a misspelled type in `telemetryAbsent`
+ * matches nothing and would pass for exactly the reason it should fail.
+ */
+export function telemetryTypes(
+  dir: string = SCENARIOS_DIR
+): ReadonlySet<string> {
+  const schema = JSON.parse(
+    readFileSync(join(dir, "schema", "scenario.schema.json"), "utf8")
+  ) as {
+    $defs: { telemetryMatcher: { properties: { type: { enum: string[] } } } };
+  };
+  return new Set(schema.$defs.telemetryMatcher.properties.type.enum);
+}
 
 const JSON_EXTENSION = /\.json$/;
 

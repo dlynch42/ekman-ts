@@ -1,3 +1,4 @@
+import { assertKnownKeys } from "../config";
 import { EkmanError } from "../errors";
 import type { EkmanEvent } from "../events";
 import type {
@@ -8,7 +9,7 @@ import type {
   StoreCapabilities,
   StoreSnapshot,
 } from "../store";
-import { EMPTY_SEQ, latestSeq, scanKeys } from "../store";
+import { EMPTY_SEQ, isAfterSnapshot, scanKeys } from "../store";
 
 /**
  * The reference store: everything in a map, nothing on disk.
@@ -35,9 +36,17 @@ export class MemoryStore implements Store {
   readonly authority?: boolean;
 
   readonly #events = new Map<string, EkmanEvent[]>();
+  /**
+   * Each key's latest sequence, kept as it is written.
+   *
+   * Deriving it means scanning the key's events, and doing that on every append makes the
+   * cost of a commit grow with the history behind it. Only a transition advances it.
+   */
+  readonly #seq = new Map<string, number>();
   readonly #snapshots = new Map<string, StoreSnapshot>();
 
   constructor(options: { name?: string; authority?: boolean } = {}) {
+    assertKnownKeys("the memory store's options", options, OPTION_KEYS);
     this.name = options.name ?? "memory";
     if (options.authority !== undefined) {
       this.authority = options.authority;
@@ -45,8 +54,7 @@ export class MemoryStore implements Store {
   }
 
   append(key: string, event: EkmanEvent, expectedSeq: number): Promise<void> {
-    const events = this.#events.get(key) ?? [];
-    const current = latestSeq(events);
+    const current = this.#seq.get(key) ?? EMPTY_SEQ;
 
     if (current !== expectedSeq) {
       // Refused before anything is touched, so a caller that sees this knows the store is
@@ -54,29 +62,34 @@ export class MemoryStore implements Store {
       return Promise.reject(conflict(this.name, key, expectedSeq, current));
     }
 
-    events.push(event);
-    this.#events.set(key, events);
+    const events = this.#events.get(key);
+    if (events === undefined) {
+      this.#events.set(key, [event]);
+    } else {
+      events.push(event);
+    }
+    if (event.type === "transition") {
+      this.#seq.set(key, event.seq);
+    }
     return Promise.resolve();
   }
 
   load(key: string): Promise<LoadResult | undefined> {
-    const events = this.#events.get(key);
-    if (events === undefined) {
+    const snapshot = this.#snapshots.get(key);
+    const events = this.#events.get(key) ?? NO_EVENTS;
+    if (events.length === 0 && snapshot === undefined) {
       return Promise.resolve(undefined);
     }
 
-    const snapshot = this.#snapshots.get(key);
-    // Everything after the snapshot. A snapshot at seq N means every commit up to N is
-    // already folded into it, so replaying them again would be work with no effect.
     const after =
       snapshot === undefined
-        ? events
-        : events.filter((event) => event.seq > snapshot.seq);
+        ? events.slice()
+        : events.filter((event) => isAfterSnapshot(event, snapshot.seq));
 
     return Promise.resolve({
       snapshot,
-      events: [...after],
-      seq: latestSeq(events),
+      events: after,
+      seq: this.#seq.get(key) ?? EMPTY_SEQ,
     });
   }
 
@@ -91,6 +104,12 @@ export class MemoryStore implements Store {
     if (existing === undefined || existing.seq < snapshot.seq) {
       this.#snapshots.set(key, snapshot);
     }
+    // A snapshot past the last event this store holds says the key is further on than its
+    // stream shows, which is how a store that was handed a state and not a history is told
+    // where the next append goes.
+    if (snapshot.seq > (this.#seq.get(key) ?? EMPTY_SEQ)) {
+      this.#seq.set(key, snapshot.seq);
+    }
     return Promise.resolve();
   }
 
@@ -102,15 +121,19 @@ export class MemoryStore implements Store {
     // Both halves, or a snapshot would outlive its stream and a later load would rebuild
     // state for a key that is supposed to be gone.
     this.#events.delete(key);
+    this.#seq.delete(key);
     this.#snapshots.delete(key);
     return Promise.resolve();
   }
 
-  /** Keys this store holds anything for. */
+  /** Keys this store holds anything for, whether a stream, a snapshot or both. */
   get keys(): readonly string[] {
-    return [...this.#events.keys()];
+    return [...new Set([...this.#events.keys(), ...this.#snapshots.keys()])];
   }
 }
+
+const OPTION_KEYS = ["name", "authority"] as const;
+const NO_EVENTS: readonly EkmanEvent[] = Object.freeze([]);
 
 export function memoryStore(
   options: { name?: string; authority?: boolean } = {}

@@ -33,14 +33,17 @@ telemetry: {
 },
 ```
 
-Every event carries `key`, `entity` and `at`. `storage.swept` is the exception: it happens to a
-store rather than to an instance.
+Every event carries `key`, `entity` and `at`. `storage.swept` and `runtime.closed` are the
+exceptions: they happen to a store and to the runtime rather than to an instance.
+
+A handler may be `async`. It is never awaited, so it cannot slow the runtime down, and if it
+rejects the error goes to `onUnhandled` rather than becoming an unhandled rejection.
 
 ## The events
 
 | Event | Fires when |
 |---|---|
-| `inbox.enqueued` | A trigger was queued behind work already in flight. |
+| `inbox.enqueued` | A trigger was accepted into the inbox. Fires for every accepted trigger, including one that goes straight to its handler. Carries `depth`. |
 | `inbox.rejected` | The inbox was full and the policy is `reject`. The trigger did not land. |
 | `inbox.dropped` | The inbox was full and a policy dropped a trigger on purpose. |
 | `handler.started` | An attempt began. |
@@ -56,11 +59,18 @@ store rather than to an instance.
 | `instance.forgotten` | An instance was deleted outright, from memory and every store layer. |
 | `memory.accounted` | Resident accounting after a commit. |
 | `memory.refused` | The budget is full and the policy refuses rather than evicting. |
-| `store.cacheFailed` | A cache layer could not be written. The commit was unaffected. |
+| `store.cacheFailed` | A cache layer could not be read, written or cleared. The commit was unaffected, and the layer is not read for that key until it is whole again. |
 | `audit.failed` | An audit sink could not be delivered to, after its retries. |
 | `storage.swept` | A store's retention pass ran. |
+| `runtime.closed` | `close()` finished waiting for in-flight work. Carries `drained` and `pending`. |
 
-Two of these are worth understanding rather than just counting.
+Three of these are worth understanding rather than just counting.
+
+**`inbox.enqueued` is not a contention signal on its own; its `depth` is.** `depth` is how many
+triggers are waiting once this one is in, counting this one and not counting the one being
+handled. Above 1, this trigger is behind others that are still waiting. At 1 it is first in
+line, which is either an idle key, where it runs at once, or a key with one handler in flight.
+To tell those two apart, pair it with `handler.started`.
 
 **`commit.fenced` is the fence doing its job.** Seeing it in a system with timeouts is normal,
 not alarming. It means an abandoned handler finished and its result was correctly refused.
@@ -81,12 +91,23 @@ const ekman = new Ekman({
 });
 ```
 
-An audit sink receives a copy of every committed event, out of band.
+An audit sink receives a copy of every committed event, out of band. That is the
+initialization of an instance and every transition after it. A refused trigger or a constraint
+violation is not a commit and is not delivered: those are in the instance's
+[history](./queries.md) and in the telemetry events above.
 
 **Audit sinks never gate a commit.** Delivery is asynchronous and at-least-once, and a sink has
 no veto. A sink that throws, hangs forever, or is merely slow cannot delay or fail a commit, and
 a sink that cannot be reached after its retries is reported as `audit.failed` and nothing else.
 That is the whole of what a failed audit delivery does.
+
+Delivery starts on a later turn of the event loop than the commit, never inside it, so even a
+sink that does synchronous work costs the commit nothing. The corollary is that a sink has not
+been called yet at the moment `send()` resolves. Events reach a sink in the order they were
+committed; a sink that needs a stronger ordering guarantee across retries should order by `seq`.
+
+A sink's `maxAttempts` must be at least 1, and a sink with no `name` or no `deliver` is refused
+when the runtime is constructed.
 
 ```
 npm run demo:audit   # one sink that throws, one that hangs, one that is slow. Every commit lands.
@@ -95,12 +116,34 @@ npm run demo:audit   # one sink that throws, one that hangs, one that is slow. E
 ## Unhandled errors
 
 ```ts
-onUnhandled: (error) => console.error("[ekman] unhandled", error),
+onUnhandled: (error, { source, key }) => log.error({ source, key, error }, "ekman unhandled"),
 ```
 
-Nothing should reach this. It exists so that if something does, it is visible rather than
-becoming an unhandled rejection with no context. `post()` routes its failures here, since a
-fire-and-forget send has no caller to reject.
+A failure with no caller to reject goes here, so it is visible rather than an unhandled
+rejection with no context. The second argument says where it came from:
+
+| `source` | What failed | `key` |
+|---|---|---|
+| `post` | A fire-and-forget send was refused, or its handler failed. Includes a `post()` after `close()`. | yes |
+| `telemetry` | A telemetry handler threw or rejected. | when the event has one |
+| `escalation` | A time-in-state bound fired and its trigger was refused. | yes |
+| `sweep` | An automatic time-in-state sweep failed, or a sweep could not scan the store or load an instance it found there. | when it was loading one |
+| `storage-sweep` | An automatic storage sweep failed. | no |
+| `snapshot` | The snapshot written when an instance is evicted failed. The events are already stored, so this costs replay time and no state. | yes |
+| `persist` | A refusal or a violation could not be written to the store. | yes |
+| `audit` | Delivery to an audit sink failed outside the sink's own retries. A sink that simply keeps failing is reported as `audit.failed` telemetry instead. | yes |
+| `inbox` | A key's queue stopped draining. | yes |
+
+Some of these are routine. A `post` that a constraint refuses lands here every time. An
+escalation that is refused for a passing reason, such as a full inbox, is retried by the next
+sweep and reported here each time it is refused. A failing cache layer does not come here at
+all: it is reported as `store.cacheFailed`.
+
+The default writes one line to stderr, naming the source and the key:
+
+```
+[ekman] unhandled failure (post for orders:a-1) EkmanError: ...
+```
 
 ## Next
 

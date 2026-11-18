@@ -24,11 +24,40 @@ itself, which is the property that matters for a budget you can test against.
 
 Supply your own basis if you need a different one:
 
-```ts
-memory: { maxBytes: 32 * 1024 * 1024, sizeOf: (values) => values.blob.byteLength },
+<!-- check-docs:
+import { Ekman } from "ekman";
+import type { AnyEntityDefinition } from "ekman";
+declare const orders: AnyEntityDefinition;
+-->
+```ts check
+const ekman = new Ekman({
+  entities: [orders],
+  memory: {
+    maxBytes: 32 * 1024 * 1024,
+    sizeOf: (values) => (values.blob as Uint8Array).byteLength,
+  },
+});
 ```
 
+`values` is the open `Values` map here, since one function sizes every entity's instances, so a
+field is read with a cast or a type guard.
+
 `ekman.memoryUsage` reports `{ bytes, instances, maxBytes }` at any time.
+
+### History is not in the budget, and is bounded separately
+
+The basis counts an instance's current values, not the events that led to them. What a runtime
+keeps of a key's history depends on whether anything else holds it:
+
+- **With a store**, the stream lives in the store and `history()` reads it from there. An
+  instance keeps none of its own transitions in memory, so a key that commits for the life of
+  a process costs the same resident memory on its millionth commit as on its first. A
+  `"memory"` layer in a store stack is the exception to watch: it is a store, so it keeps
+  every event it is sent, and the budget does not count it.
+- **With no store**, the runtime's copy is the only one, so each instance keeps its most recent
+  1,000 events and drops older ones. `history()` then reports `history-capped` beside
+  `no-durable-store`. Current state, values and sequence are never affected. If you need the
+  whole stream, configure a store.
 
 ## When the budget is full
 
@@ -61,6 +90,12 @@ A trigger for an evicted instance reloads it. Your application code cannot tell 
 instance from one that just came back off disk: the same `send()`, the same result, the same
 guarantees. The reload appears in the per-key stream as a `restored` event and in telemetry as
 `instance.restored`.
+
+A [time-in-state sweep](./constraints.md#instances-that-are-not-resident) reloads an evicted
+instance too, when it has sat past a bound and is owed an escalation. That load is counted
+against the budget like any other, and the instance is evictable again as soon as it is idle.
+Under `reject` a full budget refuses the load: the sweep reports it through `onUnhandled` and
+tries again on its next pass.
 
 ```
 npm run demo:memory-bound   # 5000 instances inside a 64 KB budget

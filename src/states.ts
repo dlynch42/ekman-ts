@@ -1,3 +1,5 @@
+import type { StateGraph } from "./types";
+
 /**
  * The states an entity has, and the moves between them it allows.
  *
@@ -22,7 +24,7 @@
  * addresses states by, and what a resident instance will eventually carry so that the source
  * of a transition costs no lookup at all.
  */
-export class States {
+export class States implements StateGraph {
   /** Nodes by id. Declaration order, which is the order every message built from it uses. */
   readonly #nodes: readonly string[];
   readonly #ids: ReadonlyMap<string, NodeId>;

@@ -21,8 +21,6 @@
 export type { Analysis } from "./analysis";
 export { analyze } from "./analysis";
 export type { AuditSink } from "./audit";
-export { DEFAULT_AUDIT_ATTEMPTS } from "./audit";
-export type { ResolvedInboxConfig } from "./config";
 export { DEFAULT_CAPACITY, OVERFLOW_POLICIES } from "./config";
 export type {
   ConstraintCheck,
@@ -31,6 +29,7 @@ export type {
   InvariantConstraint,
   ProposedCommit,
   TemporalConstraint,
+  TemporalTrigger,
   TransitionConstraint,
   ViolationPolicy,
 } from "./constraints";
@@ -57,17 +56,14 @@ export type {
   ViolationEvent,
 } from "./events";
 export { isTransitionEvent } from "./events";
+export type { FenceReason } from "./fence";
 export type { ParsedKey } from "./key";
 export { buildKey, KEY_SEPARATOR, parseKey } from "./key";
-export type {
-  EvictionConfig,
-  EvictionPolicy,
-  MemoryConfig,
-  ResolvedMemoryConfig,
-} from "./memory";
+export type { EvictionConfig, EvictionPolicy, MemoryConfig } from "./memory";
 export { accountBytes, EVICTION_POLICIES } from "./memory";
 export type { ObservedEdges } from "./observed";
 export { allowFrom, observeEdges } from "./observed";
+export type { Backoff, ExecutionPolicy } from "./policy";
 export type {
   HistoryResult,
   Partiality,
@@ -83,46 +79,33 @@ export type {
   TransitionToResult,
 } from "./results";
 export { fail, stay, transitionTo } from "./results";
-export type {
-  Coordination,
-  ResolvedStack,
-  StoreKind,
-  StoreLayer,
-  StoreSpec,
-} from "./stack";
-export { createStore, resolveStack } from "./stack";
-export type { NodeId, States } from "./states";
-export { UNKNOWN_NODE } from "./states";
+export { SPEC_VERSION } from "./spec";
+export type { Coordination, StoreKind, StoreLayer, StoreSpec } from "./stack";
+export { createStore } from "./stack";
 export type {
   LoadResult,
   ReplayedState,
   ScanCriteria,
+  ScanFilter,
   ScanMatch,
   ScanResult,
+  StorageSweep,
   Store,
   StoreCapabilities,
+  StoreCompaction,
   StoreSnapshot,
   StoreUsage,
 } from "./store";
-export {
-  EMPTY_SEQ,
-  entityOf,
-  latestSeq,
-  replay,
-  scanKeys,
-} from "./store";
+// The adapter helpers below are also exported from `ekman/store`, which is where an adapter
+// should take them from. They stay here for one minor version.
+export { EMPTY_SEQ, latestSeq, replay, scanKeys } from "./store";
 export type {
+  FileModeConfig,
   FileStoreOptions,
   RetentionConfig,
   RetentionPolicy,
 } from "./stores/file";
-export {
-  defaultLogDir,
-  defaultStoreDir,
-  projectRoot,
-  RETENTION_POLICIES,
-  STORE_DIR_NAME,
-} from "./stores/file";
+export { defaultLogDir, RETENTION_POLICIES } from "./stores/file";
 export type {
   AuditFailedEvent,
   CommitFencedEvent,
@@ -137,9 +120,12 @@ export type {
   InboxEnqueuedEvent,
   InboxRejectedEvent,
   InstanceEvictedEvent,
+  InstanceForgottenEvent,
   InstanceRestoredEvent,
   MemoryAccountedEvent,
   MemoryRefusedEvent,
+  RuntimeClosedEvent,
+  StorageSweptEvent,
   StoreCacheFailedEvent,
   TelemetryEvent,
   TelemetryEventType,
@@ -147,11 +133,14 @@ export type {
   TriggerRef,
 } from "./telemetry";
 export { TELEMETRY_FALLBACK } from "./telemetry";
+export type { TemporalLatch } from "./temporal";
 export type {
   AnyEntityDefinition,
+  CloseOptions,
   CommitResult,
   EkmanConfig,
   EntityConfig,
+  EntityConstraints,
   EntityDefinition,
   EntityHandle,
   EntityHandles,
@@ -160,10 +149,17 @@ export type {
   HandlerContext,
   InboxConfig,
   InstanceSnapshot,
+  OnUnhandled,
   OverflowPolicy,
+  StateConfig,
+  StateEntry,
+  StateGraph,
+  StatePolicyConfig,
+  StorageConfig,
   TemporalConfig,
   Trigger,
   TriggerLike,
+  UnhandledContext,
   UnknownPolicy,
   Values,
 } from "./types";

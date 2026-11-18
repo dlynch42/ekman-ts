@@ -1,9 +1,10 @@
+import type { Caches } from "./caches";
 import { EkmanError } from "./errors";
-import type { EkmanEvent } from "./events";
+import type { TransitionEvent } from "./events";
 import type { ResolvedMemoryConfig } from "./memory";
 import type { ResolvedStack } from "./stack";
 import type { TelemetrySink } from "./telemetry";
-import type { InboxConfig, OverflowPolicy } from "./types";
+import type { InboxConfig, OnUnhandled, OverflowPolicy } from "./types";
 
 /**
  * Runtime configuration, resolved once at construction.
@@ -32,20 +33,68 @@ export interface ResolvedInboxConfig {
 export interface RuntimeDeps {
   readonly now: () => number;
   readonly telemetry: TelemetrySink | undefined;
-  readonly onUnhandled: (error: unknown) => void;
+  readonly onUnhandled: OnUnhandled;
   readonly inbox: ResolvedInboxConfig;
   /** Which layer owns the truth, and which are caches. */
   readonly stack: ResolvedStack;
+  /** The stack's cache layers, and everything that keeps them worth reading. */
+  readonly caches: Caches;
   readonly memory: ResolvedMemoryConfig;
   /**
    * Hand a committed event to the audit sinks. Never awaited, never able to fail a commit.
    */
-  readonly audit: (event: EkmanEvent) => void;
+  readonly audit: (event: TransitionEvent) => void;
+  /**
+   * Called once a commit has been applied to a record, every time.
+   *
+   * The runtime keeps its indexes in step from here rather than from what a dispatch
+   * returns, so a commit is indexed and accounted however the attempt that made it ended.
+   *
+   * @param record the record the commit was applied to
+   * @param moved whether the commit changed its state
+   */
+  readonly committed: (record: CommittedRecord, moved: boolean) => void;
 }
+
+/** What the runtime reads off a record that has just committed. */
+export interface CommittedRecord {
+  readonly key: string;
+  readonly entity: string;
+  readonly state: string;
+  readonly bytes: number;
+}
+
+/**
+ * Refuse keys a config object does not have.
+ *
+ * A misspelled option is otherwise ignored, and the setting it was meant to change keeps
+ * its default with nothing to say so: `maxbytes` leaves the budget unlimited.
+ *
+ * @param where what is being configured, for the error
+ * @param value the object as the caller passed it
+ * @param known every key it may carry
+ */
+export function assertKnownKeys(
+  where: string,
+  value: object | undefined,
+  known: readonly string[]
+): void {
+  for (const key of Object.keys(value ?? {})) {
+    if (!known.includes(key)) {
+      throw new EkmanError(
+        "INVALID_CONFIG",
+        `${where} has an unrecognized option "${key}". Known options: ${known.join(", ")}.`
+      );
+    }
+  }
+}
+
+const INBOX_KEYS = ["capacity", "overflow", "recordOverflow"] as const;
 
 export function resolveInboxConfig(
   config: InboxConfig | undefined
 ): ResolvedInboxConfig {
+  assertKnownKeys("inbox", config, INBOX_KEYS);
   const capacity = config?.capacity ?? DEFAULT_CAPACITY;
   const overflow = config?.overflow ?? "reject";
 

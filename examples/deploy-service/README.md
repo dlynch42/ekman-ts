@@ -136,7 +136,9 @@ curl localhost:3000/ops/incidents
 curl localhost:3000/ops/metrics
 
 # what a prune would delete, without deleting it
-curl -XPOST 'localhost:3000/ops/prune?olderThan=0ms&dryRun=true'
+# (start the service with OPS_TOKEN set; without one this route answers 503)
+curl -XPOST 'localhost:3000/ops/prune?olderThan=0ms&dryRun=true' \
+     -H "authorization: Bearer $OPS_TOKEN"
 ```
 
 Then **stop the process and start it again**, and read `billing-api` back. It is still
@@ -150,6 +152,9 @@ Everything is environment-driven, with defaults in `src/lib/config.ts`.
 | Variable | Default | What it does |
 |---|---|---|
 | `PORT` | `3000` | HTTP port |
+| `HOST` | `127.0.0.1` | Interface to listen on. Loopback by default; set `0.0.0.0` only behind something that authenticates |
+| `MAX_BODY_BYTES` | `1048576` | Largest request body that is read. Anything bigger is a 413 |
+| `OPS_TOKEN` | unset | Bearer token for `POST /ops/prune` and `POST /ops/sweep`. Unset means those two routes answer 503 |
 | `DATA_DIR` | `.ekman/logs/deploy-service` | Where the transition log lives. Gitignored; delete it to start clean |
 | `MEMORY_BYTES` | `262144` | Resident memory budget. Deliberately small, so eviction is observable |
 | `INBOX_CAPACITY` | `32` | Triggers that may wait behind the one being handled, per deployment |
@@ -166,3 +171,31 @@ service finds the same state whether you start it from the repository root or fr
 
 Set `STUCK_AFTER_MS=2000` and leave a deployment in `deploying` to watch the escalation
 arrive as a trigger and an incident open behind it.
+
+## What is at the boundary, and what is not
+
+The parts of this example most likely to be copied are the ones at its edge, so they are
+written the way a service should have them:
+
+- **It listens on loopback** unless `HOST` says otherwise.
+- **Request bodies are capped** on every route, by declared length before routing and by
+  count as they arrive. A body is never buffered first and measured after.
+- **A request body is never passed on as a trigger.** Each trigger type lists the fields it
+  takes. A client cannot set the `id` that is recorded as the cause of a commit, and cannot
+  send the escalation the runtime delivers for a time bound.
+- **The routes that change things ask who is calling.** `POST /ops/prune` and
+  `POST /ops/sweep` need the operator token, and are off when none is set.
+- **Shutdown drains, and ends.** On `SIGTERM` the server stops accepting and handlers in
+  flight get to commit, then the stores are closed. The whole of it has ten seconds, counted
+  from the signal, after which open connections are dropped.
+- **The entities still check.** The region guard and the incident's checks hold for a
+  producer that skips the API, as the queue consumer does.
+
+What it does not do, and a real service needs:
+
+- **Authentication beyond one shared token.** The token stands in for whatever you already
+  have. The read routes, including the ones under `/ops`, are open.
+- **TLS.** Terminate it in front.
+- **Rate limiting.** The inbox bounds work per deployment, not requests per client.
+- **Validating queue messages.** The consumer sends what the queue gave it, by key. The
+  entity's trigger list and guards are the only check on that path.

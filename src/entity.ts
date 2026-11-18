@@ -1,7 +1,11 @@
+import { sealConstraints } from "./compiled";
+import { assertKnownKeys } from "./config";
+import type { CompiledTemporal } from "./constraints";
 import { compileConstraints } from "./constraints";
 import { EkmanError } from "./errors";
-import { buildKey } from "./key";
+import { buildKey, KEY_SEPARATOR, segmentFault } from "./key";
 import type { ExecutionPolicy } from "./policy";
+import { assertPolicyKeys, POLICY_KEYS } from "./policy";
 import { States } from "./states";
 import type {
   EntityConfig,
@@ -14,8 +18,7 @@ import type {
   Values,
 } from "./types";
 import { ERROR_FALLBACK } from "./types";
-
-const WHITESPACE = /\s/;
+import { sealInitialValues } from "./values";
 
 /**
  * Define an entity: its states, handlers, and policies for one domain.
@@ -24,8 +27,11 @@ const WHITESPACE = /\s/;
  * tested on its own and registered with more than one runtime.
  *
  * Types are inferred: the state union comes from the keys of `states`, and the values
- * type from `values`. To pin all three type parameters explicitly, annotate the
- * binding instead of passing type arguments, which also keeps the name literal:
+ * type from `values`. Trigger payloads are `unknown` unless the entity is given a trigger
+ * union, which is what `defineEntity.withTriggers` is for.
+ *
+ * To pin every type parameter explicitly, annotate the binding instead of passing type
+ * arguments, which also keeps the name literal:
  *
  * ```ts
  * export const deployments: EntityDefinition<"deployments", State, Values, Trigger> =
@@ -39,6 +45,7 @@ export function defineEntity<
   T extends TriggerLike = Trigger,
 >(name: N, config: EntityConfig<S, V, T>): EntityDefinition<N, S, V, T> {
   assertEntityName(name);
+  assertEntityConfig(name, config);
 
   const handlers = new Map<string, StateEntry<S, V, T>>(
     (Object.entries(config.states) as [string, StateConfig<S, V, T>][]).map(
@@ -84,19 +91,19 @@ export function defineEntity<
     Object.entries(config.onError ?? {}) as [string, ErrorHandler<S, V>][]
   );
 
-  const initialValues = Object.freeze({
-    ...(config.values ?? {}),
-  }) as Readonly<V>;
+  const initialValues = sealInitialValues((config.values ?? {}) as V, name);
   const classify = config.classify ?? defaultClassify;
 
   const states = new States(handlers.keys());
 
   // Compiled last, because every constraint names states and the check is worth making
   // against the states that survived validation rather than against the raw config.
-  const constraints =
+  const compiled =
     config.constraints === undefined
       ? undefined
       : compileConstraints<S, V, T>(name, config.constraints, states);
+
+  assertEscalationsRecognized(name, triggers, compiled?.temporal ?? []);
 
   return Object.freeze({
     name,
@@ -108,10 +115,44 @@ export function defineEntity<
     handlers,
     errorHandlers,
     classify,
-    constraints,
+    constraints: sealConstraints(compiled),
     key: (id: string) => buildKey(name, id),
   });
 }
+
+/**
+ * Define an entity whose trigger union is given explicitly, with the name, states and
+ * values still inferred from the config.
+ *
+ * The union cannot be inferred from a handler's parameters, because inferring from the
+ * `states` values is what would widen the state union. So it is supplied first, on its own,
+ * and everything else follows from the config as usual:
+ *
+ * ```ts
+ * type OrderTrigger =
+ *   | { type: "pay"; amount: number }
+ *   | { type: "refund"; reason: string };
+ *
+ * const orders = defineEntity.withTriggers<OrderTrigger>()("orders", {
+ *   initial: "pending",
+ *   states: {
+ *     pending: (order, trigger) =>
+ *       trigger.type === "pay" ? transitionTo("paid", { total: trigger.amount }) : stay(),
+ *     paid: () => stay(),
+ *   },
+ * });
+ * ```
+ *
+ * `entities.orders.send` then refuses a payload outside the union at compile time, and a
+ * `triggers` list is checked against the union's types.
+ */
+defineEntity.withTriggers =
+  <T extends TriggerLike>() =>
+  <const N extends string, S extends string, V extends Values = Values>(
+    name: N,
+    config: EntityConfig<S, V, T>
+  ): EntityDefinition<N, S, V, T> =>
+    defineEntity<N, S, V, T>(name, config);
 
 /**
  * Normalize the two ways a state may be declared into one shape.
@@ -193,17 +234,143 @@ export function statesFromEntries<
  * the same rules a segment does.
  */
 function assertEntityName(name: string): void {
-  if (typeof name !== "string" || name.length === 0) {
-    throw new EkmanError(
-      "INVALID_KEY",
-      "entity name must be a non-empty string"
-    );
+  if (typeof name !== "string") {
+    throw new EkmanError("INVALID_KEY", "entity name must be a string");
   }
-  if (name.includes(":") || WHITESPACE.test(name)) {
+  const fault = name.includes(KEY_SEPARATOR)
+    ? `contains "${KEY_SEPARATOR}"`
+    : segmentFault(name);
+  if (fault !== undefined) {
     throw new EkmanError(
       "INVALID_KEY",
-      `entity name ${JSON.stringify(name)} must not contain ":" or whitespace, ` +
+      `entity name ${JSON.stringify(name)} ${fault}, and it has to be a valid key segment ` +
         "because it is the first segment of every key it addresses"
     );
   }
+}
+
+/**
+ * Refuse a time bound whose escalation the entity would refuse on arrival.
+ *
+ * An escalation is delivered as a trigger. An entity that declares which trigger types it
+ * recognizes and leaves this one out would refuse it as unknown, and the instance the bound
+ * was watching would stay exactly where it was stuck. A bound that only warns delivers
+ * nothing, so it is not held to this.
+ */
+function assertEscalationsRecognized(
+  entity: string,
+  triggers: ReadonlySet<string> | null,
+  bounds: readonly CompiledTemporal[]
+): void {
+  if (triggers === null) {
+    return;
+  }
+
+  for (const bound of bounds) {
+    if (bound.policy !== "warn" && !triggers.has(bound.trigger)) {
+      throw new EkmanError(
+        "INVALID_CONFIG",
+        `entity "${entity}": temporal constraint "${bound.name}" delivers trigger type ` +
+          `"${bound.trigger}", which is not in the declared triggers list. Add it to ` +
+          "`triggers`, or set `trigger` on the constraint to one that is declared."
+      );
+    }
+  }
+}
+
+const ENTITY_KEYS = [
+  "initial",
+  "values",
+  "unknown",
+  "triggers",
+  "states",
+  "policy",
+  "onError",
+  "classify",
+  "constraints",
+] as const;
+
+const CONSTRAINT_KEYS = [
+  "transitions",
+  "guards",
+  "invariants",
+  "temporal",
+] as const;
+
+const STATE_KEYS = ["handler", ...POLICY_KEYS] as const;
+
+/** The options each kind of constraint declaration takes, by the key it is declared under. */
+const DECLARATION_KEYS = {
+  transitions: ["allow", "policy"],
+  guards: ["name", "on", "from", "policy", "check"],
+  invariants: ["name", "in", "policy", "check"],
+  temporal: ["name", "in", "within", "escalateTo", "trigger", "policy"],
+} as const;
+
+/**
+ * Refuse an unrecognized option on any single constraint declaration.
+ *
+ * The same reasoning as for every other level, with a sharper edge: a misspelled `policy`
+ * leaves a constraint on its default of `reject`, so a rule meant only to warn starts
+ * failing commits.
+ */
+function assertDeclarationKeys(where: string, constraints: object = {}): void {
+  for (const [kind, known] of Object.entries(DECLARATION_KEYS)) {
+    const declared = (constraints as Record<string, unknown>)[kind];
+    const each = Array.isArray(declared) ? declared : [declared];
+
+    each.forEach((declaration, i) => {
+      if (typeof declaration === "object" && declaration !== null) {
+        const which = Array.isArray(declared) ? `${kind}[${i}]` : kind;
+        assertKnownKeys(`${where} constraints.${which}`, declaration, known);
+      }
+    });
+  }
+}
+
+/**
+ * Refuse an entity config that says something the runtime would silently not do.
+ *
+ * Two kinds of thing. A key that does not exist, at any level that takes named options,
+ * is usually a misspelling of one that does. And `unknown` has exactly one value: plain
+ * JavaScript can pass another, which would otherwise be accepted and behave as `reject`,
+ * leaving the caller believing unrecognized triggers were handled some other way.
+ */
+function assertEntityConfig(
+  name: string,
+  config: {
+    readonly unknown?: unknown;
+    readonly policy?: ExecutionPolicy;
+    readonly constraints?: object;
+    readonly states?: Readonly<Record<string, unknown>>;
+  }
+): void {
+  const where = `entity "${name}"`;
+
+  assertKnownKeys(where, config, ENTITY_KEYS);
+  assertKnownKeys(`${where} constraints`, config.constraints, CONSTRAINT_KEYS);
+  assertDeclarationKeys(where, config.constraints);
+  assertPolicyKeys(config.policy, `${where} policy`);
+
+  for (const [state, declared] of Object.entries(config.states ?? {})) {
+    if (typeof declared === "object" && declared !== null) {
+      const label = `${where} state "${state}"`;
+      assertKnownKeys(label, declared, STATE_KEYS);
+      assertPolicyKeys(withoutHandler(declared), label);
+    }
+  }
+
+  if (config.unknown !== undefined && config.unknown !== "reject") {
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      `${where} declares unknown policy ${JSON.stringify(config.unknown)}. The only ` +
+        'policy is "reject": a trigger the entity does not recognize is refused and ' +
+        'the refusal is recorded. Omit the field, or set it to "reject".'
+    );
+  }
+}
+
+function withoutHandler(declared: object): ExecutionPolicy {
+  const { handler: _handler, ...policy } = declared as { handler?: unknown };
+  return policy;
 }

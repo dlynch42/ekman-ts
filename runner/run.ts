@@ -13,16 +13,18 @@ import type {
   QueryExpectation,
   Scenario,
   SendExpectation,
-  StateExpectation,
   Step,
 } from "./scenario";
 import {
   isAdvanceStep,
+  isDrainStep,
   isForgetStep,
   isRestartStep,
   isSendStep,
   isSweepStep,
   isWaitStep,
+  isWellFormedStep,
+  telemetryTypes,
 } from "./scenario";
 
 export interface ScenarioResult {
@@ -61,7 +63,62 @@ interface Outcomes {
   forgets: ForgetOutcome[];
 }
 
+/** Every assertion a scenario may make. A key outside this set asserts nothing, so it is refused. */
+const THEN_KEYS: ReadonlySet<string> = new Set([
+  "sends",
+  "forgets",
+  "events",
+  "telemetry",
+  "telemetryAbsent",
+  "state",
+  "resident",
+  "memory",
+  "audit",
+  "queries",
+  "history",
+  "buildError",
+]);
+
+const TELEMETRY_TYPES = telemetryTypes();
+
+/**
+ * Refuse a scenario the runner would otherwise misread.
+ *
+ * Thrown rather than reported as a failure. A misspelled assertion or step is a defect in
+ * the suite, and reporting it against the implementation would send someone looking for
+ * a bug that is not there.
+ */
+function assertWellFormed(scenario: Scenario): void {
+  for (const key of Object.keys(scenario.then ?? {})) {
+    if (!THEN_KEYS.has(key)) {
+      throw new Error(`scenario ${scenario.id}: unknown then key "${key}"`);
+    }
+  }
+
+  for (const step of scenario.when ?? []) {
+    if (!isWellFormedStep(step)) {
+      throw new Error(
+        `scenario ${scenario.id}: unknown step ${JSON.stringify(step)}, ` +
+          "expected exactly one of send, drain, wait, advance, sweep, restart or forget"
+      );
+    }
+  }
+
+  for (const where of ["telemetry", "telemetryAbsent"] as const) {
+    (scenario.then?.[where] ?? []).forEach((matcher, i) => {
+      if (!TELEMETRY_TYPES.has(matcher.type as string)) {
+        throw new Error(
+          `scenario ${scenario.id}: then.${where}[${i}] names no known telemetry event ` +
+            `(type ${JSON.stringify(matcher.type)})`
+        );
+      }
+    });
+  }
+}
+
 export async function runScenario(scenario: Scenario): Promise<ScenarioResult> {
+  assertWellFormed(scenario);
+
   const failures: string[] = [];
 
   try {
@@ -95,7 +152,9 @@ async function execute(scenario: Scenario, failures: string[]): Promise<void> {
         `expected building to fail with ${expectBuildError.code}, but it succeeded`
       );
     } catch (error) {
-      const { code } = error as EkmanError;
+      // Whatever was thrown, which need not be an EkmanError. The cast is how `code` gets
+      // read at all, so its type says string where the value can be undefined.
+      const code: string | undefined = (error as EkmanError).code;
       if (code !== expectBuildError.code) {
         failures.push(
           `expected build error ${expectBuildError.code}, got ${code ?? "a non-Ekman error"}: ${(error as Error).message}`
@@ -123,11 +182,13 @@ async function execute(scenario: Scenario, failures: string[]): Promise<void> {
       buildRuntime(scenario, telemetry, clock, storage, audit)
     );
 
+    await auditSettled();
     assertSends(scenario.then?.sends, outcomes.sends, failures);
     assertForgets(scenario.then?.forgets, outcomes.forgets, failures);
     await assertEvents(scenario, active.ekman, failures);
     assertTelemetry(scenario.then?.telemetry, telemetry, failures);
-    assertState(scenario.then?.state, active.ekman, failures);
+    assertTelemetryAbsent(scenario.then?.telemetryAbsent, telemetry, failures);
+    await assertState(scenario, storage, active.ekman, failures);
     assertResident(scenario.then?.resident, active.ekman, failures);
     assertMemory(scenario.then?.memory, active.ekman, failures);
     assertAudit(scenario.then?.audit, audit, failures);
@@ -224,8 +285,14 @@ async function deliver(
       continue;
     }
 
-    if (!isSendStep(step)) {
+    if (isDrainStep(step)) {
       await Promise.all(inFlight);
+      continue;
+    }
+
+    // Every other kind was handled above, and a scenario is checked for unknown steps
+    // before it runs, so this only narrows the type.
+    if (!isSendStep(step)) {
       continue;
     }
 
@@ -256,6 +323,17 @@ async function deliver(
 
   await Promise.all(inFlight);
   return { sends: outcomes, forgets };
+}
+
+/**
+ * Let audit deliveries that the steps set in motion finish before anything is asserted.
+ *
+ * A sink is never called inside a commit, so a delivery is still pending when the send that
+ * caused it resolves. One turn of the event loop is enough for the sinks a scenario can
+ * declare, which deliver or refuse without waiting on anything.
+ */
+function auditSettled(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 /** Delete a key, recording whether it was allowed rather than letting a refusal throw. */
@@ -430,22 +508,75 @@ function assertTelemetry(
   });
 }
 
+/** Assert that none of the listed matchers matches anything that was emitted. */
+function assertTelemetryAbsent(
+  unwanted: readonly Record<string, unknown>[] | undefined,
+  actual: readonly TelemetryEvent[],
+  failures: string[]
+): void {
+  if (unwanted === undefined) {
+    return;
+  }
+
+  unwanted.forEach((matcher, i) => {
+    const found = actual.findIndex(
+      (event) =>
+        diff("", event as unknown as Record<string, unknown>, matcher)
+          .length === 0
+    );
+
+    if (found !== -1) {
+      failures.push(
+        `telemetryAbsent[${i}]: found ${describeMatcher(matcher)} at position ${found} of what was emitted`
+      );
+    }
+  });
+}
+
 function describeMatcher(want: Record<string, unknown>): string {
   const type = typeof want.type === "string" ? want.type : "event";
   return `${type} matching ${JSON.stringify(want)}`;
 }
 
-function assertState(
-  expected: Readonly<Record<string, StateExpectation | null>> | undefined,
+/** What `then.state` compares against, wherever it was read from. */
+interface CommittedState {
+  readonly state: string;
+  readonly seq: number;
+  readonly values: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * The committed state of a key, from memory when it is resident and through the store
+ * when it is not.
+ *
+ * Without the second half, `null` would only ever mean "not in memory", and a key that
+ * survived a restart would be indistinguishable from one that was deleted.
+ */
+function committedState(
+  storage: ScenarioStorage,
+  ekman: Ekman,
+  key: string
+): Promise<CommittedState | undefined> {
+  const resident = ekman.inspect(key);
+  return resident === undefined
+    ? storage.committed(key)
+    : Promise.resolve(resident);
+}
+
+async function assertState(
+  scenario: Scenario,
+  storage: ScenarioStorage,
   ekman: Ekman,
   failures: string[]
-): void {
+): Promise<void> {
+  const expected = scenario.then?.state;
   if (expected === undefined) {
     return;
   }
 
   for (const [key, want] of Object.entries(expected)) {
-    const got = ekman.inspect(key);
+    // biome-ignore lint/performance/noAwaitInLoops: one key at a time keeps failures in scenario order
+    const got = await committedState(storage, ekman, key);
 
     if (want === null) {
       if (got !== undefined) {
@@ -641,6 +772,9 @@ async function assertHistory(
 /**
  * Compare `want` against `got` as a subset: only the fields the scenario names are
  * asserted, so scenarios stay narrow and do not break when an event gains a field.
+ *
+ * The one exception is an empty object, which means exactly empty. Read as a subset it
+ * would name no fields and match anything, so "starts with no values" would assert nothing.
  */
 function diff(
   path: string,
@@ -675,6 +809,13 @@ function diff(
 
   if (typeof got !== "object" || got === null || Array.isArray(got)) {
     return [`${path}: expected an object, got ${json(got)}`];
+  }
+
+  if (Object.keys(want).length === 0) {
+    const extra = Object.keys(got);
+    return extra.length === 0
+      ? []
+      : [`${path}: expected an empty object, got keys ${extra.join(", ")}`];
   }
 
   return Object.entries(want as Record<string, unknown>)

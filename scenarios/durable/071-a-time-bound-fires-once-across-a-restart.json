@@ -1,0 +1,132 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "durable/071-a-time-bound-fires-once-across-a-restart",
+  "name": "a time-in-state bound that fired before a restart does not fire again after it, because the instance has not left the state",
+  "level": "durable",
+  "given": {
+    "runtime": {
+      "store": [
+        {
+          "kind": "file"
+        }
+      ],
+      "clock": {
+        "start": 0,
+        "stepMs": 0
+      }
+    },
+    "entities": [
+      {
+        "name": "deployments",
+        "initial": "deploying",
+        "constraints": {
+          "temporal": [
+            {
+              "name": "deploy-timeout",
+              "in": "deploying",
+              "within": 1000,
+              "escalateTo": "stalled",
+              "policy": "warn"
+            }
+          ]
+        },
+        "states": [
+          {
+            "state": "deploying",
+            "cases": [
+              {
+                "when": {
+                  "trigger": "constraint.temporal"
+                },
+                "do": {
+                  "result": "transitionTo",
+                  "to": {
+                    "$trigger": "escalateTo"
+                  }
+                }
+              }
+            ],
+            "else": {
+              "result": "stay",
+              "values": {
+                "who": {
+                  "$trigger": "who"
+                }
+              }
+            }
+          },
+          {
+            "state": "stalled",
+            "else": {
+              "result": "stay"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "deployments:a",
+        "trigger": {
+          "type": "start",
+          "who": "a"
+        }
+      }
+    },
+    {
+      "advance": 5000
+    },
+    {
+      "sweep": true
+    },
+    {
+      "restart": true
+    },
+    {
+      "advance": 5000
+    },
+    {
+      "sweep": true
+    }
+  ],
+  "then": {
+    "events": {
+      "deployments:a": [
+        {
+          "type": "transition",
+          "from": null,
+          "to": "deploying",
+          "seq": 0
+        },
+        {
+          "type": "transition",
+          "from": "deploying",
+          "to": "deploying",
+          "seq": 1
+        },
+        {
+          "type": "violation",
+          "seq": 1,
+          "at": 5000,
+          "policy": "warn",
+          "constraint": {
+            "kind": "temporal",
+            "name": "deploy-timeout"
+          }
+        },
+        {
+          "type": "restored",
+          "seq": 1
+        }
+      ]
+    },
+    "state": {
+      "deployments:a": {
+        "state": "deploying",
+        "seq": 1
+      }
+    }
+  }
+}

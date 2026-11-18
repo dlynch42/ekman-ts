@@ -40,7 +40,9 @@ When the inbox is full, the overflow policy decides, and the sender always finds
 | `drop-oldest` | The longest-waiting queued trigger is discarded. | The dropped trigger's `send()` rejects with `TRIGGER_DROPPED`. | Shedding, biased toward freshness. |
 
 The distinction matters operationally. `INBOX_OVERFLOW` means try again; over HTTP it is a 503
-with `Retry-After`. `TRIGGER_DROPPED` means do not try again, because this was deliberate.
+with `Retry-After`. `TRIGGER_DROPPED` means that trigger is gone, on purpose. Sending the same
+one again only repeats the shedding; whether a fresh one is worth sending is the producer's
+call. [Error codes](./errors.md) has the retry answer for every code.
 
 ## Overflow is visible, and it is not history
 
@@ -62,6 +64,43 @@ behave like a queue of intentions rather than a queue of stale decisions.
 
 A queued trigger cannot slip past an attempt that is still in flight, including while that
 attempt is being retried. See [Execution](./execution.md).
+
+## Reentrancy: do not await a send to your own key
+
+A handler that awaits `send()` to the key it is handling waits on itself. The inner trigger
+queues behind the handler, and the handler is waiting for the inner trigger:
+
+```ts
+deploying: async (deployment, trigger, ctx) => {
+  await ekman.send(ctx.key, { type: "progress" });   // never resolves
+  return stay(deployment.values);
+},
+```
+
+The runtime does not detect this. What happens next depends on the execution policy:
+
+- **With no `timeoutMs`, which is the default, the key is stuck for good.** Nothing is logged
+  and nothing is emitted. Later triggers for the key queue behind it until the inbox is full and
+  they meet the overflow policy, and `close()` waits out its deadline.
+- **With a `timeoutMs`, the attempt ends in `HANDLER_TIMEOUT`.** The inner trigger then runs, on
+  whatever state the key is in by then.
+
+It is easy to reach without writing that line. A handler that owns something with callbacks, such
+as a consumer, a watcher or a subscription, and awaits it, has the same shape if a callback sends
+to the same key.
+
+Use `post()` for follow-up work on the same key. It queues the trigger and returns at once, so
+the handler finishes and the follow-up is handled next, on the state the handler committed:
+
+```ts
+deploying: (deployment, trigger, ctx) => {
+  ekman.post(ctx.key, { type: "progress" });
+  return stay(deployment.values);
+},
+```
+
+Give any handler that waits on a callback a `timeoutMs`, so a mistake here costs one timeout and
+not the key. Sending to a different key from inside a handler is fine.
 
 ```
 npm run demo:ordering    # five triggers at one slow key, read-modify-write, no lost updates

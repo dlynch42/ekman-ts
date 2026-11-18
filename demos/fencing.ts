@@ -15,7 +15,7 @@
  * gate.
  *
  * The second run is the honest counterpart. If a commit has already reached the store when
- * the timeout fires, it stands, and the sender is told it timed out. That is a real window,
+ * the timeout fires, it stands, and the sender is told it committed. That is a real window,
  * it is reported as `commit.raced`, and pretending it does not exist would be worse than
  * explaining it.
  */
@@ -188,14 +188,6 @@ async function raced(): Promise<void> {
 
   let racedSeq: number | undefined;
 
-  // Same shape as the fence: the append is still in flight when the sender is told, so
-  // the outcome the demo is about happens after the `await` on `send` has already
-  // returned. Something has to wait for it.
-  let settleRace: () => void = () => undefined;
-  const raceSettled = new Promise<void>((resolve) => {
-    settleRace = resolve;
-  });
-
   const ekman = new Ekman({
     entities: [quick],
     store: lagging(createStore("memory"), STORE_LAG_MS),
@@ -206,7 +198,6 @@ async function raced(): Promise<void> {
           `    telemetry  commit.raced       the commit landed at seq ${event.seq} anyway`
         );
         racedSeq = event.seq;
-        settleRace();
       },
     },
   });
@@ -219,13 +210,11 @@ async function raced(): Promise<void> {
     ekman.entities.quick.send("q1", { type: "go" })
   );
   console.log(`\n  the sender was told: ${outcome}`);
-  console.log("  waiting for the append that was already in flight...\n");
-  await raceSettled;
 
   const after = ekman.entities.quick.inspect("q1");
   console.log(`  the instance:        state=${after?.state} seq=${after?.seq}`);
 
-  check(outcome === "HANDLER_TIMEOUT", `expected a timeout, got ${outcome}`);
+  check(outcome === "committed", `expected a commit, got ${outcome}`);
   check(
     racedSeq !== undefined,
     "the commit did not race the timeout, so this run proved nothing"
@@ -237,10 +226,11 @@ async function raced(): Promise<void> {
 
   console.log(
     "\n  This one committed. It had already reached the store when the timer fired, and\n" +
-      "  un-writing a durable append is not something a runtime gets to do. The sender\n" +
-      '  still hears HANDLER_TIMEOUT, which is why the answer to "did it land?" is\n' +
-      "  `commit.raced` and a read, not a guess. A sustained rate of this means the\n" +
-      "  timeout is set too close to how long the store actually takes."
+      "  un-writing a durable append is not something a runtime gets to do. So the\n" +
+      "  sender hears that it committed, late, rather than a timeout that would invite\n" +
+      "  a retry of work already done. `commit.raced` is what records the overrun, and\n" +
+      "  a sustained rate of it means the timeout is set too close to how long the\n" +
+      "  store actually takes."
   );
 
   await ekman.close();

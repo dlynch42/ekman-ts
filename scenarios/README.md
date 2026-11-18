@@ -145,10 +145,12 @@ valid documented mode: nothing survives the process, and nothing pretends to.
 | `name` | Layer name, used in telemetry. Defaults to the kind. Layers must not share one. |
 | `authority` | Claim to be the commit authority, overriding the runtime's choice. |
 
-A list is a layered stack, read fastest first. Exactly one layer is the **commit
-authority**: the last durable one, or the last one when none is durable, unless a layer
-claims it. Every other layer is a cache, written after the fact, and a cache write that
-fails is reported without failing the commit.
+A list is a layered stack, fastest first. Exactly one layer is the **commit authority**: the
+last durable one, or the last one when none is durable, unless a layer claims it. Every
+other layer is a cache. It is written after the authority, and a write that fails is
+reported without failing the commit. It is read before the authority when an instance is
+loaded, and only then: history and queries are the authority's. A cache that misses is
+filled from whatever answered, so one that starts empty fails nothing.
 
 Runners give a `file` layer somewhere of their own to keep its bytes, and clean it up
 afterwards. Scenarios never name paths: where a durable store puts things is not behaviour
@@ -432,6 +434,10 @@ fresh one opens over the same durable bytes. Everything resident is lost; everyt
 committed to a durable store is not. Runners rebuild durable layers rather than reusing the
 objects, so whatever a layer was caching in memory goes too.
 
+The declared clock is not restarted. It carries on from where it was, as a wall clock does
+across a real restart, so time in state includes the time the process was down: an instance
+that entered a state ten minutes before a `restart` is ten minutes old after it.
+
 An ephemeral layer necessarily survives a restart in a runner, because there is nothing to
 rebuild it from. That is not a claim about durability, and no scenario should make one:
 assert what a **durable** layer brings back.
@@ -515,6 +521,11 @@ The per-key ordered event stream, keyed by instance key. The assertion is a full
 list: an extra or missing event is a failure. Each event is matched as a subset, so a
 scenario asserts only the fields it cares about.
 
+An empty object is the one exception to subset matching, here and everywhere else a
+scenario expects an object: `{}` means exactly empty. Read as a subset it would name no
+fields and match anything, so `"values": {}` would not assert that an instance starts with
+none.
+
 ```json
 {
   "orders:1": [
@@ -574,6 +585,19 @@ trigger should not have to enumerate every enqueue around it.
 
 Each matcher is a subset match, like an event assertion.
 
+### `then.telemetryAbsent`
+
+Matchers that must match nothing that was emitted. The subsequence above can say an event
+happened and never that one did not, which is the whole claim when the behaviour under test
+is that the runtime declined to do something.
+
+```json
+[{ "type": "commit.fenced" }]
+```
+
+Each matcher is a subset match against every emitted event, in any position. One that names
+only a `type` asserts no event of that type was emitted at all.
+
 | Event | Emitted when | Notable fields |
 |---|---|---|
 | `inbox.enqueued` | A trigger is accepted into an inbox. | `depth`, `capacity`, `trigger` |
@@ -592,15 +616,17 @@ Each matcher is a subset match, like an event assertion.
 | `instance.evicted` | An instance was released to stay inside the budget. | `state`, `seq`, `bytes`, `snapshotted`, `residentBytes` |
 | `instance.restored` | An instance was rebuilt from the store. | `state`, `seq`, `from`, `replayed` |
 | `audit.failed` | An audit sink could not be delivered to, after its retries. | `sink`, `error`, `seq` |
-| `store.cacheFailed` | A cache layer could not be written. The commit stands. | `store`, `error`, `seq` |
+| `store.cacheFailed` | A cache layer could not be read, written or cleared. The commit stands. | `store`, `error`, `seq` |
+| `runtime.closed` | The runtime finished closing. A `restart` step emits one. | `drained`, `pending` |
 
 `memory.accounted.maxBytes` is `null` when the budget is unlimited.
 
 `commit.raced` is the honest name for a narrow window. A commit that has reached the commit
 authority is durable, so it is applied even if the attempt's timeout fires mid-write:
 refusing it would leave the store holding an event the runtime never applied, and replay
-would then rebuild a state the live runtime never had. The sender is still told the attempt
-timed out. A sustained rate of this means timeouts are set close to how long the store
+would then rebuild a state the live runtime never had. The sender is told the commit landed,
+since that is what happened, and this event is what records that the attempt ran past its
+timeout on the way. A sustained rate of it means timeouts are set close to how long the store
 actually takes.
 
 `handler.settled.outcome` is `committed`, `failed`, or `refused`. `refused` means the
@@ -637,6 +663,11 @@ Current committed state per key, after all steps settle.
 
 Use `null` as the value for a key to assert that no instance exists for it.
 
+A key that is not in memory is read back through the store when the runtime has one, so
+`null` asserts the instance does not exist anywhere, not merely that it is not resident.
+Residency is `then.resident`'s question. Without a store there is nowhere else to look, and
+`null` means no resident instance.
+
 ### `then.forgets`
 
 Outcomes of the `forget` steps, in the order the steps appear.
@@ -666,7 +697,8 @@ was read back through the store without the assertion having to know it happened
 accounting, not an exact figure, because the exact number depends on key names.
 
 `audit` lists what each sink received, as `<type>@<seq>`, keyed by sink name. Initialization
-is a commit, so it appears as `transition@0`.
+is a commit, so it appears as `transition@0`. A sink receives commits only, so a refused
+trigger or a violation never appears here, though both are in `then.events`.
 
 ### `then.queries`
 
@@ -694,7 +726,8 @@ Queries run after everything has settled, each with the answer it must give.
 | `reasons` | Why not, asserted as a set. |
 
 Ordering is oldest-first, because that is the order the question is asked in, with ties
-broken on the key so a limited answer is the same answer twice.
+broken on the key so a limited answer is the same answer twice. Keys are compared as plain
+strings, never by locale.
 
 Time in state is measured from the last **move**. A values-only commit leaves the clock
 running, because the instance has not gone anywhere. This is the same measurement a
@@ -711,6 +744,8 @@ Partiality reasons:
 | `no-durable-store` | The answer covers only what the runtime and any ephemeral store retain. |
 | `unsupported-criteria` | A store could not evaluate a filter, so the runtime applied it afterwards. |
 | `limit-reached` | The answer was truncated. |
+| `compacted` | A store folded part of the stream into a snapshot, so a history is missing its middle. |
+| `history-capped` | No store holds the stream and the runtime keeps a bounded number of events per key in memory, so a history is missing its oldest events. |
 
 A result is `complete` exactly when there are no reasons. A memory-only runtime is never
 complete, even when it happens to hold everything, because it cannot know that it does.
@@ -822,6 +857,7 @@ Anything that cannot be made deterministic must not be asserted.
    | `04x` | queries by state and time in state |
    | `05x` | history as the whole per-key stream |
    | `06x` | deleting an instance outright |
+   | `07x` | temporal constraints over a store |
 
 3. Assert the narrowest thing that proves the requirement. Over-asserting makes the suite
    brittle for the next port.

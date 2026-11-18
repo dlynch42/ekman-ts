@@ -62,6 +62,37 @@ CONSTRAINT_VIOLATED | transitions: "paid" to "pending" is not a declared transit
 From "paid" the declared targets are: (none)
 ```
 
+### A transition to the same state is still a transition
+
+Every `transitionTo` is checked against the graph, including one that targets the state the
+instance is already in. `transitionTo("error", ...)` from `error` needs `error: ["error"]` in
+`allow`, or it is refused like any other undeclared move.
+
+This bites hardest in a failure path. A handler or an `onError` handler that reports a repeated
+failure by transitioning to `error` again is refused the second time, with `CONSTRAINT_VIOLATED`,
+from inside the code that was supposed to be handling the problem:
+
+```ts
+allow: {
+  running: ["error"],
+  error: ["running", "error"],   // the second entry is what lets a repeated failure be recorded
+},
+```
+
+Two ways to stay out of it:
+
+- **Use `stay(values)` when the state is not changing.** It updates values without asking to
+  move, so the graph is not consulted.
+- **List a self-edge on purpose** when asking to enter the state again means something: the
+  state's guards are checked again, and the move is recorded as a transition.
+
+A self-transition does not restart the clock. Time in state is measured from the last move to a
+*different* state, so transitioning to the state an instance is already in neither extends a
+time-in-state bound nor arms again one that has fired.
+
+Rolling a graph out under `policy: "warn"` first shows every self-transition your handlers
+actually make before any of them is refused.
+
 ## Guards
 
 A guard is a condition on entering a state. It can be scoped to where the transition comes
@@ -122,8 +153,54 @@ states: {
 
 Set `trigger` on the constraint to use a type of your own instead of the default.
 
+An entity with a [trigger union](./entities.md#typed-triggers) adds `TemporalTrigger<State>` to
+it, which types the escalation's `escalateTo` as one of the entity's states.
+
+An entity that declares `triggers` must list the type its bounds deliver, as above. A bound
+whose escalation the entity would refuse as unknown is rejected by `defineEntity`, because
+the instance it was watching would stay stuck. A bound with `policy: "warn"` delivers nothing
+and is exempt.
+
+A bound's `name` defaults to `temporal:<in>:<within>`. Names must be distinct within an entity,
+since a bound fires once per entry into its state and that is tracked by name.
+
+When several bounds on one state are due, they are evaluated in declaration order, and
+evaluation stops as soon as an escalation has moved the instance: the rest were watching a
+state it has left. An escalation refused for a reason that passes (a full inbox, a full
+memory budget, a timeout, a store that could not take the write) is raised again by the next
+sweep, and its violation is recorded only once. An escalation the handler refuses is not retried.
+
 Evaluate on a schedule with `temporal: { sweepMs }` on the runtime, or call `await ekman.sweep()`
 yourself. Without either, a bound is only checked when something asks.
+
+### Instances that are not resident
+
+With a store configured, a bound holds for every instance of the entity, resident or not. An
+instance that is stuck is usually idle, and an idle instance is the first one a
+[memory budget](./memory.md) releases; after a restart nothing is resident at all. So each
+sweep also asks the store which instances have sat in a watched state past its bound, loads
+each one, and escalates it as it would a resident one. The instance is released again once it
+is idle.
+
+A bound fires once per stay in its state, and that survives eviction and restarts. It is
+worked out from the instance's own stream: a violation under `warn` is the whole of what there
+was to say, and one under `reject` is owed its escalation until the stream shows that trigger
+committing or being refused for good. An escalation that was turned away for a reason that
+passes, including a runtime that was closing, is delivered by whichever runtime sweeps next,
+under the same trigger id, and no second violation is recorded.
+
+What it costs: one store scan per entity that declares a bound, per sweep. The built-in
+stores answer a scan by reading every instance of the entity that is not resident, so on a
+large store set `sweepMs` with that in mind. An instance that has been told everything its
+bounds have to say is not loaded again until it commits or another bound comes due.
+
+An instance the sweep has loaded stays resident until all its bounds have been read, whatever
+the memory budget says, and cannot be deleted in that time: `forget` raises `KEY_BUSY`. A store
+that answers a scan with part of the answer is reported through `onUnhandled`, because the
+instances it left out were not swept.
+
+Without a store there is nothing to scan, and a bound covers the resident instances, which
+in a memory-only runtime is all of them.
 
 ```
 npm run demo:stuck    # "stuck in deploying for more than five minutes", as query and as constraint
@@ -148,11 +225,17 @@ legal instead.
 
 `warn` mode ends with a diagram rather than a log read.
 
-```ts
+<!-- check-docs:
+import type { AnyEntityDefinition, Ekman } from "ekman";
+declare const ekman: Ekman;
+declare const keys: string[];
+declare const orders: AnyEntityDefinition;
+-->
+```ts check
 import { allowFrom, observeEdges, toMermaid } from "ekman";
 
 // Fold every key's stream into the edges the traffic actually walked.
-let observed;
+let observed = observeEdges([]);
 for (const key of keys) {
   observed = observeEdges((await ekman.history(key)).events, observed);
 }

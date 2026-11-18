@@ -1,3 +1,4 @@
+import { Caches } from "../src/caches";
 import type { RuntimeDeps } from "../src/config";
 import { resolveInboxConfig } from "../src/config";
 import type { EkmanEvent } from "../src/events";
@@ -19,24 +20,43 @@ export function testDeps(
   options: {
     now?: (() => number) | undefined;
     telemetry?: TelemetrySink | undefined;
-    onUnhandled?: ((error: unknown) => void) | undefined;
+    onUnhandled?: RuntimeDeps["onUnhandled"] | undefined;
     audit?: ((event: EkmanEvent) => void) | undefined;
+    committed?: RuntimeDeps["committed"] | undefined;
     inbox?: InboxConfig | undefined;
     store?: Store | readonly Store[] | undefined;
     memory?: MemoryConfig | undefined;
+    cacheFailed?: ConstructorParameters<typeof Caches>[1]["failed"] | undefined;
   } = {}
 ): RuntimeDeps {
   const stack = resolveStack(options.store);
+  const now = options.now ?? (() => 1000);
 
   return {
-    now: options.now ?? (() => 1000),
+    now,
     telemetry: options.telemetry,
     onUnhandled: options.onUnhandled ?? (() => undefined),
     audit: options.audit ?? (() => undefined),
+    committed: options.committed ?? (() => undefined),
     inbox: resolveInboxConfig(options.inbox),
     stack,
+    caches: new Caches(stack.caches, {
+      now,
+      failed: options.cacheFailed ?? (() => undefined),
+    }),
     memory: resolveMemoryConfig(options.memory, {
       hasStore: stack.authority !== undefined,
     }),
   };
 }
+
+/** A clock frozen until something moves it, which is what elapsed time needs. */
+export const frozenClock = (start = 0) => {
+  let t = start;
+  return {
+    now: () => t,
+    advance: (ms: number) => {
+      t += ms;
+    },
+  };
+};

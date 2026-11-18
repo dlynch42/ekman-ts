@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { EkmanError } from "../src/errors.js";
-import { buildKey, parseKey } from "../src/key.js";
+import { buildKey, MAX_KEY_LENGTH, parseKey } from "../src/key.js";
 
 const invalid = (key: string) => {
   try {
@@ -50,6 +50,39 @@ describe("parseKey", () => {
     const err = invalid(key);
     expect(err).toBeInstanceOf(EkmanError);
     expect(err.code).toBe("INVALID_KEY");
+  });
+
+  it.each([
+    ["a segment that is the current directory", "orders:."],
+    ["a segment that is the parent directory", "orders:.."],
+    ["an entity that is the parent directory", "..:1"],
+    ["a control character", "orders:a\u0001b"],
+    ["a null byte", "orders:a\u0000"],
+    ["a delete character", "orders:a\u007fb"],
+    ["a next-line character", "orders:a\u0085b"],
+    ["a control sequence introducer", "orders:a\u009bb"],
+    ["a high surrogate with nothing after it", "orders:a\ud83d"],
+    ["a high surrogate followed by an ordinary character", "orders:\ud83db"],
+    ["a low surrogate on its own", "orders:\ude00b"],
+    ["more characters than the limit", `orders:${"a".repeat(MAX_KEY_LENGTH)}`],
+  ])("rejects %s", (_why, key) => {
+    expect(invalid(key).code).toBe("INVALID_KEY");
+  });
+
+  it.each([
+    ["a dot inside a segment", "orders:a.b"],
+    ["a segment that only starts with dots", "orders:..x"],
+    ["a character outside the basic plane", "orders:\ud83d\ude00"],
+    ["exactly the limit", `orders:${"a".repeat(MAX_KEY_LENGTH - 7)}`],
+  ])("accepts %s", (_why, key) => {
+    expect(parseKey(key).key).toBe(key);
+  });
+
+  it("says which rule a segment broke", () => {
+    expect(invalid("orders:..").message).toContain("directory reference");
+    expect(invalid("orders:a\u0001").message).toContain("control character");
+    expect(invalid("orders:\ud83d").message).toContain("surrogate pair");
+    expect(invalid(`orders:${"a".repeat(600)}`).message).toContain("607");
   });
 
   it("reports the offending key on the error", () => {

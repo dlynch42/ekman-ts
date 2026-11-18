@@ -33,6 +33,15 @@ correctness decision, so it is opted into rather than inherited.
 differently on a second try: the state still has no handler, the trigger type is still
 unrecognized, the token is still fenced, the constraint still does not hold.
 
+A predicate of your own receives the error your handler threw or returned in `fail()`, not the
+`HANDLER_FAILED` error the sender is given, so `(error) => error instanceof NetworkError` works
+as written. For a failure the runtime raised itself (a timeout, a store conflict, a constraint
+refusal) it receives that `EkmanError`.
+
+When an attempt fails because another writer moved the key (`STORE_CONFLICT`), the instance is
+reloaded from the store before the next attempt, so the handler decides again on current
+values rather than conflicting on every retry.
+
 ### Backoff
 
 ```ts
@@ -105,9 +114,11 @@ unlikely. The commit is refused, the refusal is recorded, and nothing the zombie
 reaches committed state.
 
 The honest counterpart matters too: a commit that already reached the store before the timeout
-fired stands. It is reported as `commit.raced` in [telemetry](./telemetry.md) rather than being
-quietly undone, because undoing a durable write to make a timer look right would be a worse lie
-than the race.
+fired stands. Its sender is told it committed, and the key stays occupied until the write has
+landed, so the next trigger sees it. The attempt is not reported as timed out, because that
+would invite a retry of work that is already durable. It is reported as `commit.raced` in
+[telemetry](./telemetry.md), which is the signal that a timeout is set close to how long the
+store takes. One consequence: a store write that hangs is not cut short by `timeoutMs`.
 
 ```
 npm run demo:fencing    # a handler that ignores its timeout, runs to completion, and is refused
