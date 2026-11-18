@@ -122,13 +122,15 @@ export function refusalOutcome(
 }
 
 /**
- * What an instance's time-in-state bounds have already said about its current stay in a
- * state, in a form a store can hold.
+ * What an instance's time-in-state bounds and rules have already said about its current
+ * stay in a state, in a form a store can hold.
  *
- * `fired` names the bounds that are done for this stay. `owed` names the ones whose
- * violation is recorded and whose escalation was turned away for a reason that passes,
- * with the cause that violation named, so whoever loads the instance next can deliver it
- * under the same id and record nothing twice.
+ * `fired` names the bounds and rules that are done for now. `owed` names the ones whose
+ * violation is recorded and whose trigger was turned away for a reason that passes, with
+ * the cause that violation named, so whoever loads the instance next can deliver it under
+ * the same id and record nothing twice.
+ *
+ * One record serves both kinds, which is why their names are distinct within an entity.
  */
 export interface TemporalLatch {
   readonly fired: readonly string[];
@@ -160,10 +162,11 @@ export class LatchFold {
   /** Take one event recorded during the current stay in a state. */
   apply(event: EkmanEvent): void {
     if (event.type === "violation") {
-      if (
-        event.constraint.kind !== "temporal" ||
-        this.#fired.has(event.constraint.name)
-      ) {
+      const { kind, name } = event.constraint;
+      if (kind === "rule") {
+        // A rule that matches again was armed again in between, which no event records.
+        this.#fired.delete(name);
+      } else if (kind !== "temporal" || this.#fired.has(name)) {
         return;
       }
       if (event.policy === "warn") {
@@ -206,6 +209,15 @@ export class LatchFold {
   fire(name: string): void {
     this.#owed.delete(name);
     this.#fired.add(name);
+  }
+
+  /**
+   * Arm a rule again, because its condition stopped holding. Whatever it had said, and
+   * any proposal it was still owed, belonged to a match that is over.
+   */
+  rearm(name: string): void {
+    this.#fired.delete(name);
+    this.#owed.delete(name);
   }
 
   /** Record an escalation as owed to a bound that has not fired. */

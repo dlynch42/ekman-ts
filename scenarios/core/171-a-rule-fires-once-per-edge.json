@@ -1,0 +1,242 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/171-a-rule-fires-once-per-edge",
+  "name": "a rule whose condition goes on holding proposes once, and proposes again only after the condition has stopped holding and come to hold again",
+  "level": "core",
+  "given": {
+    "runtime": {
+      "clock": {
+        "start": 0,
+        "stepMs": 0
+      }
+    },
+    "entities": [
+      {
+        "name": "services",
+        "initial": "healthy",
+        "constraints": {
+          "rules": [
+            {
+              "name": "too-many-failures",
+              "in": ["healthy"],
+              "when": {
+                "values": "failures",
+                "gte": 3,
+                "reason": "three failed probes or more"
+              },
+              "propose": "degraded"
+            }
+          ]
+        },
+        "states": [
+          {
+            "state": "healthy",
+            "cases": [
+              {
+                "when": {
+                  "trigger": "rule.matched"
+                },
+                "do": {
+                  "result": "stay"
+                }
+              },
+              {
+                "when": {
+                  "trigger": "settle"
+                },
+                "do": {
+                  "result": "stay"
+                }
+              }
+            ],
+            "else": {
+              "result": "stay",
+              "values": {
+                "failures": {
+                  "$trigger": "failures"
+                }
+              }
+            }
+          },
+          {
+            "state": "degraded",
+            "else": {
+              "result": "stay"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "services:api",
+        "trigger": {
+          "type": "probe",
+          "failures": 3
+        }
+      }
+    },
+    {
+      "send": {
+        "key": "services:api",
+        "trigger": {
+          "type": "probe",
+          "failures": 4
+        }
+      }
+    },
+    {
+      "send": {
+        "key": "services:api",
+        "trigger": {
+          "type": "probe",
+          "failures": 5
+        }
+      }
+    },
+    {
+      "send": {
+        "key": "services:api",
+        "trigger": {
+          "type": "probe",
+          "failures": 0
+        }
+      }
+    },
+    {
+      "send": {
+        "key": "services:api",
+        "trigger": {
+          "type": "probe",
+          "failures": 6
+        }
+      }
+    },
+    {
+      "send": {
+        "key": "services:api",
+        "trigger": {
+          "type": "settle"
+        }
+      }
+    }
+  ],
+  "then": {
+    "events": {
+      "services:api": [
+        {
+          "type": "transition",
+          "from": null,
+          "to": "healthy",
+          "seq": 0
+        },
+        {
+          "type": "transition",
+          "from": "healthy",
+          "to": "healthy",
+          "seq": 1,
+          "values": {
+            "failures": 3
+          }
+        },
+        {
+          "type": "violation",
+          "seq": 1,
+          "policy": "reject",
+          "reason": "three failed probes or more",
+          "constraint": {
+            "kind": "rule",
+            "name": "too-many-failures"
+          },
+          "cause": {
+            "type": "rule.matched",
+            "id": "t2"
+          }
+        },
+        {
+          "type": "transition",
+          "from": "healthy",
+          "to": "healthy",
+          "seq": 2,
+          "cause": {
+            "type": "rule.matched",
+            "id": "t2"
+          }
+        },
+        {
+          "type": "transition",
+          "from": "healthy",
+          "to": "healthy",
+          "seq": 3,
+          "values": {
+            "failures": 4
+          }
+        },
+        {
+          "type": "transition",
+          "from": "healthy",
+          "to": "healthy",
+          "seq": 4,
+          "values": {
+            "failures": 5
+          }
+        },
+        {
+          "type": "transition",
+          "from": "healthy",
+          "to": "healthy",
+          "seq": 5,
+          "values": {
+            "failures": 0
+          }
+        },
+        {
+          "type": "transition",
+          "from": "healthy",
+          "to": "healthy",
+          "seq": 6,
+          "values": {
+            "failures": 6
+          }
+        },
+        {
+          "type": "violation",
+          "seq": 6,
+          "policy": "reject",
+          "reason": "three failed probes or more",
+          "constraint": {
+            "kind": "rule",
+            "name": "too-many-failures"
+          },
+          "cause": {
+            "type": "rule.matched",
+            "id": "t8"
+          }
+        },
+        {
+          "type": "transition",
+          "from": "healthy",
+          "to": "healthy",
+          "seq": 7,
+          "cause": {
+            "type": "rule.matched",
+            "id": "t8"
+          }
+        },
+        {
+          "type": "transition",
+          "from": "healthy",
+          "to": "healthy",
+          "seq": 8
+        }
+      ]
+    },
+    "state": {
+      "services:api": {
+        "state": "healthy"
+      }
+    }
+  }
+}

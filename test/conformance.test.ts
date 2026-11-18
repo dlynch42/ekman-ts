@@ -122,6 +122,43 @@ describe("detecting a broken expectation", () => {
     );
   });
 
+  it("notices a rule recorded under another policy", async () => {
+    const result = await runScenario(
+      corrupt(
+        "core/172-a-rule-under-warn-records-without-delivering",
+        (scenario) => {
+          scenario.then.events["services:api"][2].policy = "reject";
+        }
+      )
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.failures).toEqual([
+      'events["services:api"][2].policy: expected "reject", got "warn"',
+    ]);
+  });
+
+  it("notices a rule whose condition is broken, which matches with what it threw", async () => {
+    const result = await runScenario(
+      corrupt("core/171-a-rule-fires-once-per-edge", (scenario) => {
+        scenario.given.entities[0].constraints.rules[0].when = {
+          throw: "no such field",
+        };
+        // One probe, then the trigger that waits for the proposal to be answered.
+        scenario.when = [scenario.when[0], scenario.when.at(-1)];
+        scenario.then.events["services:api"] = [
+          ...scenario.then.events["services:api"].slice(0, 4),
+          { type: "transition", seq: 3 },
+        ];
+      })
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.failures).toEqual([
+      'events["services:api"][2].reason: expected "three failed probes or more", got "the condition threw: no such field"',
+    ]);
+  });
+
   it("notices telemetry that was never emitted", async () => {
     const result = await runScenario(
       corrupt("core/140-temporal-escalates-as-a-trigger", (scenario) => {

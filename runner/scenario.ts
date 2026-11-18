@@ -138,27 +138,47 @@ export interface ConstraintsSpec {
     readonly trigger?: string;
     readonly policy?: ViolationPolicySpec;
   }[];
+  readonly rules?: readonly {
+    readonly name?: string;
+    /** The states the rule watches. Omitted means every state. */
+    readonly in?: readonly string[];
+    /**
+     * The condition, in the grammar guards and invariants use, read against what was
+     * just committed. The rule's condition holds when the check does, and the check's
+     * `reason` becomes the reason of the match.
+     */
+    readonly when: CheckSpec;
+    readonly propose?: string;
+    readonly trigger?: string;
+    readonly policy?: ViolationPolicySpec;
+  }[];
 }
 
 /**
- * A guard or invariant condition, expressed as data.
+ * A guard or invariant condition, or the condition of a rule, expressed as data.
  *
  * One source (`values`, `trigger`, or `state`) and one predicate (`exists`, `equals`,
  * `gte`, or `lte`), which is enough to express every condition the suite needs without a
  * expression language every port would then have to implement identically.
  */
 export interface CheckSpec {
-  /** Dot path into the values being proposed. Empty string is the whole map. */
+  /**
+   * Dot path into the values being proposed, or for a rule the values just committed.
+   * Empty string is the whole map.
+   */
   readonly values?: string;
-  /** Dot path into the trigger. */
+  /** Dot path into the trigger. A rule is not evaluated against one, so it reads nothing. */
   readonly trigger?: string;
-  /** Read the proposed state name. */
+  /** Read the proposed state name, or for a rule the committed one. */
   readonly state?: true;
   readonly exists?: boolean;
   readonly equals?: unknown;
   readonly gte?: number;
   readonly lte?: number;
-  /** Reported as the violation's reason when the check does not hold. */
+  /**
+   * Reported as the violation's reason when the check does not hold. For a rule, the
+   * reason of the match when it does.
+   */
   readonly reason?: string;
   /** Throw instead of answering, exercising the broken-check path. */
   readonly throw?: string;

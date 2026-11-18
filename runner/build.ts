@@ -12,6 +12,7 @@ import type {
   InstanceSnapshot,
   ProposedCommit,
   ReplayedState,
+  RuleConstraint,
   Store,
   Trigger,
 } from "../src/index";
@@ -101,6 +102,33 @@ function buildConstraints(spec: ConstraintsSpec): ConstraintsConfig {
             check: compileCheck(invariant.check),
           })),
         }),
+    ...(spec.rules === undefined
+      ? {}
+      : {
+          rules: spec.rules.map((rule) => ({
+            ...rule,
+            when: compileCondition(rule.when),
+          })),
+        }),
+  };
+}
+
+/** The trigger a rule's condition is read against: none, so a `trigger` source finds nothing. */
+const NO_TRIGGER: Trigger = Object.freeze({ type: "" });
+
+/**
+ * A rule's condition, in the same grammar as a check and with the sense turned round: the
+ * condition holds when the check does. It is read against the committed instance, which
+ * stands where a check has the proposed commit.
+ */
+function compileCondition(spec: CheckSpec): RuleConstraint["when"] {
+  return (instance) => {
+    if (spec.throw !== undefined) {
+      throw new Error(spec.throw);
+    }
+
+    const subject = readSubject(spec, instance, NO_TRIGGER);
+    return holds(spec, subject) ? (spec.reason ?? true) : false;
   };
 }
 

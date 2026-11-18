@@ -200,6 +200,65 @@ describe("rebuilding what a stay in a state has already been told", () => {
     expect(fold([guard])).toBeUndefined();
   });
 
+  describe("for a rule", () => {
+    const matched = (policy: "reject" | "warn", id = "t7"): EkmanEvent => ({
+      type: "violation",
+      key: "jobs:1",
+      seq: 1,
+      at: 100,
+      cause: { type: "rule.matched", id },
+      constraint: { kind: "rule", name: "too-many" },
+      policy,
+      reason: "the condition held",
+    });
+
+    it("owes a proposal until the stream shows it answered, as for a bound", () => {
+      expect(fold([matched("reject")])).toEqual({
+        fired: [],
+        owed: { "too-many": { type: "rule.matched", id: "t7" } },
+      });
+      expect(
+        fold([
+          matched("reject"),
+          commit(2, "a", "a", { type: "rule.matched", id: "t7" }),
+        ])
+      ).toEqual({ fired: ["too-many"], owed: {} });
+    });
+
+    it("counts a warning as said", () => {
+      expect(fold([matched("warn")])).toEqual({
+        fired: ["too-many"],
+        owed: {},
+      });
+    });
+
+    it("reads a second match as a rule armed again in between", () => {
+      // A rule ceasing to hold is not an event. Matching again is the only sign of it,
+      // and the second proposal is owed whatever became of the first.
+      expect(
+        fold([
+          matched("reject"),
+          commit(2, "a", "a", { type: "rule.matched", id: "t7" }),
+          matched("reject", "t9"),
+        ])
+      ).toEqual({
+        fired: [],
+        owed: { "too-many": { type: "rule.matched", id: "t9" } },
+      });
+    });
+
+    it("arms a rule again, dropping what it said and what it was owed", () => {
+      const latch = new LatchFold();
+      latch.apply(matched("warn"));
+      latch.rearm("too-many");
+      expect(latch.result()).toBeUndefined();
+
+      latch.apply(matched("reject"));
+      latch.rearm("too-many");
+      expect(latch.result()).toBeUndefined();
+    });
+  });
+
   it("starts from what a snapshot recorded, and does not owe again what has fired", () => {
     const seeded = new LatchFold({
       fired: ["too-slow"],

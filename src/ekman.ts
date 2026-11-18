@@ -4,7 +4,12 @@ import { Caches } from "./caches";
 import { assertBuilt, constraintsOf, statesOf } from "./compiled";
 import type { CommittedRecord, RuntimeDeps } from "./config";
 import { assertKnownKeys, resolveInboxConfig } from "./config";
-import type { CompiledTemporal, TemporalTrigger } from "./constraints";
+import type {
+  CompiledRule,
+  CompiledTemporal,
+  RuleTrigger,
+  TemporalTrigger,
+} from "./constraints";
 import type { DispatchDeps } from "./dispatch";
 import { dispatch } from "./dispatch";
 import { EkmanError } from "./errors";
@@ -98,6 +103,14 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   readonly entities: EntityHandles<D>;
 
   readonly #definitions = new Map<string, AnyDefinition>();
+  /**
+   * The rules of each entity that declares any, by watched state. Kept apart from the
+   * definitions so a commit of an entity with no rules pays one lookup to learn that.
+   */
+  readonly #rules = new Map<
+    string,
+    ReadonlyMap<string, readonly CompiledRule[]>
+  >();
   readonly #instances = new Map<string, AnyInstance>();
   readonly #now: () => number;
   readonly #onUnhandled: OnUnhandled;
@@ -828,6 +841,10 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     }
 
     this.#definitions.set(definition.name, definition);
+    const rules = constraintsOf(definition)?.rulesByState;
+    if (rules !== undefined && rules.size > 0) {
+      this.#rules.set(definition.name, rules);
+    }
     return this.#makeHandle(definition);
   }
 
@@ -1034,6 +1051,146 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       this.#temporal.enter(record.key, record.entity, record.state);
     }
     this.#ledger.record(record.key, record.bytes);
+
+    const rules = this.#rules.get(record.entity)?.get(record.state);
+    if (rules !== undefined) {
+      this.#evaluateRules(
+        this.#instances.get(record.key) as AnyInstance,
+        rules
+      );
+    }
+  }
+
+  /**
+   * Ask each rule watching an instance's state whether its condition holds on what was
+   * just committed, and propose for the ones that have come to hold.
+   *
+   * A rule that holds and has already said so is passed over, which is what makes a
+   * value that stays over a threshold one proposal. One that does not hold is armed
+   * again. Run from the commit hook, inside the committing turn, so nothing here waits.
+   */
+  #evaluateRules(instance: AnyInstance, rules: readonly CompiledRule[]): void {
+    const snapshot = instance.snapshot();
+
+    for (const rule of rules) {
+      const reason = heldBy(rule, snapshot);
+      if (reason === undefined) {
+        instance.rearm(rule.name);
+      } else if (
+        !(instance.hasFired(rule.name) || instance.isProposing(rule.name))
+      ) {
+        this.#propose(instance, rule, reason);
+      }
+    }
+  }
+
+  /**
+   * Arm again every rule whose condition does not hold on an instance just loaded.
+   *
+   * A stream records a rule matching and never records it ceasing to, so the latch a
+   * load rebuilds can name a rule as done whose condition stopped holding long ago.
+   * Left alone, the commit that next made it hold would be passed over.
+   */
+  #rearmRules(instance: AnyInstance): void {
+    const rules = this.#rules.get(instance.entity)?.get(instance.state);
+    if (rules === undefined) {
+      return;
+    }
+
+    const snapshot = instance.snapshot();
+    for (const rule of rules) {
+      if (heldBy(rule, snapshot) === undefined) {
+        instance.rearm(rule.name);
+      }
+    }
+  }
+
+  /**
+   * Record that a rule's condition came to hold and, unless it only warns, send its
+   * proposal.
+   *
+   * The proposal goes through `send()` and is not awaited: this runs inside the turn of
+   * the commit that made the condition hold, and the proposal queues behind it. The
+   * runtime never writes state on its own. `propose` rides on the trigger, and the
+   * handler decides.
+   *
+   * A proposal that was turned away for a reason that passes stays owed. The match is
+   * already in the stream, so the next commit sends the trigger again under the id that
+   * match named and records nothing twice.
+   */
+  #propose(instance: AnyInstance, rule: CompiledRule, reason: string): void {
+    const owed = instance.undelivered(rule.name);
+    const cause =
+      owed === undefined
+        ? this.#freshCause(instance, rule.trigger)
+        : { type: rule.trigger, id: owed };
+    const { key, entity, state } = instance;
+
+    if (owed === undefined) {
+      instance.violation({
+        violation: {
+          kind: "rule",
+          name: rule.name,
+          policy: rule.policy,
+          reason,
+        },
+        at: this.#now(),
+        cause,
+      });
+      this.#emit({
+        type: "constraint.violated",
+        key,
+        entity,
+        state,
+        kind: "rule",
+        constraint: rule.name,
+        policy: rule.policy,
+        reason,
+        trigger: cause,
+        at: telemetryNow(),
+      });
+    }
+
+    if (rule.policy === "warn") {
+      return;
+    }
+
+    const trigger: RuleTrigger<string, string> = {
+      ...cause,
+      rule: rule.name,
+      state,
+      ...(rule.propose === undefined ? {} : { propose: rule.propose }),
+      reason,
+    };
+    const entry = instance.stateEntry;
+    instance.proposing(rule.name);
+
+    this.send(key, trigger)
+      .then(
+        (): EscalationOutcome => "delivered",
+        (error: unknown): EscalationOutcome => {
+          this.#onUnhandled(error, { source: "escalation", key });
+          return refusalOutcome(error);
+        }
+      )
+      .then((outcome) => {
+        instance.proposed(rule.name, entry);
+        if (outcome === "refused") {
+          instance.markFired(rule.name, entry);
+        }
+        this.#emit({
+          type: "constraint.escalated",
+          key,
+          entity,
+          kind: "rule",
+          constraint: rule.name,
+          state,
+          escalateTo: rule.propose,
+          trigger: cause,
+          delivered: outcome === "delivered",
+          at: telemetryNow(),
+        });
+      });
   }
 
   /** Reconcile an instance with the store, reporting a reload when one happened. */
@@ -1049,6 +1206,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
 
     this.#ledger.record(instance.key, instance.bytes);
     this.#temporal.enter(instance.key, instance.entity, instance.state);
+    this.#rearmRules(instance);
 
     const restored = instance.lastRestored;
     if (restored !== undefined && restored !== before) {
@@ -1909,6 +2067,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       type: "constraint.escalated",
       key: instance.key,
       entity: instance.entity,
+      kind: "temporal",
       constraint: constraint.name,
       state: constraint.in,
       elapsedMs,
@@ -2017,6 +2176,27 @@ function partiality(
     return NO_DURABLE_STORE;
   }
   return compacted ? COMPACTED : NONE;
+}
+
+/**
+ * What a rule's condition says about an instance: why it holds, or undefined when it
+ * does not. A condition that throws holds, with what it threw as the reason, because a
+ * broken condition read as "does not hold" would be a rule that silently never fires.
+ */
+function heldBy(
+  rule: CompiledRule,
+  snapshot: InstanceSnapshot
+): string | undefined {
+  let outcome: boolean | string;
+  try {
+    outcome = rule.when(snapshot);
+  } catch (thrown) {
+    return `the condition threw: ${(thrown as Error).message}`;
+  }
+  if (outcome === false) {
+    return;
+  }
+  return typeof outcome === "string" ? outcome : "the condition held";
 }
 
 /** Refuse a limit that is not a count. `undefined` means no limit. */

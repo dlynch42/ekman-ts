@@ -202,14 +202,16 @@ constraints: {
   guards:      [{ on: "deploying", from: "pending", check: (n) => n.values.region !== undefined }],
   invariants:  [{ name: "attempts-sane", check: (n) => n.values.attempts >= 0 }],
   temporal:    [{ in: "deploying", within: 10 * 60_000, escalateTo: "failed" }],
+  rules:       [{ in: "deploying", when: (d) => d.values.errors >= 5, propose: "failed" }],
 },
 ```
 
-Four kinds, all opt-in, each with its own `reject` / `warn` / `off` dial. `warn` lets you turn a
+Five kinds, all opt-in, each with its own `reject` / `warn` / `off` dial. `warn` lets you turn a
 constraint on, read the violations real traffic produces, and switch to `reject` once you know
 what your graph actually is; `observeEdges` and `allowFrom` turn those violations into the map to
 paste back in. A time-in-state bound fires as a trigger rather than a write, so your handler
-decides. [More](./docs/constraints.md)
+decides. A rule does the same for a condition over values: when it comes to hold, the state it
+proposes arrives as a trigger, once, and the handler decides. [More](./docs/constraints.md)
 
 ### Durability and stores
 
@@ -297,12 +299,13 @@ Full surface in [docs/api.md](./docs/api.md). The parts you need first:
 | Diagrams | `analyze`, `toMermaid`, `toDot`, `observeEdges`, `allowFrom` |
 | Stores | `createStore`, `defaultLogDir`, `replay`, `latestSeq`, `scanKeys`, `EMPTY_SEQ` |
 | Option lists | `OVERFLOW_POLICIES`, `EVICTION_POLICIES`, `RETENTION_POLICIES`, `DEFAULT_CAPACITY` |
-| Misc | `parseDuration`, `accountBytes`, `DEFAULT_TEMPORAL_TRIGGER`, `TELEMETRY_FALLBACK`, `SPEC_VERSION` |
+| Misc | `parseDuration`, `accountBytes`, `DEFAULT_TEMPORAL_TRIGGER`, `DEFAULT_RULE_TRIGGER`, `TELEMETRY_FALLBACK`, `SPEC_VERSION` |
 
 That is every runtime export. The types they take and return are exported alongside them:
 the config shapes (`EkmanConfig`, `EntityConfig`, `ExecutionPolicy`, `StorageConfig`), the
 results (`CommitResult`, `QueryResult`, `StateMap`, `StorageSweep`), every event and telemetry event,
-`TemporalTrigger`, the trigger a time-in-state bound delivers, `UnhandledContext`, what
+`TemporalTrigger`, the trigger a time-in-state bound delivers, `RuleTrigger`, the one a rule
+delivers, `UnhandledContext`, what
 `onUnhandled` is told about a failure, and `StateGraph`, the read-only view of an entity's
 states.
 

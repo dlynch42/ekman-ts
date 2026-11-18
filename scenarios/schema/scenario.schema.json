@@ -348,6 +348,36 @@
               "policy": { "$ref": "#/$defs/violationPolicy" }
             }
           }
+        },
+        "rules": {
+          "description": "Conditions over what an instance knows. Evaluated after every commit in a watched state, and coming to hold delivers a trigger.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["when"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string" },
+              "in": {
+                "description": "States the rule watches. Omitted means every state.",
+                "type": "array",
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "when": {
+                "description": "The condition, read against what was just committed. It holds when the check does.",
+                "$ref": "#/$defs/check"
+              },
+              "propose": {
+                "description": "Carried on the delivered trigger for the handler to act on. The runtime never applies it directly.",
+                "type": "string"
+              },
+              "trigger": {
+                "description": "Type of the delivered trigger. Defaults to rule.matched.",
+                "type": "string"
+              },
+              "policy": { "$ref": "#/$defs/violationPolicy" }
+            }
+          }
         }
       }
     },
@@ -636,7 +666,13 @@
                   "additionalProperties": false,
                   "properties": {
                     "kind": {
-                      "enum": ["transition", "guard", "invariant", "temporal"]
+                      "enum": [
+                        "transition",
+                        "guard",
+                        "invariant",
+                        "temporal",
+                        "rule"
+                      ]
                     },
                     "name": { "type": "string" }
                   }
@@ -646,7 +682,7 @@
                   "enum": ["reject", "warn"]
                 },
                 "attempted": {
-                  "description": "The change a violation was refusing. Absent on a temporal violation, which is attached to no result.",
+                  "description": "The change a violation was refusing. Absent on a temporal violation and on a rule's match, which are attached to no result.",
                   "type": "object",
                   "additionalProperties": false,
                   "properties": {

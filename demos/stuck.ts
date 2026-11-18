@@ -127,7 +127,7 @@ async function main(): Promise<void> {
         // identical lines would say nothing the summary does not.
         if (escalations <= 3) {
           console.log(
-            `    constraint.escalated  ${event.key}  stuck ${event.elapsedMs / MINUTE}m  ` +
+            `    constraint.escalated  ${event.key}  stuck ${(event.elapsedMs ?? 0) / MINUTE}m  ` +
               `asking for ${event.escalateTo}  delivered=${event.delivered}`
           );
         }

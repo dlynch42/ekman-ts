@@ -1,0 +1,196 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/170-a-rule-proposes-a-transition-as-a-trigger",
+  "name": "when a rule's condition comes to hold on what was committed, a trigger carrying the proposed state is delivered and the handler decides",
+  "level": "core",
+  "given": {
+    "runtime": {
+      "clock": {
+        "start": 0,
+        "stepMs": 0
+      }
+    },
+    "entities": [
+      {
+        "name": "services",
+        "initial": "healthy",
+        "constraints": {
+          "rules": [
+            {
+              "name": "too-many-failures",
+              "in": ["healthy"],
+              "when": {
+                "values": "failures",
+                "gte": 3,
+                "reason": "three failed probes or more"
+              },
+              "propose": "degraded"
+            }
+          ]
+        },
+        "states": [
+          {
+            "state": "healthy",
+            "cases": [
+              {
+                "when": {
+                  "trigger": "rule.matched"
+                },
+                "do": {
+                  "result": "transitionTo",
+                  "to": "degraded"
+                }
+              },
+              {
+                "when": {
+                  "trigger": "settle"
+                },
+                "do": {
+                  "result": "stay"
+                }
+              }
+            ],
+            "else": {
+              "result": "stay",
+              "values": {
+                "failures": {
+                  "$trigger": "failures"
+                }
+              }
+            }
+          },
+          {
+            "state": "degraded",
+            "else": {
+              "result": "stay"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "services:api",
+        "trigger": {
+          "type": "probe",
+          "failures": 1
+        }
+      }
+    },
+    {
+      "send": {
+        "key": "services:api",
+        "trigger": {
+          "type": "probe",
+          "failures": 2
+        }
+      }
+    },
+    {
+      "send": {
+        "key": "services:api",
+        "trigger": {
+          "type": "probe",
+          "failures": 3
+        }
+      }
+    },
+    {
+      "send": {
+        "key": "services:api",
+        "trigger": {
+          "type": "settle"
+        }
+      }
+    }
+  ],
+  "then": {
+    "telemetry": [
+      {
+        "type": "constraint.violated",
+        "kind": "rule",
+        "constraint": "too-many-failures",
+        "policy": "reject",
+        "state": "healthy"
+      },
+      {
+        "type": "constraint.escalated",
+        "kind": "rule",
+        "constraint": "too-many-failures",
+        "escalateTo": "degraded",
+        "delivered": true
+      }
+    ],
+    "events": {
+      "services:api": [
+        {
+          "type": "transition",
+          "from": null,
+          "to": "healthy",
+          "seq": 0
+        },
+        {
+          "type": "transition",
+          "from": "healthy",
+          "to": "healthy",
+          "seq": 1
+        },
+        {
+          "type": "transition",
+          "from": "healthy",
+          "to": "healthy",
+          "seq": 2
+        },
+        {
+          "type": "transition",
+          "from": "healthy",
+          "to": "healthy",
+          "seq": 3,
+          "values": {
+            "failures": 3
+          }
+        },
+        {
+          "type": "violation",
+          "seq": 3,
+          "policy": "reject",
+          "reason": "three failed probes or more",
+          "constraint": {
+            "kind": "rule",
+            "name": "too-many-failures"
+          },
+          "cause": {
+            "type": "rule.matched",
+            "id": "t4"
+          }
+        },
+        {
+          "type": "transition",
+          "from": "healthy",
+          "to": "degraded",
+          "seq": 4,
+          "cause": {
+            "type": "rule.matched",
+            "id": "t4"
+          }
+        },
+        {
+          "type": "transition",
+          "from": "degraded",
+          "to": "degraded",
+          "seq": 5
+        }
+      ]
+    },
+    "state": {
+      "services:api": {
+        "state": "degraded",
+        "values": {
+          "failures": 3
+        }
+      }
+    }
+  }
+}

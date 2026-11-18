@@ -328,11 +328,15 @@ none accepts any well-formed result.
   "temporal": [
     { "name": "deploy-timeout", "in": "deploying", "within": 600000,
       "escalateTo": "stalled", "trigger": "deploy.stalled" }
+  ],
+  "rules": [
+    { "name": "too-many-failures", "in": ["healthy"],
+      "when": { "values": "failures", "gte": 3 }, "propose": "degraded" }
   ]
 }
 ```
 
-Four kinds, each checked at a defined moment:
+Five kinds, each checked at a defined moment:
 
 | Kind | Checked |
 |---|---|
@@ -340,6 +344,7 @@ Four kinds, each checked at a defined moment:
 | `guards` | Before committing a `transitionTo` into the state named by `on`. |
 | `invariants` | Before committing any result that changes state or values. |
 | `temporal` | On a sweep, against how long the instance has been in `in`. |
+| `rules` | After every commit of an instance in a state named by `in`, against what was just committed. |
 
 Every constraint carries a `policy`, defaulting to `reject`:
 
@@ -383,6 +388,57 @@ The escalation trigger carries:
 
 `type` defaults to `constraint.temporal` when the constraint declares no `trigger`.
 
+#### Rules
+
+A rule is a condition over what an instance knows, with a state to propose when the
+condition comes to hold. It refuses nothing. Like a temporal constraint, it delivers a
+trigger and the handler decides.
+
+| Field | Meaning |
+|---|---|
+| `when` | Required. The condition, as a [check](#checks) read against the committed instance. The condition holds when the check does. |
+| `in` | The states the rule watches. Omitted means every state. |
+| `propose` | The state the rule asks for, carried on the trigger. |
+| `trigger` | Type of the delivered trigger. Defaults to `rule.matched`. |
+| `name` | Defaults to `rule:<in joined by \|>:<propose>`, with `*` for every state and the rule's position in the list when it proposes nothing. |
+| `policy` | `reject` records the match and delivers the trigger. `warn` records it and delivers nothing. `off` is not evaluated. |
+
+What every port owes:
+
+- **Evaluated after a commit is applied**, never before, and only for an instance in a
+  watched state. Initialization and a load from a store are not commits, so neither
+  evaluates a rule.
+- **A match is a violation event** of kind `rule`, at the sequence of the commit that
+  produced it, with no `attempted`. Its `reason` is the check's `reason`, or
+  `the condition held`. Its cause is the trigger about to be delivered.
+- **Once per edge.** A rule that has matched is not evaluated to a second match while its
+  condition goes on holding. It is armed again when the condition stops holding, and when
+  the instance moves to another state.
+- **Not asked in the state it proposes.** A rule does not watch its own `propose` state,
+  whatever `in` says.
+- **The trigger is queued behind the commit that raised it**, in the instance's own inbox,
+  and is not awaited by that commit. It is counted like any accepted trigger, so it takes
+  the next trigger id.
+- **What has fired survives a reload.** A runtime that loads the instance later does not
+  propose again for a condition that went on holding, and does propose again once the
+  condition has stopped holding and come to hold again.
+- **Refused at definition**: a state that does not exist, a `propose` that is not a
+  declared transition from a watched state when the entity declares transitions (a rule
+  with no `in` is not held to this), a name shared with another rule or with a temporal
+  constraint, and a trigger type missing from a declared `triggers` list unless the rule
+  only warns.
+
+The trigger carries:
+
+```json
+{ "type": "rule.matched", "rule": "too-many-failures",
+  "state": "healthy", "propose": "degraded", "reason": "the condition held" }
+```
+
+A proposal is delivered after the `send` that raised it has settled, so a scenario that
+asserts what the handler did with it sends one more trigger to the same key. Ordering per
+key puts that trigger behind the proposal, and awaiting it is awaiting both.
+
 ### Checks
 
 A handler cannot be code in a language-neutral file, and neither can a condition. A check
@@ -390,13 +446,13 @@ declares one source and one predicate:
 
 | Field | Meaning |
 |---|---|
-| `values` | Dot path into the values being proposed. Empty string is the whole map. |
-| `trigger` | Dot path into the trigger. |
-| `state` | `true` to read the proposed state name. |
+| `values` | Dot path into the values being proposed, or for a rule the values just committed. Empty string is the whole map. |
+| `trigger` | Dot path into the trigger. A rule is evaluated against no trigger, so this reads nothing there. |
+| `state` | `true` to read the proposed state name, or for a rule the committed one. |
 | `exists` | Whether the subject is expected to be present. |
 | `equals` | The subject must equal this. |
 | `gte`, `lte` | Numeric bounds. |
-| `reason` | Reported as the violation's `reason` when the check does not hold. |
+| `reason` | Reported as the violation's `reason` when the check does not hold. For a rule, the reason of the match when it does. |
 | `throw` | Throw instead of answering, exercising the broken-check path. |
 
 ```json
@@ -609,7 +665,7 @@ only a `type` asserts no event of that type was emitted at all.
 | `handler.timedOut` | An attempt ran past its timeout and was abandoned. | `attempt`, `timeoutMs` |
 | `commit.fenced` | A superseded attempt tried to commit and was refused. | `attempt`, `reason`, `tokenSeq`, `currentSeq` |
 | `constraint.violated` | A constraint did not hold. | `kind`, `constraint`, `policy`, `state`, `reason` |
-| `constraint.escalated` | A temporal constraint fired and its trigger was delivered. | `constraint`, `elapsedMs`, `escalateTo`, `delivered` |
+| `constraint.escalated` | A temporal constraint or a rule fired and its trigger was sent. | `kind`, `constraint`, `elapsedMs` (temporal only), `escalateTo`, `delivered` |
 | `commit.raced` | A commit reached the store, and a timeout arrived while it was in flight. | `attempt`, `reason`, `seq` |
 | `memory.accounted` | Resident accounting, after every commit. | `bytes`, `residentBytes`, `residentCount`, `maxBytes`, `overBudget` |
 | `memory.refused` | A new instance was refused because the budget is full. | `residentBytes`, `maxBytes` |
@@ -898,6 +954,7 @@ Anything that cannot be made deterministic must not be asserted.
    | `14x` | temporal constraints |
    | `15x` | memory budget and eviction |
    | `16x` | queries and the state map against a memory-only runtime, and partiality |
+   | `17x` | rules: conditions over values that propose a move |
 
    Durable scenarios number from `01x` again, in their own directory:
 
@@ -909,7 +966,7 @@ Anything that cannot be made deterministic must not be asserted.
    | `04x` | queries by state and time in state, values on request, and the state map |
    | `05x` | history as the whole per-key stream |
    | `06x` | deleting an instance outright |
-   | `07x` | temporal constraints over a store |
+   | `07x` | temporal constraints and rules over a store |
 
 3. Assert the narrowest thing that proves the requirement. Over-asserting makes the suite
    brittle for the next port.
