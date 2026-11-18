@@ -74,6 +74,9 @@ jobs:
       - name: Typecheck doc samples
         run: npm run check:docs
 
+      - name: Example smoke test
+        run: npm run example:smoke
+
       - name: Test
         run: npm test
 
@@ -94,7 +97,9 @@ jobs:
           name: dist
           path: dist/
           if-no-files-found: error
-          retention-days: 1
+          # `release` waits on an approval before it downloads this, and an approval can
+          # sit for as long as the environment allows. The build has to outlast the wait.
+          retention-days: 30
 
   release:
     name: Release
