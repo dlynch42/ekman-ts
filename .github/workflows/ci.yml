@@ -36,6 +36,8 @@ jobs:
       # its checks on the request boundary are worth nothing if they only run by hand.
       - name: Example smoke test
         run: npm run example:smoke
+      - name: Service health example smoke test
+        run: npm run example:health:smoke
 
   test:
     name: Test (Node ${{ matrix.node-version }})
@@ -158,6 +160,8 @@ jobs:
         run: npm run demo:concurrency
       - name: demo:unknown
         run: npm run demo:unknown
+      - name: demo:service-health
+        run: npm run demo:service-health
 
   package:
     name: Package (Node ${{ matrix.node-version }})

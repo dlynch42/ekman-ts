@@ -1,0 +1,144 @@
+/**
+ * The routes: record a probe, read one service, and ask where everything is.
+ *
+ * A probe arrives as an untrusted request body, so it is checked here and built into a
+ * typed trigger before the runtime sees it. This is the only place a trigger for a service
+ * is built from outside input, and it only ever builds a probe: nothing a caller sends can
+ * arrive as a rule's proposal or a freshness bound's.
+ */
+
+import { isTransitionEvent } from "ekman";
+import type { Probe } from "../entities/service";
+import { SERVICE_STATES } from "../entities/service";
+import { ekman, services } from "../lib/runtime";
+import { BadRequest, json, type Reply, type Route } from "./server";
+
+const MAX_ERROR_LENGTH = 200;
+
+function probeFrom(body: Record<string, unknown>): Probe {
+  const { ok, latencyMs, error } = body;
+  if (typeof ok !== "boolean") {
+    throw new BadRequest("ok is required and must be true or false");
+  }
+  if (
+    typeof latencyMs !== "number" ||
+    !Number.isFinite(latencyMs) ||
+    latencyMs < 0
+  ) {
+    throw new BadRequest(
+      "latencyMs is required and must be a number, 0 or more"
+    );
+  }
+  if (error !== undefined && typeof error !== "string") {
+    throw new BadRequest("error must be text when given");
+  }
+  return {
+    type: "probe",
+    ok,
+    latencyMs,
+    // Kept short. It is stored with every commit that follows it.
+    ...(error === undefined ? {} : { error: error.slice(0, MAX_ERROR_LENGTH) }),
+  };
+}
+
+export const routes: readonly Route[] = [
+  {
+    method: "POST",
+    path: "/services/:name/probes",
+    handle: async (ctx): Promise<Reply> => {
+      // Resolves when the commit lands. If this probe made the rule's condition hold, the
+      // proposal is queued behind it and the move shows up on the next read.
+      const committed = await services.send(ctx.name, probeFrom(ctx.body));
+      return json(200, {
+        key: committed.key,
+        state: committed.state,
+        values: committed.values,
+        seq: committed.seq,
+      });
+    },
+  },
+
+  {
+    method: "GET",
+    path: "/services/:name",
+    handle: async (ctx): Promise<Reply> => {
+      // History reads through the store, so this answers for a service that is not in
+      // memory as well as for one that is.
+      const { events, complete } = await services.history(ctx.name);
+      const last = events.filter(isTransitionEvent).at(-1);
+      if (last === undefined) {
+        return json(404, { error: "not_found", message: "no such service" });
+      }
+      return json(200, {
+        key: last.key,
+        state: last.to,
+        values: last.values,
+        seq: last.seq,
+        lastCommittedAt: last.at,
+        // Every proposal made to this service and why, straight out of its own stream.
+        proposals: events.flatMap((event) =>
+          event.type === "violation"
+            ? [
+                {
+                  by: event.constraint.name,
+                  kind: event.constraint.kind,
+                  reason: event.reason,
+                  at: event.at,
+                },
+              ]
+            : []
+        ),
+        complete,
+      });
+    },
+  },
+
+  {
+    method: "GET",
+    path: "/map",
+    handle: async (ctx): Promise<Reply> => {
+      // The whole fleet in one call. `complete` and `reasons` are passed straight through:
+      // someone acting on "nothing is unreachable" needs to know it was the whole answer.
+      const limit = ctx.query.get("limitPerState");
+      const map = await services.map(
+        limit === null ? {} : { limitPerState: Number(limit) }
+      );
+      return json(200, map);
+    },
+  },
+
+  {
+    method: "GET",
+    path: "/quiet",
+    handle: async (ctx): Promise<Reply> => {
+      // Which services have said nothing lately, with what was last known about each.
+      // The same measurement the freshness bound uses, asked on demand.
+      const staleFor = ctx.query.get("for") ?? "30s";
+      const given = ctx.query.get("state");
+      const state = SERVICE_STATES.find((known) => known === given);
+      if (given !== null && state === undefined) {
+        throw new BadRequest(
+          `state must be one of: ${SERVICE_STATES.join(", ")}`
+        );
+      }
+      const result = await services.query({
+        staleFor,
+        includeValues: true,
+        ...(state === undefined ? {} : { state }),
+      });
+      return json(200, {
+        query: { for: staleFor, state: state ?? null },
+        count: result.instances.length,
+        complete: result.complete,
+        reasons: result.reasons,
+        instances: result.instances,
+      });
+    },
+  },
+
+  {
+    method: "GET",
+    path: "/health",
+    handle: (): Reply => json(200, { ok: true, memory: ekman.memoryUsage }),
+  },
+];

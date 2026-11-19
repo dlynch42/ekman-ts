@@ -1,5 +1,6 @@
 /**
- * Ekman: declarative, embeddable state management for backend services.
+ * Ekman: per-key memory and state for the things your service watches. Embedded,
+ * budgeted, queryable.
  *
  * ```ts
  * import { Ekman, defineEntity, transitionTo, stay } from "ekman"
