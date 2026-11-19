@@ -24,6 +24,7 @@ answer, and it is one call.
 | `entity` | `string` | Required. Which entity to search. One that is not registered is refused with `UNKNOWN_ENTITY`. |
 | `state` | `string` | Only instances currently in this state. |
 | `olderThan` | `number` \| `string` | Time in state, as milliseconds or a duration string such as `"5m"`, `"2h"`, `"30d"`. |
+| `staleFor` | `number` \| `string` | Time since the instance last committed anything, in the same forms as `olderThan`. |
 | `limit` | `number` | Cap the answer to the oldest this many. Truncation is reported, never silent. Anything but a non-negative integer is refused with `INVALID_CONFIG`. |
 | `includeValues` | `boolean` | Carry each match's committed values. Off by default. |
 | `where` | `(values) => boolean` | Keep only the instances whose values pass. |
@@ -35,7 +36,7 @@ rather than guessed at.
 Each match is:
 
 ```ts
-{ key, entity, state, seq, enteredAt, ageMs, resident, values? }
+{ key, entity, state, seq, enteredAt, ageMs, resident, lastCommittedAt, staleMs, values? }
 ```
 
 `values` is there only when the query set `includeValues`.
@@ -90,6 +91,27 @@ something that has not gone anywhere. `stay` updates values; it does not restart
 
 That is the same measurement a [time-in-state constraint](./constraints.md#time-in-state) uses,
 deliberately. Two implementations of one question is how two answers start disagreeing.
+
+### Time since the last commit is the other clock
+
+```ts
+const quiet = await ekman.query({ entity: "services", staleFor: "5m" });
+
+for (const { key, state, staleMs } of quiet.instances) {
+  console.log(key, state, `nothing heard for ${staleMs}ms`);
+}
+```
+
+`staleFor` asks which instances have committed nothing for at least that long, whatever state
+they are in. Every commit resets it, a `stay` or a `patch` included, which is exactly what
+time in state does not do. A service that is `healthy` and has been for a month is not stuck;
+one whose last probe was an hour ago is the one worth finding. Each match carries
+`lastCommittedAt` and `staleMs`, whether or not the query filtered by them.
+
+It is the measurement a [freshness bound](./constraints.md#freshness) uses, it survives a
+restart with a durable store, and like `olderThan` it is inclusive at the bound. The two
+filters can be combined. An instance stored by an earlier version, with no last commit time
+recorded, has neither field until it next commits and is never matched by `staleFor`.
 
 With a durable store the moment an instance entered its state is stored with it, so the
 measurement survives a restart, and it keeps running through one. An instance that was

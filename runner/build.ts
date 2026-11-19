@@ -20,6 +20,7 @@ import {
   createStore,
   defineEntity,
   fail,
+  patch,
   replay,
   statesFromEntries,
   stay,
@@ -86,6 +87,7 @@ function buildConstraints(spec: ConstraintsSpec): ConstraintsConfig {
       ? {}
       : { transitions: spec.transitions }),
     ...(spec.temporal === undefined ? {} : { temporal: spec.temporal }),
+    ...(spec.stale === undefined ? {} : { stale: spec.stale }),
     ...(spec.guards === undefined
       ? {}
       : {
@@ -410,6 +412,8 @@ function toResult(
       return action.values === undefined
         ? stay()
         : stay(resolveValues(action.values, context));
+    case "patch":
+      return patch(resolveValues(action.values ?? {}, context));
     case "fail":
       return fail(named(new Error(action.error ?? "failed"), action.errorName));
     default:

@@ -135,6 +135,12 @@ export function refusalOutcome(
 export interface TemporalLatch {
   readonly fired: readonly string[];
   readonly owed: Readonly<Record<string, EventCause>>;
+  /**
+   * Which of the names above are freshness bounds. They follow a different rule: one
+   * stays said through the commit that answered it, a move included, and is forgotten at
+   * the next commit from anything else. Absent when none is named.
+   */
+  readonly stale?: readonly string[];
 }
 
 /**
@@ -148,15 +154,31 @@ export interface TemporalLatch {
 export class LatchFold {
   readonly #fired = new Set<string>();
   readonly #owed = new Map<string, EventCause>();
+  /** The freshness bounds among the names in the two above. */
+  readonly #stale = new Set<string>();
 
   constructor(seed?: TemporalLatch) {
     this.merge(seed);
   }
 
-  /** The instance moved to another state, so nothing said about the last one carries over. */
-  moved(): void {
+  /**
+   * The instance moved to another state, so nothing said about the last one carries over.
+   *
+   * With one exception. A freshness bound is about how long the instance has been quiet
+   * and not about where it is, so one whose trigger caused this move has been answered
+   * and stays said in the new state.
+   *
+   * @param cause what caused the move, when it was a commit and not a reload
+   */
+  moved(cause?: EventCause): void {
+    const answered = cause === undefined ? [] : this.#answeredStale(cause);
     this.#fired.clear();
     this.#owed.clear();
+    this.#stale.clear();
+    for (const name of answered) {
+      this.#fired.add(name);
+      this.#stale.add(name);
+    }
   }
 
   /** Take one event recorded during the current stay in a state. */
@@ -166,8 +188,14 @@ export class LatchFold {
       if (kind === "rule") {
         // A rule that matches again was armed again in between, which no event records.
         this.#fired.delete(name);
-      } else if (kind !== "temporal" || this.#fired.has(name)) {
+      } else if (
+        !(kind === "temporal" || kind === "stale") ||
+        this.#fired.has(name)
+      ) {
         return;
+      }
+      if (kind === "stale") {
+        this.#stale.add(name);
       }
       if (event.policy === "warn") {
         this.#fired.add(event.constraint.name);
@@ -177,6 +205,9 @@ export class LatchFold {
       return;
     }
 
+    if (event.type === "transition") {
+      this.#heard(event.cause);
+    }
     const answered =
       event.type === "transition" ||
       (event.type === "rejected" && !TRANSIENT_REFUSALS.has(event.code));
@@ -218,6 +249,7 @@ export class LatchFold {
   rearm(name: string): void {
     this.#fired.delete(name);
     this.#owed.delete(name);
+    this.#stale.delete(name);
   }
 
   /** Record an escalation as owed to a bound that has not fired. */
@@ -240,6 +272,9 @@ export class LatchFold {
     for (const [name, cause] of Object.entries(other?.owed ?? {})) {
       this.owe(name, cause);
     }
+    for (const name of other?.stale ?? []) {
+      this.#stale.add(name);
+    }
   }
 
   /** The latch as it stands, or undefined when there is nothing in it. */
@@ -247,7 +282,32 @@ export class LatchFold {
     if (this.#fired.size === 0 && this.#owed.size === 0) {
       return;
     }
-    return { fired: [...this.#fired], owed: Object.fromEntries(this.#owed) };
+    return {
+      fired: [...this.#fired],
+      owed: Object.fromEntries(this.#owed),
+      ...(this.#stale.size === 0 ? {} : { stale: [...this.#stale] }),
+    };
+  }
+
+  /** The freshness bounds whose owed trigger is the one with this cause. */
+  #answeredStale(cause: EventCause): string[] {
+    return [...this.#stale].filter((name) => {
+      const owed = this.#owed.get(name);
+      return owed?.id === cause.id && owed.type === cause.type;
+    });
+  }
+
+  /**
+   * A commit landed, so the instance has been heard from. Every freshness bound is armed
+   * again, except one this commit is the answer to.
+   */
+  #heard(cause: EventCause): void {
+    const answered = this.#answeredStale(cause);
+    for (const name of [...this.#stale]) {
+      if (!answered.includes(name)) {
+        this.rearm(name);
+      }
+    }
   }
 
   #settle(cause: EventCause): void {

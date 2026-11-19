@@ -5,12 +5,13 @@ import { assertBuilt, constraintsOf, statesOf } from "./compiled";
 import type { CommittedRecord, RuntimeDeps } from "./config";
 import { assertKnownKeys, resolveInboxConfig } from "./config";
 import type {
+  CompiledBound,
   CompiledRule,
-  CompiledTemporal,
   RuleTrigger,
+  StaleTrigger,
   TemporalTrigger,
 } from "./constraints";
-import { thrownMessage } from "./constraints";
+import { limitOf, thrownMessage } from "./constraints";
 import type { DispatchDeps } from "./dispatch";
 import { dispatch } from "./dispatch";
 import { EkmanError } from "./errors";
@@ -40,7 +41,7 @@ import type {
   StorageSweep,
   Store,
 } from "./store";
-import { EMPTY_SEQ, replay } from "./store";
+import { EMPTY_SEQ, lastCommitOf, replay } from "./store";
 import type { TelemetryEvent } from "./telemetry";
 import {
   emit,
@@ -511,6 +512,10 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       criteria.olderThan === undefined
         ? undefined
         : parseDuration(criteria.olderThan);
+    const staleForMs =
+      criteria.staleFor === undefined
+        ? undefined
+        : parseDuration(criteria.staleFor, "staleFor");
     const where = criteria.where as
       | ((values: Readonly<Values>) => boolean)
       | undefined;
@@ -528,7 +533,9 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       at,
       reading
     )) {
-      matches.set(match.key, match);
+      if ((staleForMs ?? 0) <= (match.staleMs as number)) {
+        matches.set(match.key, match);
+      }
     }
 
     const { authority } = this.#stack;
@@ -542,6 +549,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
         criteria.entity,
         criteria.state,
         olderThanMs,
+        staleForMs,
         at,
         reading,
         reasons
@@ -1521,9 +1529,10 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     let fired = 0;
 
     for (const definition of this.#definitions.values()) {
-      const byState = constraintsOf(definition)?.temporalByState;
-      // An entity with guards or a transition graph and no time bound has an empty map
-      // here, and nothing to sweep. Asking its store anyway would read every instance.
+      const byState = constraintsOf(definition)?.boundsByState;
+      // An entity with guards or a transition graph and no bound of either kind has an
+      // empty map here, and nothing to sweep. Asking its store anyway would read every
+      // instance.
       if (byState === undefined || byState.size === 0) {
         continue;
       }
@@ -1551,15 +1560,17 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    *
    * The instances most likely to be stuck are the idle ones, which are the first a memory
    * budget releases, and after a restart nothing is resident at all. So the store is asked
-   * the same question a query asks: who has been in a state for longer than this.
+   * the same questions a query asks: who has been in a state for longer than this, and
+   * who has not committed for longer than that.
    *
-   * One scan per entity, bounded by the shortest bound on any of its states, and told
-   * which keys are resident so it does not load them. A store that cannot be scanned is
-   * reported and the pass moves on, because a sweep on an interval has no caller.
+   * One scan per entity for each kind of bound it declares, bounded by the shortest bound
+   * of that kind on any of its states, and told which keys are resident so it does not
+   * load them. A store that cannot be scanned is reported and the pass moves on, because
+   * a sweep on an interval has no caller.
    */
   async #sweepStore(
     definition: AnyDefinition,
-    byState: ReadonlyMap<string, readonly CompiledTemporal[]>,
+    byState: ReadonlyMap<string, readonly CompiledBound[]>,
     at: number,
     noted: Set<string>
   ): Promise<number> {
@@ -1568,10 +1579,8 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       return 0;
     }
 
-    const bounds = new Map<string, number>();
     const skip = new Set<string>();
-    for (const [state, constraints] of byState) {
-      bounds.set(state, Math.min(...constraints.map((c) => c.within)));
+    for (const state of byState.keys()) {
       for (const key of this.#temporal.keys(definition.name, state)) {
         // Only a record that is current speaks for its key. One another writer has
         // overtaken is passed over by the resident walk, so the store is asked about it.
@@ -1581,29 +1590,10 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       }
     }
 
+    const bounds = [...byState.values()].flat();
     let due: readonly ScanMatch[];
     try {
-      const scanned = await this.#scanStore(authority, {
-        entity: definition.name,
-        olderThanMs: Math.min(...bounds.values()),
-        now: at,
-        skip,
-      });
-      due = scanned.matches;
-      if (!scanned.complete) {
-        // Said out loud, because the instances the store left out are not swept and
-        // nothing else would ever mention them.
-        this.#onUnhandled(
-          new EkmanError(
-            "NOT_IMPLEMENTED",
-            `store "${authority.name}" answered a scan of ${JSON.stringify(definition.name)} ` +
-              "with part of the answer, and a sweep has no way to ask for the rest. " +
-              "Time-in-state bounds were evaluated for the instances it returned and " +
-              "for no others it holds."
-          ),
-          { source: "sweep" }
-        );
-      }
+      due = await this.#scanDue(authority, definition.name, bounds, at, skip);
     } catch (error) {
       this.#onUnhandled(error, { source: "sweep" });
       return 0;
@@ -1611,9 +1601,12 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
 
     let fired = 0;
     for (const [state, constraints] of byState) {
-      const bound = bounds.get(state) as number;
       const waiting = due
-        .filter((m) => m.state === state && at - m.enteredAt >= bound)
+        .filter(
+          (match) =>
+            match.state === state &&
+            constraints.some((bound) => isPast(bound, match, at))
+        )
         .sort(byKey);
 
       for (const match of waiting) {
@@ -1632,6 +1625,61 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   }
 
   /**
+   * Ask a store which instances of an entity could be past one of these bounds.
+   *
+   * Time in state and time since the last commit are different criteria, and a scan
+   * applies every criterion it is given at once, so each kind of bound gets its own scan
+   * and the answers are joined by key.
+   */
+  async #scanDue(
+    authority: Store,
+    entity: string,
+    bounds: readonly CompiledBound[],
+    at: number,
+    skip: ReadonlySet<string>
+  ): Promise<readonly ScanMatch[]> {
+    const found = new Map<string, ScanMatch>();
+
+    for (const kind of ["temporal", "stale"] as const) {
+      const limits = bounds.filter((bound) => bound.kind === kind).map(limitOf);
+      if (limits.length === 0) {
+        continue;
+      }
+
+      const shortest = Math.min(...limits);
+      // biome-ignore lint/performance/noAwaitInLoops: at most two scans, and the second is only worth making once the first has not failed
+      const scanned = await this.#scanStore(authority, {
+        entity,
+        now: at,
+        skip,
+        ...(kind === "temporal"
+          ? { olderThanMs: shortest }
+          : { staleForMs: shortest }),
+      });
+      for (const match of scanned.matches) {
+        found.set(match.key, match);
+      }
+
+      if (!scanned.complete) {
+        // Said out loud, because the instances the store left out are not swept and
+        // nothing else would ever mention them.
+        this.#onUnhandled(
+          new EkmanError(
+            "NOT_IMPLEMENTED",
+            `store "${authority.name}" answered a scan of ${JSON.stringify(entity)} ` +
+              "with part of the answer, and a sweep has no way to ask for the rest. " +
+              "Its bounds were evaluated for the instances it returned and " +
+              "for no others it holds."
+          ),
+          { source: "sweep" }
+        );
+      }
+    }
+
+    return [...found.values()];
+  }
+
+  /**
    * Load one stored instance that is past a bound, and evaluate it like a resident one.
    *
    * Loading it is the same thing a trigger for an evicted instance does, and the budget
@@ -1646,7 +1694,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   async #sweepStored(
     match: ScanMatch,
     definition: AnyDefinition,
-    constraints: readonly CompiledTemporal[],
+    constraints: readonly CompiledBound[],
     at: number,
     noted: Set<string>
   ): Promise<number> {
@@ -1762,7 +1810,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   async #sweepInstance(
     key: string,
     state: string,
-    constraints: readonly CompiledTemporal[],
+    constraints: readonly CompiledBound[],
     at: number
   ): Promise<number> {
     let fired = 0;
@@ -1773,8 +1821,17 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
         return fired;
       }
 
-      const { instance, elapsedMs } = aged;
-      if (elapsedMs < constraint.within || instance.hasFired(constraint.name)) {
+      const { instance } = aged;
+      // Time in the state for one kind of bound, time since anything was committed for
+      // the other. Read again for each bound, since the one before may have committed.
+      const elapsedMs =
+        constraint.kind === "temporal"
+          ? aged.elapsedMs
+          : at - instance.lastCommittedAt;
+      if (
+        elapsedMs < limitOf(constraint) ||
+        instance.hasFired(constraint.name)
+      ) {
         continue;
       }
 
@@ -1841,6 +1898,8 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
           enteredAt: aged.instance.enteredAt,
           ageMs: aged.elapsedMs,
           resident: true,
+          lastCommittedAt: aged.instance.lastCommittedAt,
+          staleMs: at - aged.instance.lastCommittedAt,
           ...(reading ? { values: aged.instance.values } : {}),
         };
       }
@@ -1869,6 +1928,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     entity: string,
     state: string | undefined,
     olderThanMs: number | undefined,
+    staleForMs: number | undefined,
     at: number,
     reading: boolean,
     reasons: Set<Partiality>
@@ -1878,6 +1938,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       now: at,
       ...(state === undefined ? {} : { state }),
       ...(olderThanMs === undefined ? {} : { olderThanMs }),
+      ...(staleForMs === undefined ? {} : { staleForMs }),
       skip: new Set(matches.keys()),
       ...(reading ? { includeValues: true } : {}),
     });
@@ -1899,6 +1960,12 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
           enteredAt: match.enteredAt,
           ageMs: at - match.enteredAt,
           resident: false,
+          ...(match.lastCommittedAt === undefined
+            ? {}
+            : {
+                lastCommittedAt: match.lastCommittedAt,
+                staleMs: at - match.lastCommittedAt,
+              }),
           ...(reading ? { values: match.values as Readonly<Values> } : {}),
         });
       }
@@ -1928,7 +1995,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     filtered: boolean;
   }> {
     const result = await authority.scan(criteria);
-    const { state, olderThanMs, now } = criteria;
+    const { state, olderThanMs, staleForMs, now } = criteria;
     const declared = authority.capabilities.scan;
     const unsupported = new Set<ScanFilter>(result.unsupported);
     if (!declared.byState && state !== undefined) {
@@ -1937,15 +2004,21 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     if (!declared.olderThan && olderThanMs !== undefined) {
       unsupported.add("olderThan");
     }
-    if (unsupported.size === 0) {
-      return {
-        matches: await this.#withValues(authority, criteria, result.matches),
-        complete: result.complete,
-        filtered: false,
-      };
+    if (declared.staleFor !== true && staleForMs !== undefined) {
+      unsupported.add("staleFor");
     }
 
-    const matches = result.matches.filter((match) => {
+    const read = await this.#readMissing(
+      authority,
+      criteria,
+      result.matches,
+      unsupported.has("staleFor")
+    );
+    if (unsupported.size === 0) {
+      return { matches: read, complete: result.complete, filtered: false };
+    }
+
+    const matches = read.filter((match) => {
       const wrongState =
         unsupported.has("state") &&
         state !== undefined &&
@@ -1953,18 +2026,21 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       const tooRecent =
         unsupported.has("olderThan") &&
         (olderThanMs ?? 0) > now - match.enteredAt;
-      return !(wrongState || tooRecent);
+      const heardFrom =
+        unsupported.has("staleFor") &&
+        !isQuiet(match, staleForMs as number, now);
+      return !(wrongState || tooRecent || heardFrom);
     });
 
-    return {
-      matches: await this.#withValues(authority, criteria, matches),
-      complete: result.complete,
-      filtered: true,
-    };
+    return { matches, complete: result.complete, filtered: true };
   }
 
   /**
-   * Read the values of any match a store returned without them, when the scan asked.
+   * Load whatever a scan needed from a match and a store left off it.
+   *
+   * Values, when the scan asked for them. And the time of the last commit, when the
+   * runtime has to finish a freshness filter the store could not apply and so cannot go
+   * by the store's word for which rows passed it.
    *
    * The key can have committed between the scan and this load, so the match is rebuilt
    * whole from what was loaded and held to the criteria again. Laying the loaded values
@@ -1974,21 +2050,22 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * A match whose key is gone by the time it is loaded was deleted in between, and is
    * dropped: it is no longer an instance.
    */
-  async #withValues(
+  async #readMissing(
     authority: Store,
     criteria: ScanCriteria,
-    matches: readonly ScanMatch[]
+    matches: readonly ScanMatch[],
+    filteringByLastCommit: boolean
   ): Promise<readonly ScanMatch[]> {
-    if (
-      criteria.includeValues !== true ||
-      matches.every((match) => match.values !== undefined)
-    ) {
+    const lacks = (match: ScanMatch): boolean =>
+      (criteria.includeValues === true && match.values === undefined) ||
+      (filteringByLastCommit && match.lastCommittedAt === undefined);
+    if (!matches.some(lacks)) {
       return matches;
     }
 
     const read = await Promise.all(
       matches.map(async (match) => {
-        if (match.values !== undefined) {
+        if (!lacks(match)) {
           return match;
         }
         const loaded = await authority.load(match.key);
@@ -2002,7 +2079,10 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
           state: current.state,
           seq: current.seq,
           enteredAt: current.enteredAt,
-          values: current.values,
+          ...(criteria.includeValues === true
+            ? { values: current.values }
+            : {}),
+          ...lastCommitOf(current),
         };
       })
     );
@@ -2010,11 +2090,12 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   }
 
   /**
-   * Record a temporal violation and, unless it is only a warning, deliver its escalation.
+   * Record a bound's violation and, unless it is only a warning, deliver its escalation.
    *
    * The escalation goes through `send()`, so it queues behind whatever the instance is
    * already doing and dispatches against the state it is in when its turn comes. The
-   * runtime never writes state on its own: `escalateTo` rides on the trigger, and the
+   * runtime never writes state on its own: the state asked for rides on the trigger, as
+   * `escalateTo` for a time-in-state bound and `propose` for a freshness bound, and the
    * handler decides.
    *
    * A trigger id is allocated even for a warning, so the recorded violation always has a
@@ -2028,7 +2109,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    */
   async #escalate(
     instance: AnyInstance,
-    constraint: CompiledTemporal,
+    constraint: CompiledBound,
     elapsedMs: number,
     at: number
   ): Promise<EscalationOutcome> {
@@ -2037,18 +2118,27 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       owed === undefined
         ? this.#freshCause(instance, constraint.trigger)
         : { type: constraint.trigger, id: owed };
-    const trigger: TemporalTrigger<string, string> = {
+    const { state } = instance;
+    const target =
+      constraint.kind === "temporal"
+        ? constraint.escalateTo
+        : constraint.propose;
+    const trigger:
+      | TemporalTrigger<string, string>
+      | StaleTrigger<string, string> = {
       ...cause,
       constraint: constraint.name,
-      state: constraint.in,
+      state,
       sinceMs: elapsedMs,
-      ...(constraint.escalateTo === undefined
+      ...(target === undefined
         ? {}
-        : { escalateTo: constraint.escalateTo }),
+        : {
+            [constraint.kind === "temporal" ? "escalateTo" : "propose"]: target,
+          }),
     };
 
     if (owed === undefined) {
-      this.#recordTemporalViolation(instance, constraint, elapsedMs, at, cause);
+      this.#recordBoundViolation(instance, constraint, elapsedMs, at, cause);
     }
 
     if (constraint.policy === "warn") {
@@ -2067,11 +2157,11 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       type: "constraint.escalated",
       key: instance.key,
       entity: instance.entity,
-      kind: "temporal",
+      kind: constraint.kind,
       constraint: constraint.name,
-      state: constraint.in,
+      state,
       elapsedMs,
-      escalateTo: constraint.escalateTo,
+      escalateTo: target,
       trigger: cause,
       delivered: outcome === "delivered",
       at: telemetryNow(),
@@ -2095,21 +2185,24 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     return cause;
   }
 
-  /** Write a temporal violation to the instance's stream and mirror it in telemetry. */
-  #recordTemporalViolation(
+  /** Write a bound's violation to the instance's stream and mirror it in telemetry. */
+  #recordBoundViolation(
     instance: AnyInstance,
-    constraint: CompiledTemporal,
+    constraint: CompiledBound,
     elapsedMs: number,
     at: number,
     cause: { type: string; id: string }
   ): void {
     const reason =
-      `has been in "${constraint.in}" for ${elapsedMs}ms, over its bound of ` +
-      `${constraint.within}ms`;
+      constraint.kind === "temporal"
+        ? `has been in "${constraint.in}" for ${elapsedMs}ms, over its bound of ` +
+          `${constraint.within}ms`
+        : `has committed nothing for ${elapsedMs}ms, over its bound of ` +
+          `${constraint.after}ms`;
 
     instance.violation({
       violation: {
-        kind: "temporal",
+        kind: constraint.kind,
         name: constraint.name,
         policy: constraint.policy,
         reason,
@@ -2122,8 +2215,8 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       type: "constraint.violated",
       key: instance.key,
       entity: instance.entity,
-      state: constraint.in,
-      kind: "temporal",
+      state: instance.state,
+      kind: constraint.kind,
       constraint: constraint.name,
       policy: constraint.policy,
       reason,
@@ -2300,7 +2393,7 @@ function byKey(a: ScanMatch, b: ScanMatch): number {
  */
 function nextDue(
   instance: AnyInstance,
-  constraints: readonly CompiledTemporal[],
+  constraints: readonly CompiledBound[],
   at: number
 ): number {
   let dueAt = Number.POSITIVE_INFINITY;
@@ -2308,13 +2401,34 @@ function nextDue(
     if (instance.hasFired(constraint.name)) {
       continue;
     }
+    const since =
+      constraint.kind === "temporal"
+        ? instance.enteredAt
+        : instance.lastCommittedAt;
     const due =
       instance.undelivered(constraint.name) === undefined
-        ? instance.enteredAt + constraint.within
+        ? since + limitOf(constraint)
         : at;
     dueAt = Math.min(dueAt, due);
   }
   return dueAt;
+}
+
+/**
+ * Whether a scan row has gone at least this long without a commit. A row whose last
+ * commit time the store does not know has not: unknown is not stale.
+ */
+function isQuiet(match: ScanMatch, forMs: number, at: number): boolean {
+  return (
+    match.lastCommittedAt !== undefined && at - match.lastCommittedAt >= forMs
+  );
+}
+
+/** Whether a scan row is past a bound, on the clock that bound reads. */
+function isPast(bound: CompiledBound, match: ScanMatch, at: number): boolean {
+  return bound.kind === "temporal"
+    ? at - match.enteredAt >= bound.within
+    : isQuiet(match, bound.after, at);
 }
 
 /**

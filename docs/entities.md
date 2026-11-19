@@ -173,15 +173,34 @@ A handler must not await a `send()` to its own key; see
 
 ## Results
 
-A handler must return one of three things. Nothing else commits.
+A handler must return one of four things. Nothing else commits.
 
 ```ts
-import { fail, stay, transitionTo } from "ekman";
+import { fail, patch, stay, transitionTo } from "ekman";
 
 transitionTo("paid", { total: 4200 })   // change state, optionally replace values
-stay({ progress: 40 })                  // same state, new values
+stay({ progress: 40 })                  // same state, replace values
+patch({ progress: 40 })                 // same state, merge into the values held
 fail(new Error("card declined"))        // no commit of state or values; recorded
 ```
+
+`stay` and `transitionTo` **replace** values when given any. `patch` **merges**: it names what
+changed and everything else the instance knows is carried forward. That is the update for an
+instance that is memory about something, where each trigger teaches it one thing:
+
+```ts
+// Replacing: every handler restates everything, and a forgotten spread drops what it left out.
+return stay({ ...service.values, latencyMs: trigger.latencyMs });
+
+// Merging: say what was learned.
+return patch({ latencyMs: trigger.latencyMs });
+```
+
+The merge is shallow. A field named in a patch replaces the one held, whole, including when it
+is an object or an array. The committed event carries the full merged values, as every commit
+does, so history, replay and [invariants](./constraints.md#invariants) all see whole values and
+none of them has to know a merge happened. `patch` does not move the instance; a move that
+also wants to keep what it knows spreads the values into `transitionTo`, as before.
 
 `transitionTo` is checked against the transition graph and guards when you have declared them.
 `stay` is deliberately not a transition: the graph gates state changes, not value updates, so a

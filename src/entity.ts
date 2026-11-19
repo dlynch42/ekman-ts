@@ -109,6 +109,12 @@ export function defineEntity<
     compiled?.temporal ?? []
   );
   assertEscalationsRecognized(name, triggers, "rule", compiled?.rules ?? []);
+  assertEscalationsRecognized(
+    name,
+    triggers,
+    "stale constraint",
+    compiled?.stale ?? []
+  );
 
   return Object.freeze({
     name,
@@ -306,6 +312,7 @@ const CONSTRAINT_KEYS = [
   "invariants",
   "temporal",
   "rules",
+  "stale",
 ] as const;
 
 const STATE_KEYS = ["handler", ...POLICY_KEYS] as const;
@@ -317,6 +324,7 @@ const DECLARATION_KEYS = {
   invariants: ["name", "in", "policy", "check"],
   temporal: ["name", "in", "within", "escalateTo", "trigger", "policy"],
   rules: ["name", "in", "when", "propose", "trigger", "policy"],
+  stale: ["name", "in", "after", "propose", "trigger", "policy"],
 } as const;
 
 /**

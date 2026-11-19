@@ -349,6 +349,37 @@
             }
           }
         },
+        "stale": {
+          "description": "Bounds on how long an instance may go without a commit. Evaluated by a sweep, and firing delivers a trigger.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["after"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string" },
+              "in": {
+                "description": "States the bound watches. Omitted means every state.",
+                "type": "array",
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "after": {
+                "description": "Milliseconds an instance may go without a commit.",
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "propose": {
+                "description": "Carried on the delivered trigger for the handler to act on. The runtime never applies it directly.",
+                "type": "string"
+              },
+              "trigger": {
+                "description": "Type of the delivered trigger. Defaults to constraint.stale.",
+                "type": "string"
+              },
+              "policy": { "$ref": "#/$defs/violationPolicy" }
+            }
+          }
+        },
         "rules": {
           "description": "Conditions over what an instance knows. Evaluated after every commit in a watched state, and coming to hold delivers a trigger.",
           "type": "array",
@@ -466,7 +497,7 @@
       "additionalProperties": false,
       "properties": {
         "result": {
-          "enum": ["transitionTo", "stay", "fail"]
+          "enum": ["transitionTo", "stay", "patch", "fail"]
         },
         "to": {
           "description": "A state name, or a value expression resolving to one. An escalation carries its target on the trigger."
@@ -671,7 +702,8 @@
                         "guard",
                         "invariant",
                         "temporal",
-                        "rule"
+                        "rule",
+                        "stale"
                       ]
                     },
                     "name": { "type": "string" }
@@ -787,6 +819,16 @@
               "state": { "type": "string", "minLength": 1 },
               "olderThan": {
                 "description": "Milliseconds, or a duration such as 5m. Inclusive at the bound.",
+                "oneOf": [
+                  { "type": "integer", "minimum": 0 },
+                  {
+                    "type": "string",
+                    "pattern": "^\\d+(\\.\\d+)?(ms|s|m|h|d)$"
+                  }
+                ]
+              },
+              "staleFor": {
+                "description": "Milliseconds since the last commit, or a duration such as 5m. Inclusive at the bound.",
                 "oneOf": [
                   { "type": "integer", "minimum": 0 },
                   {

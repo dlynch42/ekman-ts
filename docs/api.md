@@ -132,11 +132,12 @@ await ekman.send("orders:a-1", trigger);            // by key, same instance
 // send() resolves to:
 { key, state, values, seq, event }
 
-// inspect() returns:
-{ key, entity, state, values, seq }
+// inspect() returns, and a handler is handed:
+{ key, entity, state, values, seq, enteredAt, lastCommittedAt }
 
 // query() resolves to:
-{ instances: [{ key, entity, state, seq, enteredAt, ageMs, resident, values? }], complete, reasons, sources }
+{ instances: [{ key, entity, state, seq, enteredAt, ageMs, resident, lastCommittedAt, staleMs, values? }],
+  complete, reasons, sources }
 
 // map() resolves to, and residentMap() returns:
 { entity, byState: { [state]: { count, keys } }, total, complete, reasons, sources }

@@ -40,6 +40,8 @@ const snapshot: InstanceSnapshot = Object.freeze({
   state: "pending",
   values: Object.freeze({ total: 5 }),
   seq: 1,
+  enteredAt: 0,
+  lastCommittedAt: 0,
 });
 
 const trigger: Trigger = { type: "approve", id: "t1" };

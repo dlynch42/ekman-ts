@@ -268,13 +268,19 @@ Exactly one of `result` or `throw`.
 
 | Field | Applies to | Meaning |
 |---|---|---|
-| `result` | all | `transitionTo`, `stay`, or `fail`. |
+| `result` | all | `transitionTo`, `stay`, `patch`, or `fail`. |
 | `to` | `transitionTo` | Target state name. Required. |
-| `values` | `transitionTo`, `stay` | A value expression, see below. Omitted means the current values unchanged. |
+| `values` | `transitionTo`, `stay`, `patch` | A value expression, see below. For `transitionTo` and `stay` it replaces the values, and omitted means the current values unchanged. For `patch` it is merged over them. |
 | `error` | `fail` | Error message. |
 | `errorName` | `fail`, `throw` | Error name, used for error-handler classification. Defaults to `Error`. |
 | `throw` | all | Throw instead of returning. The message. Exercises the thrown-error path. |
 | `delayMs` | all | Await this many milliseconds before producing the result. Drives ordering and timeout scenarios. |
+
+`patch` stays in the current state and commits the current values with the named fields
+laid over them. The merge is shallow: a field named replaces the one held, whole. The
+committed event carries the full merged values, never the fields alone, so a stream reads
+the same whether a commit was a `stay` or a `patch`, and constraints are checked against the
+merged whole.
 
 A case's `when` may also match on `attempt`, the 1-based attempt number. Every declared
 condition must match. This is what makes retry behaviour expressible:
@@ -336,7 +342,7 @@ none accepts any well-formed result.
 }
 ```
 
-Five kinds, each checked at a defined moment:
+Six kinds, each checked at a defined moment:
 
 | Kind | Checked |
 |---|---|
@@ -345,6 +351,7 @@ Five kinds, each checked at a defined moment:
 | `invariants` | Before committing any result that changes state or values. |
 | `temporal` | On a sweep, against how long the instance has been in `in`. |
 | `rules` | After every commit of an instance in a state named by `in`, against what was just committed. |
+| `stale` | On a sweep, against how long ago the instance last committed anything. |
 
 Every constraint carries a `policy`, defaulting to `reject`:
 
@@ -387,6 +394,43 @@ The escalation trigger carries:
 ```
 
 `type` defaults to `constraint.temporal` when the constraint declares no `trigger`.
+
+#### Stale
+
+A stale constraint bounds how long an instance may go without a commit. It is evaluated
+on a sweep and delivers a trigger, like a temporal constraint, and reads a different
+clock.
+
+| Field | Meaning |
+|---|---|
+| `after` | Required. Milliseconds an instance may go without a commit. |
+| `in` | The states the bound watches. Omitted means every state. |
+| `propose` | The state the bound asks for, carried on the trigger. |
+| `trigger` | Type of the delivered trigger. Defaults to `constraint.stale`. |
+| `name` | Defaults to `stale:<in joined by \|>:<after>`, with `*` for every state. |
+| `policy` | As for a temporal constraint. |
+
+What every port owes:
+
+- **The clock is the time of the last commit**, of any kind. Initialization is a commit.
+  A commit that leaves the state alone resets this clock and leaves time in state running.
+- **Inclusive at the bound**, like `within`.
+- **A violation event** of kind `stale`, with no `attempted`, at the sequence of the last
+  commit, whose cause is the trigger about to be delivered.
+- **Once per silence.** The commit that answers the bound's own trigger does not arm it
+  again, whether it moved the instance or not. The next commit with any other cause does.
+  Under `warn`, where nothing is delivered, the next commit arms it.
+- **Not asked in the state it proposes.**
+- **It survives a reload**, and covers instances a store holds and the runtime does not,
+  exactly as a temporal constraint does.
+- **Refused at definition** for the reasons a rule is.
+
+The trigger carries:
+
+```json
+{ "type": "constraint.stale", "constraint": "gone-quiet",
+  "state": "healthy", "sinceMs": 1500, "propose": "unreachable" }
+```
 
 #### Rules
 
@@ -481,7 +525,7 @@ An ordered array of steps.
 | `drain` | Wait for every outstanding send to settle. |
 | `wait` | Pause this many milliseconds. |
 | `advance` | Move the declared clock forward this many milliseconds. |
-| `sweep` | Evaluate temporal constraints once and settle whatever they escalate. |
+| `sweep` | Evaluate temporal and stale constraints once and settle whatever they escalate. |
 | `restart` | Throw the runtime away and build a new one against the same storage. |
 | `forget` | Delete an instance outright: its resident state and its stream in every layer. |
 
@@ -665,7 +709,7 @@ only a `type` asserts no event of that type was emitted at all.
 | `handler.timedOut` | An attempt ran past its timeout and was abandoned. | `attempt`, `timeoutMs` |
 | `commit.fenced` | A superseded attempt tried to commit and was refused. | `attempt`, `reason`, `tokenSeq`, `currentSeq` |
 | `constraint.violated` | A constraint did not hold. | `kind`, `constraint`, `policy`, `state`, `reason` |
-| `constraint.escalated` | A temporal constraint or a rule fired and its trigger was sent. | `kind`, `constraint`, `elapsedMs` (temporal only), `escalateTo`, `delivered` |
+| `constraint.escalated` | A temporal constraint, a stale constraint or a rule fired and its trigger was sent. | `kind`, `constraint`, `elapsedMs` (not for a rule), `escalateTo`, `delivered` |
 | `commit.raced` | A commit reached the store, and a timeout arrived while it was in flight. | `attempt`, `reason`, `seq` |
 | `memory.accounted` | Resident accounting, after every commit. | `bytes`, `residentBytes`, `residentCount`, `maxBytes`, `overBudget` |
 | `memory.refused` | A new instance was refused because the budget is full. | `residentBytes`, `maxBytes` |
@@ -776,7 +820,7 @@ Queries run after everything has settled, each with the answer it must give.
 | Field | Meaning |
 |---|---|
 | `entity` | Required. |
-| `state`, `olderThan`, `limit` | The criteria. `olderThan` is milliseconds or a duration such as `"5m"`. |
+| `state`, `olderThan`, `staleFor`, `limit` | The criteria. `olderThan` and `staleFor` are milliseconds or a duration such as `"5m"`. |
 | `includeValues` | Ask for each match's committed values. |
 | `keys` | Matching keys, **oldest in state first**. An exact list, in order. |
 | `values` | Values a match must carry, by key. Each is asserted as a subset, as `then.state` values are. |
@@ -794,6 +838,11 @@ with itself.
 
 `olderThan` is inclusive: an instance that has been in a state for exactly the bound
 matches.
+
+`staleFor` reads the other clock: the time since the instance last committed anything.
+Every commit resets it, one that leaves the state alone included, and initialization is a
+commit. It is inclusive too, it combines with `olderThan`, and with a durable store it
+keeps running through a restart. It is the measurement a stale constraint uses.
 
 A match carries values only when the query asked for them. That half is asserted on every
 query: one that does not set `includeValues` fails if any match comes back with values.

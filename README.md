@@ -155,8 +155,8 @@ const orders = defineEntity.withTriggers<OrderTrigger>()("orders", {
 });
 ```
 
-A handler receives the instance, the trigger and a context, and returns one of three results:
-`transitionTo`, `stay`, or `fail`. Nothing else commits, and throwing is equivalent to `fail`.
+A handler receives the instance, the trigger and a context, and returns one of four results:
+`transitionTo`, `stay`, `patch`, or `fail`. Nothing else commits, and throwing is equivalent to `fail`.
 [More](./docs/entities.md)
 
 ### Keys and instances
@@ -203,15 +203,18 @@ constraints: {
   invariants:  [{ name: "attempts-sane", check: (n) => n.values.attempts >= 0 }],
   temporal:    [{ in: "deploying", within: 10 * 60_000, escalateTo: "failed" }],
   rules:       [{ in: "deploying", when: (d) => d.values.errors >= 5, propose: "failed" }],
+  stale:       [{ after: 60_000, propose: "unreachable" }],
 },
 ```
 
-Five kinds, all opt-in, each with its own `reject` / `warn` / `off` dial. `warn` lets you turn a
+Six kinds, all opt-in, each with its own `reject` / `warn` / `off` dial. `warn` lets you turn a
 constraint on, read the violations real traffic produces, and switch to `reject` once you know
 what your graph actually is; `observeEdges` and `allowFrom` turn those violations into the map to
 paste back in. A time-in-state bound fires as a trigger rather than a write, so your handler
 decides. A rule does the same for a condition over values: when it comes to hold, the state it
-proposes arrives as a trigger, once, and the handler decides. [More](./docs/constraints.md)
+proposes arrives as a trigger, once, and the handler decides. A freshness bound watches the
+other clock, how long since an instance last committed anything, and fires the same way once
+per silence. [More](./docs/constraints.md)
 
 ### Durability and stores
 
@@ -247,7 +250,8 @@ const map = await ekman.map("deployments");
 ```
 
 Time in state is measured from the last move, so a handler updating a progress counter does not
-keep resetting the clock. A query carries each match's values when asked with `includeValues`,
+keep resetting the clock. `staleFor` filters on the other clock, the time since an instance
+last committed anything, which every commit resets. A query carries each match's values when asked with `includeValues`,
 and `where` filters by them. `map` is the whole fleet in one call: how many instances are in
 each state, and which. Every result says whether it is the whole answer; returning a partial
 one as if it were complete is the thing a query here will never do, because an operator acting on
@@ -292,20 +296,20 @@ Full surface in [docs/api.md](./docs/api.md). The parts you need first:
 |---|---|
 | Runtime | `Ekman` |
 | Entities | `defineEntity`, `statesFromEntries` |
-| Results | `transitionTo`, `stay`, `fail` |
+| Results | `transitionTo`, `stay`, `patch`, `fail` |
 | Keys | `buildKey`, `parseKey`, `KEY_SEPARATOR` |
 | Errors | `EkmanError`, `ConstraintViolationError`, `isEkmanError`, `isConstraintViolation`, `ERROR_CODES`, `ERROR_FALLBACK` |
 | Events | `isTransitionEvent` |
 | Diagrams | `analyze`, `toMermaid`, `toDot`, `observeEdges`, `allowFrom` |
 | Stores | `createStore`, `defaultLogDir`, `replay`, `latestSeq`, `scanKeys`, `EMPTY_SEQ` |
 | Option lists | `OVERFLOW_POLICIES`, `EVICTION_POLICIES`, `RETENTION_POLICIES`, `DEFAULT_CAPACITY` |
-| Misc | `parseDuration`, `accountBytes`, `DEFAULT_TEMPORAL_TRIGGER`, `DEFAULT_RULE_TRIGGER`, `TELEMETRY_FALLBACK`, `SPEC_VERSION` |
+| Misc | `parseDuration`, `accountBytes`, `DEFAULT_TEMPORAL_TRIGGER`, `DEFAULT_RULE_TRIGGER`, `DEFAULT_STALE_TRIGGER`, `TELEMETRY_FALLBACK`, `SPEC_VERSION` |
 
 That is every runtime export. The types they take and return are exported alongside them:
 the config shapes (`EkmanConfig`, `EntityConfig`, `ExecutionPolicy`, `StorageConfig`), the
 results (`CommitResult`, `QueryResult`, `StateMap`, `StorageSweep`), every event and telemetry event,
-`TemporalTrigger`, the trigger a time-in-state bound delivers, `RuleTrigger`, the one a rule
-delivers, `UnhandledContext`, what
+`TemporalTrigger`, the trigger a time-in-state bound delivers, `RuleTrigger` and `StaleTrigger`, the ones a
+rule and a freshness bound deliver, `UnhandledContext`, what
 `onUnhandled` is told about a failure, and `StateGraph`, the read-only view of an entity's
 states.
 

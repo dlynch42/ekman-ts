@@ -343,6 +343,66 @@ export function storeContract(
     );
   });
 
+  it(`${name}: hands back when a snapshot says the instance last committed`, async () => {
+    const store = make();
+    await store.append("orders:1", commit("orders:1", 0, null, "a"), EMPTY_SEQ);
+    await store.snapshot("orders:1", {
+      key: "orders:1",
+      entity: "orders",
+      state: "a",
+      values: { n: 0 },
+      seq: 0,
+      enteredAt: 0,
+      at: 9000,
+      lastCommittedAt: 4000,
+    });
+
+    const loaded = await store.load("orders:1");
+    expect(loaded?.snapshot?.lastCommittedAt).toBe(4000);
+    // Read from the snapshot when nothing was committed after it, and from the last
+    // commit when something was. Never from when the snapshot was taken.
+    expect(replay(loaded as NonNullable<typeof loaded>)?.lastCommittedAt).toBe(
+      4000
+    );
+
+    await store.append("orders:1", commit("orders:1", 1, "a", "a", 7000), 0);
+    const later = await store.load("orders:1");
+    expect(replay(later as NonNullable<typeof later>)?.lastCommittedAt).toBe(
+      7000
+    );
+  });
+
+  it(`${name}: scans by time since the last commit`, async () => {
+    const store = make();
+    // Committed once, at 0, and silent since.
+    await store.append(
+      "orders:1",
+      commit("orders:1", 0, null, "a", 0),
+      EMPTY_SEQ
+    );
+    // In the same state just as long, and heard from at 9000.
+    await store.append(
+      "orders:2",
+      commit("orders:2", 0, null, "a", 0),
+      EMPTY_SEQ
+    );
+    await store.append("orders:2", commit("orders:2", 1, "a", "a", 9000), 0);
+
+    const quiet = await store.scan({
+      entity: "orders",
+      staleForMs: 5000,
+      now: 10_000,
+    });
+
+    if (store.capabilities.scan.staleFor !== true) {
+      // A store that does not apply the criterion must not claim to, and the runtime
+      // then finishes the filter itself.
+      return;
+    }
+    expect(quiet.matches.map((m) => m.key)).toEqual(["orders:1"]);
+    expect(quiet.matches[0]?.lastCommittedAt).toBe(0);
+  });
+
   it(`${name}: keeps the first snapshot written at a sequence`, async () => {
     const store = make();
     await store.append("orders:1", commit("orders:1", 0, null, "a"), EMPTY_SEQ);

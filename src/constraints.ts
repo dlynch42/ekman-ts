@@ -6,9 +6,9 @@ import type { InstanceSnapshot, Trigger, TriggerLike, Values } from "./types";
 /**
  * Constraints: the strictness dial.
  *
- * Five kinds, each checked at a defined moment, each carrying its own violation policy.
- * Three refuse a result before it commits. Time bounds and rules refuse nothing: they
- * deliver a trigger and the handler decides.
+ * Six kinds, each checked at a defined moment, each carrying its own violation policy.
+ * Three refuse a result before it commits. Time-in-state bounds, freshness bounds and
+ * rules refuse nothing: they deliver a trigger and the handler decides.
  * All of them are opt-in per entity, and an entity that declares none behaves exactly as
  * it did before this file existed.
  *
@@ -58,6 +58,38 @@ export type TemporalTrigger<
   readonly sinceMs: number;
   /** The state the bound asks for, when it names one. The handler decides whether to go. */
   readonly escalateTo?: S;
+};
+
+/** The default trigger type a freshness bound delivers when an instance has gone quiet. */
+export const DEFAULT_STALE_TRIGGER = "constraint.stale";
+
+/**
+ * The trigger a freshness bound delivers when an instance has gone too long without a
+ * commit.
+ *
+ * An entity with a typed trigger union and a freshness bound adds this to the union:
+ *
+ * ```ts
+ * type ServiceTrigger = { type: "probe"; ok: boolean } | StaleTrigger<State>;
+ * ```
+ *
+ * `K` is the bound's `trigger` name, for a bound that sets one.
+ */
+// biome-ignore lint/style/useConsistentTypeDefinitions: an interface has no implicit index signature, so the runtime could not hand one to `send` as a `Trigger`
+export type StaleTrigger<
+  S extends string = string,
+  K extends string = typeof DEFAULT_STALE_TRIGGER,
+> = {
+  readonly type: K;
+  readonly id?: string;
+  /** The name of the bound that fired. */
+  readonly constraint: string;
+  /** The state the instance is in. */
+  readonly state: S;
+  /** How long it has gone without a commit, in milliseconds. */
+  readonly sinceMs: number;
+  /** The state the bound asks for, when it names one. The handler decides whether to go. */
+  readonly propose?: S;
 };
 
 /** The default trigger type a rule delivers when its condition comes to hold. */
@@ -260,6 +292,43 @@ export interface RuleConstraint<
   readonly policy?: ViolationPolicy;
 }
 
+/**
+ * A bound on how long an instance may go without committing anything.
+ *
+ * "When did we last hear from it" is a different question from "how long has it been in
+ * this state", and for an instance that is memory about something else it is usually the
+ * one that matters: a service can sit in `healthy` for weeks, rightly, while the probes
+ * that would say otherwise have stopped arriving. A time-in-state bound cannot see that,
+ * because every probe is a commit that leaves the state alone.
+ *
+ * Evaluated by the sweeper, like a time-in-state bound, and firing delivers a *trigger*.
+ * The runtime never writes state on its own.
+ *
+ * A bound fires once per silence. The commit that answers its trigger does not arm it
+ * again, whatever the handler decided; the next commit from anything else does. So a
+ * handler that declines the proposal is not asked again every `after` milliseconds.
+ */
+export interface StaleConstraint<S extends string = string> {
+  /**
+   * Defaults to `stale:<in>:<after>`. Distinct within an entity, and from the names of
+   * its time-in-state bounds and rules, because "already fired" is tracked by name.
+   */
+  readonly name?: string;
+  /** The states this bound watches. Omitted means every state. */
+  readonly in?: S | readonly S[];
+  /** How long an instance may go without a commit, in milliseconds. */
+  readonly after: number;
+  /**
+   * The state the bound asks for. Carried on the trigger for the handler to act on; the
+   * runtime does not apply it. An instance already in it is not watched.
+   */
+  readonly propose?: S;
+  /** Type of the delivered trigger. Defaults to `constraint.stale`. */
+  readonly trigger?: string;
+  /** Defaults to `reject`, meaning the trigger is delivered. */
+  readonly policy?: ViolationPolicy;
+}
+
 export interface ConstraintsConfig<
   S extends string = string,
   V extends Values = Values,
@@ -270,6 +339,7 @@ export interface ConstraintsConfig<
   readonly invariants?: readonly InvariantConstraint<S, V, T>[];
   readonly temporal?: readonly TemporalConstraint<S>[];
   readonly rules?: readonly RuleConstraint<S, V>[];
+  readonly stale?: readonly StaleConstraint<S>[];
 }
 
 /** A constraint that did not hold, before it becomes an event or an error. */
@@ -310,12 +380,32 @@ export interface CompiledInvariant<
 }
 
 export interface CompiledTemporal {
+  readonly kind: "temporal";
   readonly name: string;
   readonly in: string;
   readonly within: number;
   readonly escalateTo: string | undefined;
   readonly trigger: string;
   readonly policy: "reject" | "warn";
+}
+
+export interface CompiledStale {
+  readonly kind: "stale";
+  readonly name: string;
+  /** Null means every state. */
+  readonly in: ReadonlySet<string> | null;
+  readonly after: number;
+  readonly propose: string | undefined;
+  readonly trigger: string;
+  readonly policy: "reject" | "warn";
+}
+
+/** A bound the sweeper evaluates: on time in a state, or on time since the last commit. */
+export type CompiledBound = CompiledTemporal | CompiledStale;
+
+/** How long a bound allows, in milliseconds, of whichever clock it reads. */
+export function limitOf(bound: CompiledBound): number {
+  return bound.kind === "temporal" ? bound.within : bound.after;
 }
 
 export interface CompiledRule<
@@ -355,6 +445,13 @@ export interface CompiledConstraints<
   readonly temporal: readonly CompiledTemporal[];
   /** Grouped by watched state, so the sweeper walks only states that are watched. */
   readonly temporalByState: ReadonlyMap<string, readonly CompiledTemporal[]>;
+  readonly stale: readonly CompiledStale[];
+  /**
+   * Every bound the sweeper evaluates, by watched state: the time-in-state bounds first,
+   * then the freshness bounds, each in declaration order. A state nothing watches has no
+   * entry, and an entity with no bounds has an empty map.
+   */
+  readonly boundsByState: ReadonlyMap<string, readonly CompiledBound[]>;
   readonly rules: readonly CompiledRule<S, V>[];
   /**
    * The rules watching each state, in declaration order, with the ones that watch every
@@ -392,14 +489,16 @@ export function compileConstraints<
   const invariants = compileInvariants(entity, config.invariants ?? [], states);
   const temporal = compileTemporal(entity, config.temporal ?? [], states);
   const rules = compileRules<S, V>(entity, config.rules ?? [], states);
-  assertDistinctNames(entity, [...temporal, ...rules]);
+  const stale = compileStale(entity, config.stale ?? [], states);
+  assertDistinctNames(entity, [...temporal, ...rules, ...stale]);
 
   if (
     transitions === undefined &&
     guards.length === 0 &&
     invariants.length === 0 &&
     temporal.length === 0 &&
-    rules.length === 0
+    rules.length === 0 &&
+    stale.length === 0
   ) {
     return;
   }
@@ -420,6 +519,8 @@ export function compileConstraints<
     invariants,
     temporal,
     temporalByState,
+    stale,
+    boundsByState: boundsByWatchedState(temporalByState, stale, states),
     rules,
     rulesByState: byWatchedState(rules, states),
     checksAtCommit:
@@ -578,6 +679,7 @@ function compileTemporal<S extends string>(
     if (policy !== "off") {
       compiled.push(
         Object.freeze({
+          kind: "temporal" as const,
           name:
             constraint.name ?? `temporal:${constraint.in}:${constraint.within}`,
           in: constraint.in,
@@ -591,6 +693,77 @@ function compileTemporal<S extends string>(
   }
 
   return compiled;
+}
+
+function compileStale<S extends string>(
+  entity: string,
+  declared: readonly StaleConstraint<S>[],
+  states: States
+): readonly CompiledStale[] {
+  const compiled: CompiledStale[] = [];
+
+  for (const bound of declared) {
+    const policy = resolvePolicy(entity, "stale", bound.policy);
+    const watched = bound.in === undefined ? undefined : [bound.in].flat();
+    for (const state of watched ?? []) {
+      assertState(entity, "stale", state, states);
+    }
+    assertProposable(entity, "stale", watched, bound.propose, states);
+
+    if (!(Number.isFinite(bound.after) && bound.after > 0)) {
+      throw invalid(
+        entity,
+        `stale constraint declares after=${JSON.stringify(bound.after)}, ` +
+          "which must be a positive number of milliseconds"
+      );
+    }
+
+    if (policy !== "off") {
+      compiled.push(
+        Object.freeze({
+          kind: "stale" as const,
+          name:
+            bound.name ?? `stale:${watched?.join("|") ?? "*"}:${bound.after}`,
+          in: watched === undefined ? null : new Set<string>(watched),
+          after: bound.after,
+          propose: bound.propose,
+          trigger: bound.trigger ?? DEFAULT_STALE_TRIGGER,
+          policy,
+        })
+      );
+    }
+  }
+
+  return compiled;
+}
+
+/**
+ * Every bound the sweeper evaluates, grouped by the state it watches.
+ *
+ * A freshness bound watching every state is given to each of them, except the state it
+ * proposes: an instance already there has nothing to be asked.
+ */
+function boundsByWatchedState(
+  temporalByState: ReadonlyMap<string, readonly CompiledTemporal[]>,
+  stale: readonly CompiledStale[],
+  states: States
+): ReadonlyMap<string, readonly CompiledBound[]> {
+  const grouped = new Map<string, readonly CompiledBound[]>();
+
+  for (const state of states.names) {
+    const watching: CompiledBound[] = [
+      ...(temporalByState.get(state) ?? []),
+      ...stale.filter(
+        (bound) =>
+          bound.propose !== state && (bound.in === null || bound.in.has(state))
+      ),
+    ];
+    if (watching.length > 0) {
+      grouped.set(state, watching);
+    }
+  }
+
+  return grouped;
 }
 
 function compileRules<S extends string, V extends Values>(
@@ -611,7 +784,7 @@ function compileRules<S extends string, V extends Values>(
       assertState(entity, "rule", state, states);
     }
 
-    assertProposable(entity, watched, rule.propose, states);
+    assertProposable(entity, "rule", watched, rule.propose, states);
 
     if (policy !== "off") {
       const scope = watched?.join("|") ?? "*";
@@ -632,14 +805,15 @@ function compileRules<S extends string, V extends Values>(
 }
 
 /**
- * Refuse a rule proposing a state the entity lacks, or one its watched states cannot
- * reach in a single move.
+ * Refuse a rule or a freshness bound proposing a state the entity lacks, or one its
+ * watched states cannot reach in a single move.
  *
- * A rule that watches every state is not held to the second. Its proposal is one the
+ * One that watches every state is not held to the second. Its proposal is one the
  * handler may take from some states and decline from others.
  */
 function assertProposable(
   entity: string,
+  what: "rule" | "stale",
   watched: readonly string[] | undefined,
   propose: string | undefined,
   states: States
@@ -647,11 +821,12 @@ function assertProposable(
   if (propose === undefined) {
     return;
   }
-  assertState(entity, "rule", propose, states);
+  assertState(entity, what, propose, states);
 
+  const subject = what === "rule" ? "rule" : "stale constraint";
   for (const state of watched ?? []) {
     if (state !== propose) {
-      assertEscalatable(entity, "rule", state, propose, states);
+      assertEscalatable(entity, subject, state, propose, states);
     }
   }
 }
@@ -682,7 +857,7 @@ function byWatchedState<S extends string, V extends Values>(
 }
 
 /**
- * Refuse two time bounds or rules with one name.
+ * Refuse two bounds or rules with one name.
  *
  * Each fires once and is then done until it is armed again, and which ones are done is
  * tracked by name, in one record for both kinds. Two sharing a name would share that
@@ -698,7 +873,7 @@ function assertDistinctNames(
     if (names.has(name)) {
       throw invalid(
         entity,
-        `two temporal constraints or rules share the name "${name}". Each is tracked ` +
+        `two temporal constraints, stale constraints or rules share the name "${name}". Each is tracked ` +
           "by name so that it fires once and not again until it is armed, so names " +
           "must be distinct. Give one of them a `name`."
       );

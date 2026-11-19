@@ -25,6 +25,13 @@ export interface QueryCriteria<
    * `"5m"`. This is the "stuck in X for longer than N" filter.
    */
   readonly olderThan?: number | string;
+  /**
+   * Minimum time since the instance last committed anything: a number of milliseconds,
+   * or a duration such as `"5m"`. This is the "nothing heard from it for N" filter, and it
+   * runs on a different clock from `olderThan`: a values-only commit resets this one and
+   * leaves time in state running.
+   */
+  readonly staleFor?: number | string;
   /** Stop after this many matches. A truncated answer reports itself as incomplete. */
   readonly limit?: number;
   /**
@@ -56,6 +63,14 @@ export interface QueryMatch<
   readonly ageMs: number;
   /** Whether this instance was in memory, or came from a store. */
   readonly resident: boolean;
+  /**
+   * When the instance last committed anything, on the runtime's clock. Absent only for
+   * a stored instance whose store does not know, which a query by `staleFor` never
+   * returns.
+   */
+  readonly lastCommittedAt?: number;
+  /** How long ago that was, as of the instant the query was evaluated. */
+  readonly staleMs?: number;
   /** The committed values. Present only when the query set `includeValues`. */
   readonly values?: Readonly<V>;
 }
@@ -206,18 +221,22 @@ const UNITS: Record<string, number> = {
 };
 
 /**
- * Read a duration: a number of milliseconds, or a string such as `"5m"`.
+ * Read a duration: a number of milliseconds, or a string such as `"5m"`. `what` names
+ * the option being read, for the refusal.
  *
  * The string form exists because `olderThan: "5m"` is what an operator actually wants to
  * write, and `olderThan: 300000` is a number nobody checks twice. Both are accepted; a
  * string that is not a duration is refused rather than guessed at.
  */
-export function parseDuration(value: number | string): number {
+export function parseDuration(
+  value: number | string,
+  what = "olderThan"
+): number {
   if (typeof value === "number") {
     if (!(Number.isFinite(value) && value >= 0)) {
       throw new EkmanError(
         "INVALID_CONFIG",
-        `olderThan must be a non-negative number of milliseconds, received ${JSON.stringify(value)}`
+        `${what} must be a non-negative number of milliseconds, received ${JSON.stringify(value)}`
       );
     }
     return value;
@@ -228,7 +247,7 @@ export function parseDuration(value: number | string): number {
   if (match === null || unit === undefined) {
     throw new EkmanError(
       "INVALID_CONFIG",
-      `olderThan ${JSON.stringify(value)} is not a duration. Use a number of milliseconds, ` +
+      `${what} ${JSON.stringify(value)} is not a duration. Use a number of milliseconds, ` +
         'or a value with a unit such as "500ms", "30s", "5m", "2h" or "1d".'
     );
   }

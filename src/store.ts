@@ -44,6 +44,11 @@ export interface StoreCapabilities {
   readonly scan: {
     readonly byState: boolean;
     readonly olderThan: boolean;
+    /**
+     * Whether `staleForMs` is applied. Optional, and absent means it is not, so a store
+     * written before the criterion existed is filtered by the runtime instead of trusted.
+     */
+    readonly staleFor?: boolean;
   };
   /**
    * Whether this store can delete a key's stream outright.
@@ -108,6 +113,12 @@ export interface StoreSnapshot<
   /** When the snapshot was taken. */
   readonly at: number;
   /**
+   * When the instance last committed anything, on the runtime's clock, so the time since
+   * it was last heard from survives a restart. Absent in snapshots written before this
+   * was recorded, where it means unknown. Nothing else stands in for it.
+   */
+  readonly lastCommittedAt?: number;
+  /**
    * What the instance's time-in-state bounds had already said about its stay in `state`.
    * Absent when none had fired, and in snapshots written before this was recorded.
    */
@@ -147,6 +158,12 @@ export interface ScanCriteria {
    */
   readonly skip?: ReadonlySet<string>;
   /**
+   * Minimum milliseconds since the instance last committed anything, measured against
+   * `now`. An instance whose last commit time is unknown does not match: unknown is not
+   * stale.
+   */
+  readonly staleForMs?: number;
+  /**
    * Carry each match's values. A store that ignores it is still correct: the runtime reads
    * the values of any match that arrives without them, which costs a load per match.
    */
@@ -159,12 +176,14 @@ export interface ScanMatch {
   readonly state: string;
   readonly seq: number;
   readonly enteredAt: number;
+  /** When the instance last committed anything. Absent when the store does not know. */
+  readonly lastCommittedAt?: number;
   /** The committed values, when the scan asked for them with `includeValues`. */
   readonly values?: Readonly<Values>;
 }
 
 /** A scan criterion a store may be unable to apply. */
-export type ScanFilter = "state" | "olderThan";
+export type ScanFilter = "state" | "olderThan" | "staleFor";
 
 export interface ScanResult {
   readonly matches: readonly ScanMatch[];
@@ -283,8 +302,25 @@ export interface ReplayedState<
   readonly values: Readonly<V>;
   readonly seq: number;
   readonly enteredAt: number;
+  /**
+   * When the last commit was made. Absent only when a snapshot that did not record it
+   * was all there was to replay.
+   */
+  readonly lastCommittedAt?: number;
   /** Absent when no time-in-state bound has fired during the current stay. */
   readonly temporal?: TemporalLatch;
+}
+
+/**
+ * The time of the last commit as a field to spread into a record, or nothing when it is
+ * not known. Unknown is left out everywhere and never stood in for.
+ */
+export function lastCommitOf(known: {
+  readonly lastCommittedAt?: number | undefined;
+}): { readonly lastCommittedAt?: number } {
+  return known.lastCommittedAt === undefined
+    ? {}
+    : { lastCommittedAt: known.lastCommittedAt };
 }
 
 export function replay<S extends string, V extends Values>(
@@ -300,6 +336,7 @@ export function replay<S extends string, V extends Values>(
           values: snapshot.values,
           seq: snapshot.seq,
           enteredAt: snapshot.enteredAt,
+          ...lastCommitOf(snapshot),
         };
 
   for (const event of loaded.events) {
@@ -323,7 +360,7 @@ export function replay<S extends string, V extends Values>(
     if (stayed) {
       latch.apply(event);
     } else {
-      latch.moved();
+      latch.moved(event.cause);
     }
 
     current = {
@@ -331,6 +368,7 @@ export function replay<S extends string, V extends Values>(
       values: transition.values,
       seq: transition.seq,
       enteredAt: stayed ? before.enteredAt : transition.at,
+      lastCommittedAt: transition.at,
     };
   }
 
@@ -438,6 +476,13 @@ function toMatch(
   ) {
     return;
   }
+  if (
+    criteria.staleForMs !== undefined &&
+    (current.lastCommittedAt === undefined ||
+      criteria.now - current.lastCommittedAt < criteria.staleForMs)
+  ) {
+    return;
+  }
 
   return {
     key,
@@ -445,6 +490,7 @@ function toMatch(
     state: current.state,
     seq: current.seq,
     enteredAt: current.enteredAt,
+    ...lastCommitOf(current),
     ...(criteria.includeValues === true ? { values: current.values } : {}),
   };
 }

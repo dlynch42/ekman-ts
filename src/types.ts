@@ -48,6 +48,13 @@ export interface InstanceSnapshot<
   readonly state: S;
   readonly values: Readonly<V>;
   readonly seq: number;
+  /** When the instance entered its current state, on the runtime's clock. */
+  readonly enteredAt: number;
+  /**
+   * When the instance last committed anything, on the runtime's clock: the last time it
+   * was heard from. A values-only commit advances this and leaves `enteredAt` alone.
+   */
+  readonly lastCommittedAt: number;
 }
 
 export interface HandlerContext {

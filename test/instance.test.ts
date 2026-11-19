@@ -96,6 +96,8 @@ describe("InstanceRecord", () => {
       state: "pending",
       values: { a: 1 },
       seq: 0,
+      enteredAt: 1000,
+      lastCommittedAt: 1000,
     });
     expect(Object.isFrozen(snapshot)).toBe(true);
   });

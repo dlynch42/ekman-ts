@@ -30,12 +30,18 @@ export type {
   ProposedCommit,
   RuleConstraint,
   RuleTrigger,
+  StaleConstraint,
+  StaleTrigger,
   TemporalConstraint,
   TemporalTrigger,
   TransitionConstraint,
   ViolationPolicy,
 } from "./constraints";
-export { DEFAULT_RULE_TRIGGER, DEFAULT_TEMPORAL_TRIGGER } from "./constraints";
+export {
+  DEFAULT_RULE_TRIGGER,
+  DEFAULT_STALE_TRIGGER,
+  DEFAULT_TEMPORAL_TRIGGER,
+} from "./constraints";
 export type { DiagramOptions } from "./diagram";
 export { toDot, toMermaid } from "./diagram";
 export { Ekman } from "./ekman";
@@ -80,10 +86,11 @@ export { parseDuration } from "./query";
 export type {
   FailResult,
   HandlerResult,
+  PatchResult,
   StayResult,
   TransitionToResult,
 } from "./results";
-export { fail, stay, transitionTo } from "./results";
+export { fail, patch, stay, transitionTo } from "./results";
 export { SPEC_VERSION } from "./spec";
 export type { Coordination, StoreKind, StoreLayer, StoreSpec } from "./stack";
 export { createStore } from "./stack";

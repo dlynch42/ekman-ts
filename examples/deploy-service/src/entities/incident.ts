@@ -11,7 +11,7 @@
  * it, so a handler returning `stay` is the only thing that can happen.
  */
 
-import { defineEntity, stay, transitionTo } from "ekman";
+import { defineEntity, patch, stay, transitionTo } from "ekman";
 
 /** Every state an incident can be in. A list, so a state named in a URL can be checked. */
 export const INCIDENT_STATES = ["open", "acknowledged", "resolved"] as const;
@@ -62,11 +62,7 @@ export const incident = defineEntity.withTriggers<IncidentTrigger>()(
         // existed can hold one, and a later `open` is what repairs it.
         return typeof current.values.reason !== "string" ||
           current.values.reason === ""
-          ? stay({
-              ...current.values,
-              about: trigger.about,
-              reason: trigger.reason,
-            })
+          ? patch({ about: trigger.about, reason: trigger.reason })
           : stay(current.values);
       },
 

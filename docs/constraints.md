@@ -9,11 +9,12 @@ constraints: {
   invariants:  [{ name: "attempts-sane", check: (next) => next.values.attempts >= 0 }],
   temporal:    [{ in: "deploying", within: 10 * 60_000, escalateTo: "failed" }],
   rules:       [{ in: "deploying", when: (d) => d.values.errors >= 5, propose: "failed" }],
+  stale:       [{ after: 60_000, propose: "unreachable" }],
 },
 ```
 
-Five kinds, all opt-in per entity, each checked at a defined moment, each carrying its own
-`reject` / `warn` / `off` dial. The first three refuse a result. The last two never refuse
+Six kinds, all opt-in per entity, each checked at a defined moment, each carrying its own
+`reject` / `warn` / `off` dial. The first three refuse a result. The last three never refuse
 anything: they deliver a trigger, and a handler decides.
 
 | Kind | Checked | Against |
@@ -23,6 +24,7 @@ anything: they deliver a trigger, and a handler decides.
 | `invariants` | before commit of any result that changes values | a condition that must hold |
 | `rules` | after every commit, in a watched state | a condition on what was just committed |
 | `temporal` | by sweep, timer, or `ekman.sweep()` | how long an instance has been in a state |
+| `stale` | by sweep, timer, or `ekman.sweep()` | how long since an instance last committed anything |
 
 `stay` is deliberately not a transition. The graph and guards gate state changes; invariants
 gate value changes. Putting the graph in front of every `stay` would break every entity that
@@ -273,7 +275,7 @@ the instance it was watching would stay stuck. A bound with `policy: "warn"` del
 and is exempt.
 
 A bound's `name` defaults to `temporal:<in>:<within>`. Names must be distinct within an entity,
-across its bounds and its rules, since a bound fires once per entry into its state and that is
+across its time-in-state bounds, its freshness bounds and its rules, since a bound fires once per entry into its state and that is
 tracked by name.
 
 When several bounds on one state are due, they are evaluated in declaration order, and
@@ -317,6 +319,92 @@ in a memory-only runtime is all of them.
 ```
 npm run demo:stuck    # "stuck in deploying for more than five minutes", as query and as constraint
 ```
+
+## Freshness
+
+```ts
+stale: [{ after: 60_000, propose: "unreachable" }],
+```
+
+A time-in-state bound asks how long an instance has been where it is. A freshness bound asks a
+different question: **when did we last hear from it?** For an instance that is memory about
+something else, a service or a device or an upstream API, that is usually the one that matters.
+A service can sit in `healthy` for weeks, rightly. What must not go unnoticed is that the
+probes saying so stopped arriving an hour ago, and a time-in-state bound cannot see that.
+
+The two clocks:
+
+| | Measures from | Reset by |
+|---|---|---|
+| Time in state (`temporal`, `olderThan`) | the last move to a different state | a move |
+| Freshness (`stale`, `staleFor`) | the last commit of any kind | every commit, a `stay` or a `patch` included |
+
+Both are on every instance, as `enteredAt` and `lastCommittedAt`, and a handler and a rule's
+condition can read them.
+
+A freshness bound is evaluated by the same sweep as a time-in-state bound, covers stored
+instances the same way, and fires the same way: **as a trigger, never as a write.**
+
+```ts
+import { DEFAULT_STALE_TRIGGER } from "ekman";
+
+triggers: ["probe", DEFAULT_STALE_TRIGGER],
+
+states: {
+  healthy: (service, trigger) => {
+    if (trigger.type === DEFAULT_STALE_TRIGGER) {
+      return transitionTo("unreachable", service.values);   // or stay(), to decline
+    }
+    return patch({ latencyMs: trigger.latencyMs });
+  },
+  unreachable: (service, trigger) =>
+    trigger.type === "probe" ? transitionTo("healthy", service.values) : stay(),
+},
+```
+
+| Field | What it does |
+|---|---|
+| `after` | How long an instance may go without a commit, in milliseconds. |
+| `in` | The state, or states, the bound watches. Omitted means every state. |
+| `propose` | The state the bound asks for. Carried on the trigger; the runtime never applies it. |
+| `trigger` | The type of the delivered trigger. Defaults to `constraint.stale`. |
+| `name` | Defaults to `stale:<in>:<after>`. |
+| `policy` | `reject` delivers the trigger. `warn` records the violation and delivers nothing. `off` is not evaluated. |
+
+The trigger a handler receives is:
+
+```ts
+{ type: "constraint.stale", id, constraint, state, sinceMs, propose? }
+```
+
+`sinceMs` is how long the instance had gone without a commit. An entity with a
+[trigger union](./entities.md#typed-triggers) adds `StaleTrigger<State>` to it.
+
+### Once per silence
+
+A freshness bound fires once for each stretch of silence. The commit that answers its trigger
+does not arm it again, whatever the handler decided, so a handler that declines with `stay()` is
+not asked again every `after` milliseconds for as long as the silence lasts. The next commit
+caused by anything else, a probe arriving at last, does arm it, and the bound then fires for the
+next silence.
+
+That commit still counts as a commit everywhere else: `lastCommittedAt` records it, and a query
+by `staleFor` measures from it. To find what the bound has moved, query by the state it
+proposed.
+
+A bound is not asked in the state it proposes. An instance already `unreachable` has nothing
+to be told by a bound proposing `unreachable`.
+
+What a bound has said survives an eviction and a restart, as it does for time in state. An
+instance loaded from a snapshot written before this clock was recorded has no last commit
+time. It counts from the moment it was loaded, and until then a sweep and a query by
+`staleFor` leave it out: the runtime does not call something stale on the strength of a time
+it does not know.
+
+`defineEntity` refuses a freshness bound for the reasons it refuses a rule: a state that does
+not exist, a `propose` that is not a declared transition from a state it names, a name shared
+with a rule or another bound, and a trigger type missing from a declared `triggers` list
+unless the bound only warns.
 
 ## The `warn` dial, and why it exists
 

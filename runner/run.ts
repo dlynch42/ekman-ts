@@ -91,6 +91,7 @@ const ENTRY_KEYS = {
     "entity",
     "state",
     "olderThan",
+    "staleFor",
     "limit",
     "includeValues",
     "keys",
@@ -747,6 +748,7 @@ async function assertQueries(
       entity: want.entity,
       ...(want.state === undefined ? {} : { state: want.state }),
       ...(want.olderThan === undefined ? {} : { olderThan: want.olderThan }),
+      ...(want.staleFor === undefined ? {} : { staleFor: want.staleFor }),
       ...(want.limit === undefined ? {} : { limit: want.limit }),
       ...(want.includeValues === undefined
         ? {}

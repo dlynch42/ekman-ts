@@ -284,8 +284,12 @@ Two things about `load` and `snapshot` are easy to get wrong:
   sequence, since those carry the sequence of the commit they followed. `isAfterSnapshot` from
   `ekman/store` is that test. Leaving them out loses the record that a time-in-state bound
   already fired, and the bound fires a second time after the next reload.
-- A snapshot may carry a `temporal` field, which says what the instance's bounds had already
-  said when it was taken. Store it and hand it back as given. `replay` reads it.
+- A snapshot may carry a `temporal` field, which says what the instance's bounds and rules
+  had already said when it was taken. Store it and hand it back as given. `replay` reads it.
+- A snapshot may carry `lastCommittedAt`, when the instance last committed anything. Store
+  it and hand it back as given too. A store that builds its own snapshots, when compacting
+  for instance, takes it from `replay`, as it takes everything else. Never fill it in from
+  somewhere else: absent means unknown, and the runtime treats unknown as not stale.
 
 Two declarations the runtime holds you to:
 
@@ -293,6 +297,11 @@ Two declarations the runtime holds you to:
   scan that could not apply one names it in `unsupported`, as `"state"` or `"olderThan"`, and
   the runtime finishes the filter and reports the answer as partial. If you declare that you
   cannot filter, the runtime filters whether or not an answer says so.
+- `capabilities.scan.staleFor` says whether your `scan` applies `staleForMs`, the minimum
+  time since the last commit. It is optional and absent means no. Without it the runtime
+  finishes the filter and reports the answer as partial, loading any match that came back
+  with no `lastCommittedAt`. A store built on `scanKeys` applies it already and can declare
+  `staleFor: true`.
 - A scan may set `includeValues`. Carry each match's committed values in `values` when it
   does; `scanKeys` already does. A `scan` that leaves them out is still correct, and the
   runtime then loads each key it needs values for and reports the revision it loaded, so

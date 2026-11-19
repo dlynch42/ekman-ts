@@ -22,7 +22,7 @@
  */
 
 import type { TemporalTrigger } from "ekman";
-import { defineEntity, Ekman, stay, transitionTo } from "ekman";
+import { defineEntity, Ekman, patch, stay, transitionTo } from "ekman";
 import { banner, check, row, stream } from "./lib";
 
 const SECOND = 1000;
@@ -78,10 +78,7 @@ const deployments = defineEntity.withTriggers<DeploymentTrigger>()(
         // state it is asking for on it, and this code decides whether to agree.
         if (trigger.type === "constraint.temporal") {
           if (deployment.values.onEscalation === "keep-waiting") {
-            return stay({
-              ...deployment.values,
-              note: "escalated, still waiting on purpose",
-            });
+            return patch({ note: "escalated, still waiting on purpose" });
           }
           return transitionTo(trigger.escalateTo ?? "failed", {
             ...deployment.values,

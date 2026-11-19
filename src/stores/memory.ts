@@ -29,7 +29,7 @@ export class MemoryStore implements Store {
     durability: "ephemeral" as const,
     conditionalAppend: true,
     multiWriter: false,
-    scan: { byState: true, olderThan: true },
+    scan: { byState: true, olderThan: true, staleFor: true },
     forget: true,
     compact: false,
   });

@@ -53,7 +53,7 @@ rejects the error goes to `onUnhandled` rather than becoming an unhandled reject
 | `commit.fenced` | A superseded attempt finished and tried to commit. Its result was discarded. |
 | `commit.raced` | A commit reached the authority and a timeout arrived while it was in flight. The commit stands, because it is already durable. |
 | `constraint.violated` | A constraint did not hold. |
-| `constraint.escalated` | A time-in-state bound or a rule fired and its trigger was sent. `kind` says which, `delivered` says whether the instance took it, and `elapsedMs` is there for a bound only. |
+| `constraint.escalated` | A time-in-state bound, a freshness bound or a rule fired and its trigger was sent. `kind` says which, `delivered` says whether the instance took it, and `elapsedMs` is there for a bound only: time in the state, or time since the last commit. |
 | `instance.evicted` | An idle instance was released to stay inside the memory budget. |
 | `instance.restored` | An instance was rebuilt from a store, after eviction or a restart. |
 | `instance.forgotten` | An instance was deleted outright, from memory and every store layer. |

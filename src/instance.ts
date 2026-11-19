@@ -60,6 +60,7 @@ export class InstanceRecord<
   #values: Readonly<V>;
   #seq: number;
   #enteredAt: number;
+  #lastCommittedAt: number;
   #bytes: number;
   /** UTF-8 length of the key, measured once: it is part of every accounting and never changes. */
   readonly #keyBytes: number;
@@ -192,6 +193,7 @@ export class InstanceRecord<
     this.#values = args.initialValues;
     this.#seq = 0;
     this.#enteredAt = args.at;
+    this.#lastCommittedAt = args.at;
     this.#bytes = this.#measure();
     this.#stale = false;
 
@@ -303,6 +305,18 @@ export class InstanceRecord<
     return this.#enteredAt;
   }
 
+  /**
+   * When this instance last committed anything, on the runtime's clock.
+   *
+   * Every commit advances it, a values-only one included, which is what separates "when
+   * did we last hear from it" from "how long has it been in this state". An instance
+   * loaded from a snapshot that never recorded it counts from the moment it was loaded:
+   * the runtime cannot call something stale on the strength of a time it does not know.
+   */
+  get lastCommittedAt(): number {
+    return this.#lastCommittedAt;
+  }
+
   /** Whether a temporal constraint has already fired since this state was entered. */
   hasFired(constraint: string): boolean {
     return this.#temporal.hasFired(constraint);
@@ -392,9 +406,9 @@ export class InstanceRecord<
     }
   }
 
-  #rearmTemporal(): void {
+  #rearmTemporal(cause?: EventCause): void {
     this.#stateEntry += 1;
-    this.#temporal.moved();
+    this.#temporal.moved(cause);
     // A proposal still queued was raised for the stay that just ended. The new one
     // raises its own.
     this.#proposing.clear();
@@ -516,6 +530,8 @@ export class InstanceRecord<
       state: this.#state,
       values: this.#values,
       seq: this.#seq,
+      enteredAt: this.#enteredAt,
+      lastCommittedAt: this.#lastCommittedAt,
     });
   }
 
@@ -530,6 +546,7 @@ export class InstanceRecord<
       seq: this.#seq,
       enteredAt: this.#enteredAt,
       at,
+      lastCommittedAt: this.#lastCommittedAt,
       ...(temporal === undefined ? {} : { temporal }),
     });
   }
@@ -612,13 +629,14 @@ export class InstanceRecord<
     this.#setState(next.state);
     this.#values = next.values;
     this.#seq = event.seq;
+    this.#lastCommittedAt = next.at;
     if (this.#retainsStream) {
       this.#keep(event);
     }
 
     if (moved) {
       this.#enteredAt = next.at;
-      this.#rearmTemporal();
+      this.#rearmTemporal(event.cause);
     } else {
       // A commit that answers an escalation settles the bound that raised it, here and
       // not when the sweep hears back, because the key can be evicted in between.
@@ -757,6 +775,7 @@ export class InstanceRecord<
       this.#bytes = this.#measure();
 
       this.#enteredAt = this.#deps.now();
+      this.#lastCommittedAt = this.#enteredAt;
       this.#rearmTemporal();
 
       const pending: PendingInit<S, V> = {
@@ -787,6 +806,7 @@ export class InstanceRecord<
     this.#values = freezeValues(current.values);
     this.#seq = current.seq;
     this.#enteredAt = current.enteredAt;
+    this.#lastCommittedAt = current.lastCommittedAt ?? this.#deps.now();
     this.#bytes = this.#measure();
 
     // Recorded as a restore, because that is what it is: this runtime's view of the key
@@ -842,6 +862,7 @@ export class InstanceRecord<
     this.#values = freezeValues(current.values);
     this.#seq = current.seq;
     this.#enteredAt = current.enteredAt;
+    this.#lastCommittedAt = current.lastCommittedAt ?? pending.at;
     this.#bytes = this.#measure();
     this.#temporal.moved();
     this.#temporal.merge(current.temporal);

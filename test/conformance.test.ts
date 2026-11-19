@@ -342,6 +342,33 @@ describe("detecting a broken expectation", () => {
     );
   });
 
+  it("notices a query by time since the last commit that found other keys", async () => {
+    const result = await runScenario(
+      corrupt("core/164-query-by-time-since-last-commit", (scenario) => {
+        scenario.then.queries[0].staleFor = "1s";
+      })
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.failures).toEqual([
+      "queries[0].keys: expected [services:quiet], got [services:chatty, services:quiet]",
+    ]);
+  });
+
+  it("notices a patch that did not keep what it was not told to change", async () => {
+    const result = await runScenario(
+      corrupt("core/024-patch-merges-into-committed-values", (scenario) => {
+        // As if the result had replaced the values with the fields it named.
+        scenario.given.entities[0].states[0].cases[0].do.result = "stay";
+      })
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.failures).toContain(
+      'sends[0].values.owner: expected "amy", got undefined'
+    );
+  });
+
   it("notices a state map that groups differently", async () => {
     const result = await runScenario(
       corrupt(

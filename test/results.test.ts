@@ -3,8 +3,10 @@ import {
   fail,
   isFail,
   isHandlerResult,
+  isPatch,
   isStay,
   isTransitionTo,
+  patch,
   stay,
   transitionTo,
 } from "../src/results.js";
@@ -44,6 +46,16 @@ describe("stay", () => {
   });
 });
 
+describe("patch", () => {
+  it("carries only what changes", () => {
+    expect(patch({ b: 2 })).toEqual({ kind: "patch", values: { b: 2 } });
+  });
+
+  it("is frozen so a handler cannot mutate it after returning", () => {
+    expect(Object.isFrozen(patch({ b: 2 }))).toBe(true);
+  });
+});
+
 describe("fail", () => {
   it("carries an Error as given", () => {
     const error = new TypeError("boom");
@@ -68,6 +80,8 @@ describe("guards", () => {
     expect(isTransitionTo(transitionTo("a"))).toBe(true);
     expect(isTransitionTo(stay())).toBe(false);
     expect(isStay(stay())).toBe(true);
+    expect(isPatch(patch({ a: 1 }))).toBe(true);
+    expect(isPatch(stay())).toBe(false);
     expect(isFail(fail("x"))).toBe(true);
     expect(isFail(stay())).toBe(false);
   });
@@ -75,6 +89,7 @@ describe("guards", () => {
   it("recognizes any well-formed result and nothing else", () => {
     expect(isHandlerResult(transitionTo("a"))).toBe(true);
     expect(isHandlerResult(stay())).toBe(true);
+    expect(isHandlerResult(patch({}))).toBe(true);
     expect(isHandlerResult(fail("x"))).toBe(true);
     expect(isHandlerResult(undefined)).toBe(false);
     expect(isHandlerResult(null)).toBe(false);

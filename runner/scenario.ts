@@ -138,6 +138,16 @@ export interface ConstraintsSpec {
     readonly trigger?: string;
     readonly policy?: ViolationPolicySpec;
   }[];
+  readonly stale?: readonly {
+    readonly name?: string;
+    /** The states the bound watches. Omitted means every state. */
+    readonly in?: readonly string[];
+    /** Milliseconds an instance may go without a commit. */
+    readonly after: number;
+    readonly propose?: string;
+    readonly trigger?: string;
+    readonly policy?: ViolationPolicySpec;
+  }[];
   readonly rules?: readonly {
     readonly name?: string;
     /** The states the rule watches. Omitted means every state. */
@@ -202,7 +212,7 @@ export interface CaseSpec {
 }
 
 export interface DoSpec {
-  readonly result?: "transitionTo" | "stay" | "fail";
+  readonly result?: "transitionTo" | "stay" | "patch" | "fail";
   /** A state name, or a value expression resolving to one. */
   readonly to?: unknown;
   readonly values?: unknown;
@@ -302,6 +312,8 @@ export interface QueryExpectation {
   readonly entity: string;
   readonly state?: string;
   readonly olderThan?: number | string;
+  /** Minimum time since the last commit, as milliseconds or a duration. */
+  readonly staleFor?: number | string;
   readonly limit?: number;
   /** Ask for each match's values. Without it, a match carrying values is a failure. */
   readonly includeValues?: boolean;
