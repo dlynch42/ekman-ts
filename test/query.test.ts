@@ -680,6 +680,87 @@ describe("carrying values", () => {
     await ekman.close();
   });
 
+  it("describes one committed revision when a key commits between the scan and the read", async () => {
+    // The store's scan leaves values out, and by the time the runtime reads them the key
+    // has moved on. What comes back has to be the newer revision or nothing: never the
+    // old state and sequence with the new values laid over them.
+    const inner = memoryStore();
+    const first = new Ekman({ entities: [services], store: inner });
+    await first.entities.services.send("a", { type: "probe", errorRate: 0.5 });
+    await first.entities.services.send("b", { type: "probe", errorRate: 0.5 });
+    await first.close();
+
+    const racing = wrap(inner, {
+      scan: async ({ includeValues: _ignored, ...criteria }) => {
+        const found = await inner.scan(criteria);
+        // Another writer, after the scan was answered and before anything is loaded.
+        const other = new Ekman({ entities: [services], store: inner });
+        await other.entities.services.send("a", { type: "degrade" });
+        await other.entities.services.send("b", {
+          type: "probe",
+          errorRate: 0.9,
+        });
+        await other.close();
+        return found;
+      },
+    });
+    const ekman = new Ekman({ entities: [services], store: racing });
+
+    const { instances } = await ekman.query({
+      entity: "services",
+      state: "healthy",
+      includeValues: true,
+    });
+
+    // `a` left the state that was asked about, so it is no longer a match. `b` stayed,
+    // and is reported at the sequence its values belong to.
+    expect(instances.map((m) => [m.key, m.state, m.seq, m.values])).toEqual([
+      ["services:b", "healthy", 2, { errorRate: 0.9 }],
+    ]);
+    await ekman.close();
+  });
+
+  it("holds a revision read late to the time in state that was asked for", async () => {
+    const inner = memoryStore();
+    const time = clock();
+    const first = new Ekman({
+      entities: [services],
+      store: inner,
+      now: time.now,
+    });
+    await first.entities.services.send("a", { type: "probe" });
+    await first.close();
+    time.advance(10_000);
+
+    const racing = wrap(inner, {
+      scan: async ({ includeValues: _ignored, ...criteria }) => {
+        const found = await inner.scan(criteria);
+        const other = new Ekman({
+          entities: [services],
+          store: inner,
+          now: time.now,
+        });
+        // A move, so its time in state starts again.
+        await other.entities.services.send("a", { type: "degrade" });
+        await other.close();
+        return found;
+      },
+    });
+    const ekman = new Ekman({
+      entities: [services],
+      store: racing,
+      now: time.now,
+    });
+
+    const { instances } = await ekman.query({
+      entity: "services",
+      olderThan: 5000,
+      includeValues: true,
+    });
+    expect(instances).toEqual([]);
+    await ekman.close();
+  });
+
   it("drops a match whose key is gone by the time its values are read", async () => {
     const inner = memoryStore();
     const vanishing = wrap(inner, {
@@ -984,6 +1065,21 @@ describe("the state map", () => {
     expect(map.byState).toEqual({
       constructor: { count: 1, keys: ["odd:1"] },
     });
+    await ekman.close();
+  });
+
+  it("reads a state nothing is in as absent, even one named like something every object has", async () => {
+    const odd = defineEntity("odd", {
+      initial: "open",
+      states: { open: () => stay(), constructor: () => stay() },
+    });
+    const ekman = new Ekman({ entities: [odd] });
+    await ekman.send("odd:1", { type: "t" });
+
+    const map = await ekman.entities.odd.map();
+    expect(map.byState.constructor).toBeUndefined();
+    expect(map.byState.open?.count).toBe(1);
+    expect(ekman.residentMap("odd").byState.constructor).toBeUndefined();
     await ekman.close();
   });
 

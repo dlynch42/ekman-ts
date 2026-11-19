@@ -1808,6 +1808,11 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   /**
    * Read the values of any match a store returned without them, when the scan asked.
    *
+   * The key can have committed between the scan and this load, so the match is rebuilt
+   * whole from what was loaded and held to the criteria again. Laying the loaded values
+   * over the scan's row would describe a revision that never existed: one commit's state
+   * and sequence with a later commit's values.
+   *
    * A match whose key is gone by the time it is loaded was deleted in between, and is
    * dropped: it is no longer an instance.
    */
@@ -1830,9 +1835,17 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
         }
         const loaded = await authority.load(match.key);
         const current = loaded === undefined ? undefined : replay(loaded);
-        return current === undefined
-          ? undefined
-          : { ...match, values: current.values };
+        if (current === undefined || !satisfies(current, criteria)) {
+          return;
+        }
+        return {
+          key: match.key,
+          entity: match.entity,
+          state: current.state,
+          seq: current.seq,
+          enteredAt: current.enteredAt,
+          values: current.values,
+        };
       })
     );
     return read.filter((match) => match !== undefined);
@@ -2021,6 +2034,18 @@ function assertLimit(
   }
 }
 
+/** Whether one committed revision of an instance meets a scan's state and age criteria. */
+function satisfies(
+  current: { readonly state: string; readonly enteredAt: number },
+  criteria: ScanCriteria
+): boolean {
+  return (
+    (criteria.state === undefined || current.state === criteria.state) &&
+    (criteria.olderThanMs === undefined ||
+      criteria.now - current.enteredAt >= criteria.olderThanMs)
+  );
+}
+
 /** A match as an answer that did not ask for values shows it. */
 function withoutValues(match: QueryMatch): QueryMatch {
   const { values: _values, ...rest } = match;
@@ -2029,8 +2054,9 @@ function withoutValues(match: QueryMatch): QueryMatch {
 
 /**
  * Group matches by state. They arrive oldest first, so each state's keys come out oldest
- * first as well. Grouped in a `Map` and only then turned into an object, so a state with
- * a name an object treats specially is still an ordinary entry.
+ * first as well. Grouped in a `Map` and then laid into an object with no prototype, so a
+ * state with a name an object treats specially is an ordinary entry when present and
+ * absent when not.
  */
 function stateMap<S extends string>(
   entity: string,
@@ -2061,12 +2087,12 @@ function stateMap<S extends string>(
     all.add("limit-reached");
   }
 
-  const byState: Record<string, StateMapEntry> = Object.fromEntries(
-    [...groups].map(([state, { count, keys }]) => [
-      state,
-      Object.freeze({ count, keys: Object.freeze(keys) }),
-    ])
-  );
+  // With no prototype, so a state nothing is in reads as undefined whatever it is called.
+  // On an ordinary object `byState.constructor` is a function every object inherits.
+  const byState: Record<string, StateMapEntry> = Object.create(null);
+  for (const [state, { count, keys }] of groups) {
+    byState[state] = Object.freeze({ count, keys: Object.freeze(keys) });
+  }
 
   return Object.freeze({
     entity,

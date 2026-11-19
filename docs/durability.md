@@ -295,7 +295,8 @@ Two declarations the runtime holds you to:
   cannot filter, the runtime filters whether or not an answer says so.
 - A scan may set `includeValues`. Carry each match's committed values in `values` when it
   does; `scanKeys` already does. A `scan` that leaves them out is still correct, and the
-  runtime then loads each key it needs values for, so supporting it is a matter of speed.
+  runtime then loads each key it needs values for and reports the revision it loaded, so
+  supporting it is a matter of speed.
   What a store must not do is carry values other than the last committed ones.
 - `usage` is optional, and a method: `usage(): StoreUsage`. Implement it when the store can
   say what it holds. `ekman.storageUsage` sums it across the stack.

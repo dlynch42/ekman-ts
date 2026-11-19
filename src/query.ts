@@ -128,6 +128,10 @@ export interface StateMapOptions {
  *
  * A state nothing is in has no entry, so the order of the states is the order instances
  * happened to be found in and carries no meaning.
+ *
+ * `byState` has no prototype. `byState[state]` is therefore undefined for any state
+ * nothing is in, including one named `constructor` or `toString`, and the object has no
+ * methods of its own: use `Object.keys`, `Object.entries` or `Object.hasOwn` on it.
  */
 export interface StateMap<S extends string = string> {
   readonly entity: string;

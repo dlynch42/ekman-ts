@@ -306,11 +306,47 @@ describe("detecting a broken expectation", () => {
     expect(result.status).toBe("failed");
     expect(result.failures).toEqual([
       'maps[0].byState["healthy"]: expected [services:c, services:a], got [services:a, services:c]',
-      'maps[0].byState["retired"]: expected [services:z], got []',
-      'maps[0].byState["unreachable"]: expected [], got [services:d]',
+      'maps[0].byState["retired"]: expected [services:z], got no such state',
+      'maps[0].byState["unreachable"]: expected no such state, got [services:d]',
       "maps[0].total: expected 6, got 5",
       "maps[0].complete: expected true, got false",
       "maps[1].reasons: expected [limit-reached], got [no-durable-store, limit-reached]",
+    ]);
+  });
+
+  it("notices a state that is missing or extra when a limit of zero lists no keys at all", async () => {
+    const result = await runScenario(
+      corrupt(
+        "core/163-the-state-map-counts-resident-instances-per-state",
+        (scenario) => {
+          const [, limited] = scenario.then.maps;
+          limited.limitPerState = 0;
+          // Every state lists nothing now. One is left out and one is invented.
+          limited.byState = { healthy: [], degraded: [], retired: [] };
+        }
+      )
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.failures).toEqual([
+      'maps[1].byState["retired"]: expected [], got no such state',
+      'maps[1].byState["unreachable"]: expected no such state, got []',
+    ]);
+  });
+
+  it("compares a state's keys one by one, not as joined text", async () => {
+    const result = await runScenario(
+      corrupt(
+        "core/163-the-state-map-counts-resident-instances-per-state",
+        (scenario) => {
+          scenario.then.maps[0].byState.healthy = ["services:a, services:c"];
+        }
+      )
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.failures).toEqual([
+      'maps[0].byState["healthy"]: expected [services:a, services:c], got [services:a, services:c]',
     ]);
   });
 

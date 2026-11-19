@@ -119,6 +119,10 @@ It is the same union a query makes, grouped by state, so resident and stored ins
 both counted and an evicted one appears under the state the store holds for it.
 
 - A state nothing is in has no entry. The order of the states carries no meaning.
+- `byState` is an object with no prototype, so `map.byState[state]` is `undefined` for any
+  state nothing is in, whatever the state is called. Read it with `Object.keys`,
+  `Object.entries` or `Object.hasOwn`; it has no `hasOwnProperty` of its own, and Node prints
+  it with a `[Object: null prototype]` label.
 - Each state's keys are oldest in the state first, with ties broken on the key, the order a
   query uses.
 - `limitPerState` lists at most that many keys per state. The counts and `total` stay whole,

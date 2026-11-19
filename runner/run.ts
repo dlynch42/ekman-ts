@@ -820,13 +820,15 @@ async function assertMaps(
       ...Object.keys(got.byState),
     ]);
     for (const state of [...states].sort()) {
-      const keys = (got.byState[state]?.keys ?? []).join(", ");
-      const wanted = (want.byState[state] ?? []).join(", ");
-      if (keys !== wanted) {
-        failures.push(
-          `maps[${i}].byState["${state}"]: expected [${wanted}], got [${keys}]`
-        );
-      }
+      failures.push(
+        ...diffKeys(
+          `maps[${i}].byState["${state}"]`,
+          Object.hasOwn(got.byState, state)
+            ? got.byState[state]?.keys
+            : undefined,
+          Object.hasOwn(want.byState, state) ? want.byState[state] : undefined
+        )
+      );
     }
 
     if (want.total !== undefined && want.total !== got.total) {
@@ -837,6 +839,30 @@ async function assertMaps(
 
     assertPartiality(`maps[${i}]`, want, got, failures);
   }
+}
+
+/**
+ * Compare one state's keys with the keys expected of it.
+ *
+ * A state being there at all is part of the answer, apart from what it lists: under a
+ * limit of zero every state lists nothing, and one that is missing would otherwise read
+ * the same as one that is present. Keys are compared one by one and never as joined text.
+ */
+function diffKeys(
+  path: string,
+  got: readonly string[] | undefined,
+  want: readonly string[] | undefined
+): string[] {
+  const show = (keys: readonly string[]) => `[${keys.join(", ")}]`;
+  if (want === undefined) {
+    return [`${path}: expected no such state, got ${show(got ?? [])}`];
+  }
+  if (got === undefined) {
+    return [`${path}: expected ${show(want)}, got no such state`];
+  }
+  const same =
+    got.length === want.length && got.every((key, at) => key === want[at]);
+  return same ? [] : [`${path}: expected ${show(want)}, got ${show(got)}`];
 }
 
 /** Whether an answer said it was whole, and why not, with the reasons compared as a set. */
