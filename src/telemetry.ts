@@ -149,7 +149,7 @@ export interface ConstraintViolatedEvent extends TelemetryBase {
 }
 
 /**
- * A temporal constraint fired and its escalation trigger was delivered.
+ * A bound or a rule fired and its trigger was sent to the instance.
  *
  * Separate from the violation itself because delivery can fail on its own: the instance
  * may have no handler for the state it is stuck in, which is precisely the situation a
@@ -157,10 +157,17 @@ export interface ConstraintViolatedEvent extends TelemetryBase {
  */
 export interface ConstraintEscalatedEvent extends TelemetryBase {
   readonly type: "constraint.escalated";
+  /** Which kind of constraint sent the trigger. */
+  readonly kind: "temporal" | "rule" | "stale";
   readonly constraint: string;
   readonly state: string;
-  /** How long the instance had been in the state when it fired. */
-  readonly elapsedMs: number;
+  /**
+   * How long the bound had been running when it fired: time in the state for a
+   * time-in-state bound, time since the last commit for a freshness bound. Absent for a
+   * rule.
+   */
+  readonly elapsedMs?: number;
+  /** The state asked for: a time-in-state bound's `escalateTo`, or a `propose`. */
   readonly escalateTo: string | undefined;
   readonly trigger: TriggerRef;
   readonly delivered: boolean;

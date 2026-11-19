@@ -1,0 +1,71 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/077-a-rule-trigger-must-be-declared",
+  "name": "a rule whose trigger is missing from the entity's declared triggers is refused at definition",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "services",
+        "initial": "healthy",
+        "constraints": {
+          "rules": [
+            {
+              "name": "too-many-failures",
+              "in": ["healthy"],
+              "when": {
+                "values": "failures",
+                "gte": 3,
+                "reason": "three failed probes or more"
+              },
+              "propose": "degraded"
+            }
+          ]
+        },
+        "states": [
+          {
+            "state": "healthy",
+            "cases": [
+              {
+                "when": {
+                  "trigger": "rule.matched"
+                },
+                "do": {
+                  "result": "stay"
+                }
+              },
+              {
+                "when": {
+                  "trigger": "settle"
+                },
+                "do": {
+                  "result": "stay"
+                }
+              }
+            ],
+            "else": {
+              "result": "stay",
+              "values": {
+                "failures": {
+                  "$trigger": "failures"
+                }
+              }
+            }
+          },
+          {
+            "state": "degraded",
+            "else": {
+              "result": "stay"
+            }
+          }
+        ],
+        "triggers": ["probe"]
+      }
+    ]
+  },
+  "then": {
+    "buildError": {
+      "code": "INVALID_CONFIG"
+    }
+  }
+}

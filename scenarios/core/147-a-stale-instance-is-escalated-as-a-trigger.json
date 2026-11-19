@@ -1,0 +1,163 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/147-a-stale-instance-is-escalated-as-a-trigger",
+  "name": "an instance that has committed nothing for longer than its bound is sent a trigger carrying the proposed state, and a commit that leaves the state alone is enough to keep the bound from firing",
+  "level": "core",
+  "given": {
+    "runtime": {
+      "clock": {
+        "start": 0,
+        "stepMs": 0
+      }
+    },
+    "entities": [
+      {
+        "name": "services",
+        "initial": "healthy",
+        "constraints": {
+          "stale": [
+            {
+              "name": "gone-quiet",
+              "in": ["healthy"],
+              "after": 1000,
+              "propose": "unreachable"
+            }
+          ]
+        },
+        "states": [
+          {
+            "state": "healthy",
+            "cases": [
+              {
+                "when": {
+                  "trigger": "constraint.stale"
+                },
+                "do": {
+                  "result": "transitionTo",
+                  "to": {
+                    "$trigger": "propose"
+                  }
+                }
+              }
+            ],
+            "else": {
+              "result": "stay"
+            }
+          },
+          {
+            "state": "unreachable",
+            "else": {
+              "result": "stay"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "services:quiet",
+        "trigger": {
+          "type": "probe"
+        }
+      }
+    },
+    {
+      "send": {
+        "key": "services:chatty",
+        "trigger": {
+          "type": "probe"
+        }
+      }
+    },
+    {
+      "advance": 800
+    },
+    {
+      "send": {
+        "key": "services:chatty",
+        "trigger": {
+          "type": "probe"
+        }
+      }
+    },
+    {
+      "advance": 700
+    },
+    {
+      "sweep": true
+    }
+  ],
+  "then": {
+    "telemetry": [
+      {
+        "type": "constraint.violated",
+        "kind": "stale",
+        "constraint": "gone-quiet",
+        "policy": "reject",
+        "state": "healthy"
+      },
+      {
+        "type": "constraint.escalated",
+        "kind": "stale",
+        "constraint": "gone-quiet",
+        "elapsedMs": 1500,
+        "escalateTo": "unreachable",
+        "delivered": true
+      }
+    ],
+    "events": {
+      "services:quiet": [
+        {
+          "type": "transition",
+          "from": null,
+          "to": "healthy",
+          "seq": 0
+        },
+        {
+          "type": "transition",
+          "from": "healthy",
+          "to": "healthy",
+          "seq": 1,
+          "at": 0
+        },
+        {
+          "type": "violation",
+          "seq": 1,
+          "at": 1500,
+          "policy": "reject",
+          "constraint": {
+            "kind": "stale",
+            "name": "gone-quiet"
+          },
+          "reason": "has committed nothing for 1500ms, over its bound of 1000ms",
+          "cause": {
+            "type": "constraint.stale",
+            "id": "t4"
+          }
+        },
+        {
+          "type": "transition",
+          "from": "healthy",
+          "to": "unreachable",
+          "seq": 2,
+          "at": 1500,
+          "cause": {
+            "type": "constraint.stale",
+            "id": "t4"
+          }
+        }
+      ]
+    },
+    "state": {
+      "services:quiet": {
+        "state": "unreachable"
+      },
+      "services:chatty": {
+        "state": "healthy",
+        "seq": 2
+      }
+    }
+  }
+}

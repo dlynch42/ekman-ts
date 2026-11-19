@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { runScenario } from "../runner/run";
 import type { Scenario } from "../runner/scenario";
 import {
@@ -9,7 +9,7 @@ import {
   loadScenarios,
   RUN_LEVELS,
 } from "../runner/scenario";
-import { SPEC_VERSION } from "../src/index";
+import { Ekman, SPEC_VERSION } from "../src/index";
 
 const scenarios = loadScenarios();
 
@@ -119,6 +119,61 @@ describe("detecting a broken expectation", () => {
     expect(result.status).toBe("failed");
     expect(result.failures).toContain(
       'state["deployments:a"].state: expected deploying, got stalled'
+    );
+  });
+
+  it("notices a rule recorded under another policy", async () => {
+    const result = await runScenario(
+      corrupt(
+        "core/172-a-rule-under-warn-records-without-delivering",
+        (scenario) => {
+          scenario.then.events["services:api"][2].policy = "reject";
+        }
+      )
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.failures).toEqual([
+      'events["services:api"][2].policy: expected "reject", got "warn"',
+    ]);
+  });
+
+  it("notices a rule whose condition is broken, which matches with what it threw", async () => {
+    const result = await runScenario(
+      corrupt("core/171-a-rule-fires-once-per-edge", (scenario) => {
+        scenario.given.entities[0].constraints.rules[0].when = {
+          throw: "no such field",
+        };
+        // One probe, then the trigger that waits for the proposal to be answered.
+        scenario.when = [scenario.when[0], scenario.when.at(-1)];
+        scenario.then.events["services:api"] = [
+          ...scenario.then.events["services:api"].slice(0, 4),
+          { type: "transition", seq: 3 },
+        ];
+      })
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.failures).toEqual([
+      'events["services:api"][2].reason: expected "three failed probes or more", got "the condition threw: no such field"',
+    ]);
+  });
+
+  it("reads nothing from a trigger in a rule's condition, since a rule has none", async () => {
+    const result = await runScenario(
+      corrupt("core/171-a-rule-fires-once-per-edge", (scenario) => {
+        // Every trigger has a type, so this would hold for any trigger at all.
+        scenario.given.entities[0].constraints.rules[0].when = {
+          trigger: "type",
+          exists: true,
+        };
+      })
+    );
+
+    // The rule never matches, so both of the scenario's violations are missing.
+    expect(result.status).toBe("failed");
+    expect(result.failures[0]).toContain(
+      'events["services:api"]: expected 11 events, got 7'
     );
   });
 
@@ -249,6 +304,131 @@ describe("detecting a broken expectation", () => {
       "queries[0].complete: expected false, got true",
       "queries[0].reasons: expected [limit-reached], got []",
       "queries[5].keys: expected [], got [deployments:done]",
+    ]);
+  });
+
+  it("notices a query whose matches carry other values", async () => {
+    const result = await runScenario(
+      corrupt("durable/042-a-query-can-return-values", (scenario) => {
+        scenario.then.queries[0].values["orders:1"].who = "z";
+        scenario.then.queries[0].values["orders:9"] = { who: "nobody" };
+      })
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.failures).toEqual([
+      'queries[0].values["orders:1"].who: expected "z", got "a"',
+      'queries[0].values["orders:9"]: expected an object, got undefined',
+    ]);
+  });
+
+  it("notices values carried by a query that did not ask for them", async () => {
+    // An implementation that always carries values, which the second query never asked for.
+    const { query } = Ekman.prototype;
+    const eager = vi
+      .spyOn(Ekman.prototype, "query")
+      .mockImplementation(function always(this: Ekman, criteria) {
+        return query.call(this, { ...criteria, includeValues: true });
+      });
+
+    const result = await runScenario(
+      load("durable/042-a-query-can-return-values")
+    );
+    eager.mockRestore();
+
+    expect(result.status).toBe("failed");
+    expect(result.failures).toContain(
+      'queries[1].values["orders:1"]: carried values without includeValues'
+    );
+  });
+
+  it("notices a query by time since the last commit that found other keys", async () => {
+    const result = await runScenario(
+      corrupt("core/164-query-by-time-since-last-commit", (scenario) => {
+        scenario.then.queries[0].staleFor = "1s";
+      })
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.failures).toEqual([
+      "queries[0].keys: expected [services:quiet], got [services:chatty, services:quiet]",
+    ]);
+  });
+
+  it("notices a patch that did not keep what it was not told to change", async () => {
+    const result = await runScenario(
+      corrupt("core/024-patch-merges-into-committed-values", (scenario) => {
+        // As if the result had replaced the values with the fields it named.
+        scenario.given.entities[0].states[0].cases[0].do.result = "stay";
+      })
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.failures).toContain(
+      'sends[0].values.owner: expected "amy", got undefined'
+    );
+  });
+
+  it("notices a state map that groups differently", async () => {
+    const result = await runScenario(
+      corrupt(
+        "core/163-the-state-map-counts-resident-instances-per-state",
+        (scenario) => {
+          const [whole, limited] = scenario.then.maps;
+          whole.byState.healthy = ["services:c", "services:a"];
+          whole.byState.retired = ["services:z"];
+          whole.byState.unreachable = undefined;
+          whole.total = 6;
+          whole.complete = true;
+          limited.reasons = ["limit-reached"];
+        }
+      )
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.failures).toEqual([
+      'maps[0].byState["healthy"]: expected [services:c, services:a], got [services:a, services:c]',
+      'maps[0].byState["retired"]: expected [services:z], got no such state',
+      'maps[0].byState["unreachable"]: expected no such state, got [services:d]',
+      "maps[0].total: expected 6, got 5",
+      "maps[0].complete: expected true, got false",
+      "maps[1].reasons: expected [limit-reached], got [no-durable-store, limit-reached]",
+    ]);
+  });
+
+  it("notices a state that is missing or extra when a limit of zero lists no keys at all", async () => {
+    const result = await runScenario(
+      corrupt(
+        "core/163-the-state-map-counts-resident-instances-per-state",
+        (scenario) => {
+          const [, limited] = scenario.then.maps;
+          limited.limitPerState = 0;
+          // Every state lists nothing now. One is left out and one is invented.
+          limited.byState = { healthy: [], degraded: [], retired: [] };
+        }
+      )
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.failures).toEqual([
+      'maps[1].byState["retired"]: expected [], got no such state',
+      'maps[1].byState["unreachable"]: expected no such state, got []',
+    ]);
+  });
+
+  it("compares a state's keys one by one, not as joined text", async () => {
+    const result = await runScenario(
+      corrupt(
+        "core/163-the-state-map-counts-resident-instances-per-state",
+        (scenario) => {
+          scenario.then.maps[0].byState.healthy = ["services:a, services:c"];
+        }
+      )
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.failures).toEqual([
+      'maps[0].byState["healthy"]: expected [services:a, services:c], got [services:a, services:c]',
     ]);
   });
 
@@ -395,6 +575,29 @@ describe("refusing a malformed scenario", () => {
     ).rejects.toThrow(
       'scenario core/010-initialization: unknown then key "histroy"'
     );
+  });
+
+  it("refuses an unknown key inside a query or a map", async () => {
+    await expect(
+      runScenario(
+        corrupt("durable/042-a-query-can-return-values", (scenario) => {
+          scenario.then.queries[0].includeValue = true;
+        })
+      )
+    ).rejects.toThrow(
+      'scenario durable/042-a-query-can-return-values: unknown key "includeValue" in then.queries[0]'
+    );
+
+    await expect(
+      runScenario(
+        corrupt(
+          "core/163-the-state-map-counts-resident-instances-per-state",
+          (scenario) => {
+            scenario.then.maps[1].limit = 1;
+          }
+        )
+      )
+    ).rejects.toThrow('unknown key "limit" in then.maps[1]');
   });
 
   it("refuses an unknown step", async () => {

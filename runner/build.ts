@@ -12,6 +12,7 @@ import type {
   InstanceSnapshot,
   ProposedCommit,
   ReplayedState,
+  RuleConstraint,
   Store,
   Trigger,
 } from "../src/index";
@@ -19,6 +20,7 @@ import {
   createStore,
   defineEntity,
   fail,
+  patch,
   replay,
   statesFromEntries,
   stay,
@@ -85,6 +87,7 @@ function buildConstraints(spec: ConstraintsSpec): ConstraintsConfig {
       ? {}
       : { transitions: spec.transitions }),
     ...(spec.temporal === undefined ? {} : { temporal: spec.temporal }),
+    ...(spec.stale === undefined ? {} : { stale: spec.stale }),
     ...(spec.guards === undefined
       ? {}
       : {
@@ -101,6 +104,35 @@ function buildConstraints(spec: ConstraintsSpec): ConstraintsConfig {
             check: compileCheck(invariant.check),
           })),
         }),
+    ...(spec.rules === undefined
+      ? {}
+      : {
+          rules: spec.rules.map((rule) => ({
+            ...rule,
+            when: compileCondition(rule.when),
+          })),
+        }),
+  };
+}
+
+/**
+ * A rule's condition, in the same grammar as a check and with the sense turned round: the
+ * condition holds when the check does. It is read against the committed instance, which
+ * stands where a check has the proposed commit.
+ */
+function compileCondition(spec: CheckSpec): RuleConstraint["when"] {
+  return (instance) => {
+    if (spec.throw !== undefined) {
+      throw new Error(spec.throw);
+    }
+
+    // A rule is evaluated against no trigger, so a `trigger` source reads nothing,
+    // whatever path it names.
+    const subject =
+      spec.trigger === undefined
+        ? readSubject(spec, instance, { type: "" })
+        : undefined;
+    return holds(spec, subject) ? (spec.reason ?? true) : false;
   };
 }
 
@@ -380,6 +412,8 @@ function toResult(
       return action.values === undefined
         ? stay()
         : stay(resolveValues(action.values, context));
+    case "patch":
+      return patch(resolveValues(action.values ?? {}, context));
     case "fail":
       return fail(named(new Error(action.error ?? "failed"), action.errorName));
     default:

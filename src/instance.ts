@@ -60,6 +60,7 @@ export class InstanceRecord<
   #values: Readonly<V>;
   #seq: number;
   #enteredAt: number;
+  #lastCommittedAt: number;
   #bytes: number;
   /** UTF-8 length of the key, measured once: it is part of every accounting and never changes. */
   readonly #keyBytes: number;
@@ -95,7 +96,12 @@ export class InstanceRecord<
    * as long as the instance sits there.
    */
   readonly #temporal = new LatchFold();
-  #stateEntry = 0;
+  /**
+   * Rules whose proposal is queued or running, with the id of that proposal's trigger.
+   * Memory only: a key with a trigger queued is never evicted, so there is nothing here
+   * for a store to hold.
+   */
+  readonly #proposing = new Map<string, string>();
   /** How many callers are holding this record resident. See `pin`. */
   #pins = 0;
 
@@ -186,6 +192,7 @@ export class InstanceRecord<
     this.#values = args.initialValues;
     this.#seq = 0;
     this.#enteredAt = args.at;
+    this.#lastCommittedAt = args.at;
     this.#bytes = this.#measure();
     this.#stale = false;
 
@@ -297,34 +304,21 @@ export class InstanceRecord<
     return this.#enteredAt;
   }
 
+  /**
+   * When this instance last committed anything, on the runtime's clock.
+   *
+   * Every commit advances it, a values-only one included, which is what separates "when
+   * did we last hear from it" from "how long has it been in this state". An instance
+   * loaded from a snapshot that never recorded it counts from the moment it was loaded:
+   * the runtime cannot call something stale on the strength of a time it does not know.
+   */
+  get lastCommittedAt(): number {
+    return this.#lastCommittedAt;
+  }
+
   /** Whether a temporal constraint has already fired since this state was entered. */
   hasFired(constraint: string): boolean {
     return this.#temporal.hasFired(constraint);
-  }
-
-  /**
-   * Which entry into its state this record is on. Advances every time the state changes.
-   *
-   * An escalation is raised for one entry and answered some time later, behind whatever
-   * was already queued. If the instance left the state and came back in between, the
-   * answer belongs to an entry that is over, and recording it against the current one
-   * would silence that entry's own bound. Callers read this before raising an escalation
-   * and hand it back when recording the outcome.
-   */
-  get stateEntry(): number {
-    return this.#stateEntry;
-  }
-
-  /**
-   * Record that a constraint fired, unless the entry it fired for is no longer current.
-   *
-   * For an outcome the stream does not show. One it does show, a commit or a recorded
-   * refusal, has settled the constraint already.
-   */
-  markFired(constraint: string, entry: number): void {
-    if (entry === this.#stateEntry) {
-      this.#temporal.fire(constraint);
-    }
   }
 
   /** The trigger id of an escalation still owed to this constraint, if one was turned away. */
@@ -343,9 +337,54 @@ export class InstanceRecord<
     return this.#temporal.owes(cause);
   }
 
-  #rearmTemporal(): void {
-    this.#stateEntry += 1;
-    this.#temporal.moved();
+  /** Arm a rule again, because its condition has stopped holding. */
+  rearm(rule: string): void {
+    this.#temporal.rearm(rule);
+    this.#proposing.delete(rule);
+  }
+
+  /** Whether a proposal this rule raised is still on its way to a handler. */
+  isProposing(rule: string): boolean {
+    return this.#proposing.has(rule);
+  }
+
+  /** Note that a rule's proposal has been sent, under this trigger id, and not yet answered. */
+  proposing(rule: string, id: string): void {
+    this.#proposing.set(rule, id);
+  }
+
+  /**
+   * Note that a proposal was answered.
+   *
+   * Only the proposal the rule is waiting on counts. A rule can be armed again and match
+   * again while an earlier proposal is still queued, and that earlier one being answered
+   * says nothing about the later one, which is still on its way.
+   */
+  proposed(rule: string, id: string): void {
+    if (this.#proposing.get(rule) === id) {
+      this.#proposing.delete(rule);
+    }
+  }
+
+  /**
+   * Record that the trigger a bound or a rule raised was refused for good, in a way the
+   * stream does not show, so it is done until it is armed again.
+   *
+   * Only while that trigger is the one still owed. If the instance moved, or was heard
+   * from, or the rule was armed again in the meantime, the refusal is about something
+   * that is over, and marking the bound or rule done would silence the next time.
+   */
+  refused(name: string, id: string): void {
+    if (this.#temporal.owed(name)?.id === id) {
+      this.#temporal.fire(name);
+    }
+  }
+
+  #rearmTemporal(cause?: EventCause): void {
+    this.#temporal.moved(cause);
+    // A proposal still queued was raised for the stay that just ended. The new one
+    // raises its own.
+    this.#proposing.clear();
   }
 
   /**
@@ -464,6 +503,8 @@ export class InstanceRecord<
       state: this.#state,
       values: this.#values,
       seq: this.#seq,
+      enteredAt: this.#enteredAt,
+      lastCommittedAt: this.#lastCommittedAt,
     });
   }
 
@@ -478,6 +519,7 @@ export class InstanceRecord<
       seq: this.#seq,
       enteredAt: this.#enteredAt,
       at,
+      lastCommittedAt: this.#lastCommittedAt,
       ...(temporal === undefined ? {} : { temporal }),
     });
   }
@@ -560,13 +602,14 @@ export class InstanceRecord<
     this.#setState(next.state);
     this.#values = next.values;
     this.#seq = event.seq;
+    this.#lastCommittedAt = next.at;
     if (this.#retainsStream) {
       this.#keep(event);
     }
 
     if (moved) {
       this.#enteredAt = next.at;
-      this.#rearmTemporal();
+      this.#rearmTemporal(event.cause);
     } else {
       // A commit that answers an escalation settles the bound that raised it, here and
       // not when the sweep hears back, because the key can be evicted in between.
@@ -705,6 +748,7 @@ export class InstanceRecord<
       this.#bytes = this.#measure();
 
       this.#enteredAt = this.#deps.now();
+      this.#lastCommittedAt = this.#enteredAt;
       this.#rearmTemporal();
 
       const pending: PendingInit<S, V> = {
@@ -725,6 +769,12 @@ export class InstanceRecord<
       current.enteredAt !== this.#enteredAt
     ) {
       this.#rearmTemporal();
+    } else {
+      // A reload follows a conflict, so another writer committed, here without moving
+      // the instance: it has been heard from since this record last looked. What its
+      // freshness bounds had said here is out of date, and the store's account, merged
+      // below, says what still stands.
+      this.#temporal.heardElsewhere();
     }
     // The store's account of the stay is taken in either way. Another runtime can have
     // answered an escalation without moving the instance, and this one would raise it
@@ -735,6 +785,7 @@ export class InstanceRecord<
     this.#values = freezeValues(current.values);
     this.#seq = current.seq;
     this.#enteredAt = current.enteredAt;
+    this.#lastCommittedAt = current.lastCommittedAt ?? this.#deps.now();
     this.#bytes = this.#measure();
 
     // Recorded as a restore, because that is what it is: this runtime's view of the key
@@ -790,6 +841,7 @@ export class InstanceRecord<
     this.#values = freezeValues(current.values);
     this.#seq = current.seq;
     this.#enteredAt = current.enteredAt;
+    this.#lastCommittedAt = current.lastCommittedAt ?? pending.at;
     this.#bytes = this.#measure();
     this.#temporal.moved();
     this.#temporal.merge(current.temporal);

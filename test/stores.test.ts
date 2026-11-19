@@ -181,7 +181,8 @@ describe("finding the project root", () => {
 
 /**
  * A store that declares no optional capability: it cannot forget, and it reports the scan
- * filters it was asked for as unsupported, matching on the entity alone.
+ * filters it was asked for as unsupported, matching on the entity alone. Asked to carry
+ * values on a scan, it carries none.
  */
 function minimalStore(): Store {
   const inner = memoryStore();
@@ -196,7 +197,12 @@ function minimalStore(): Store {
     read: (key) => inner.read(key),
     load: (key) => inner.load(key),
     snapshot: (key, snapshot) => inner.snapshot(key, snapshot),
-    scan: async ({ state, olderThanMs, ...criteria }) => {
+    scan: async ({
+      state,
+      olderThanMs,
+      includeValues: _unsupported,
+      ...criteria
+    }) => {
       const found = await inner.scan(criteria);
       return {
         ...found,

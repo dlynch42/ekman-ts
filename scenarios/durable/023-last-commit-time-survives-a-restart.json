@@ -1,0 +1,89 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "durable/023-last-commit-time-survives-a-restart",
+  "name": "when an instance last committed is stored with it, so the time since it was last heard from keeps running through a restart and a query by it is the whole answer",
+  "level": "durable",
+  "given": {
+    "runtime": {
+      "clock": {
+        "start": 0,
+        "stepMs": 0
+      },
+      "store": [
+        {
+          "kind": "file"
+        }
+      ]
+    },
+    "entities": [
+      {
+        "name": "services",
+        "initial": "healthy",
+        "states": [
+          {
+            "state": "healthy",
+            "else": {
+              "result": "stay"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "services:quiet",
+        "trigger": {
+          "type": "probe"
+        }
+      }
+    },
+    {
+      "send": {
+        "key": "services:chatty",
+        "trigger": {
+          "type": "probe"
+        }
+      }
+    },
+    {
+      "advance": 4000
+    },
+    {
+      "send": {
+        "key": "services:chatty",
+        "trigger": {
+          "type": "probe"
+        }
+      }
+    },
+    {
+      "restart": true
+    },
+    {
+      "advance": 1000
+    }
+  ],
+  "then": {
+    "queries": [
+      {
+        "entity": "services",
+        "staleFor": "5s",
+        "keys": ["services:quiet"],
+        "complete": true,
+        "reasons": []
+      },
+      {
+        "entity": "services",
+        "staleFor": 1000,
+        "keys": ["services:chatty", "services:quiet"]
+      },
+      {
+        "entity": "services",
+        "staleFor": 1001,
+        "keys": ["services:quiet"]
+      }
+    ]
+  }
+}

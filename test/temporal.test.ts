@@ -200,6 +200,161 @@ describe("rebuilding what a stay in a state has already been told", () => {
     expect(fold([guard])).toBeUndefined();
   });
 
+  describe("for a rule", () => {
+    const matched = (policy: "reject" | "warn", id = "t7"): EkmanEvent => ({
+      type: "violation",
+      key: "jobs:1",
+      seq: 1,
+      at: 100,
+      cause: { type: "rule.matched", id },
+      constraint: { kind: "rule", name: "too-many" },
+      policy,
+      reason: "the condition held",
+    });
+
+    it("owes a proposal until the stream shows it answered, as for a bound", () => {
+      expect(fold([matched("reject")])).toEqual({
+        fired: [],
+        owed: { "too-many": { type: "rule.matched", id: "t7" } },
+      });
+      expect(
+        fold([
+          matched("reject"),
+          commit(2, "a", "a", { type: "rule.matched", id: "t7" }),
+        ])
+      ).toEqual({ fired: ["too-many"], owed: {} });
+    });
+
+    it("counts a warning as said", () => {
+      expect(fold([matched("warn")])).toEqual({
+        fired: ["too-many"],
+        owed: {},
+      });
+    });
+
+    it("reads a second match as a rule armed again in between", () => {
+      // A rule ceasing to hold is not an event. Matching again is the only sign of it,
+      // and the second proposal is owed whatever became of the first.
+      expect(
+        fold([
+          matched("reject"),
+          commit(2, "a", "a", { type: "rule.matched", id: "t7" }),
+          matched("reject", "t9"),
+        ])
+      ).toEqual({
+        fired: [],
+        owed: { "too-many": { type: "rule.matched", id: "t9" } },
+      });
+    });
+
+    it("arms a rule again, dropping what it said and what it was owed", () => {
+      const latch = new LatchFold();
+      latch.apply(matched("warn"));
+      latch.rearm("too-many");
+      expect(latch.result()).toBeUndefined();
+
+      latch.apply(matched("reject"));
+      latch.rearm("too-many");
+      expect(latch.result()).toBeUndefined();
+    });
+  });
+
+  describe("for a freshness bound", () => {
+    const asked = { type: "constraint.stale", id: "t7" };
+    const quiet = (policy: "reject" | "warn"): EkmanEvent => ({
+      type: "violation",
+      key: "jobs:1",
+      seq: 1,
+      at: 100,
+      cause: asked,
+      constraint: { kind: "stale", name: "gone-quiet" },
+      policy,
+      reason: "nothing heard",
+    });
+    const other = { type: "probe", id: "t8" };
+    const said = { fired: ["gone-quiet"], owed: {}, stale: ["gone-quiet"] };
+
+    it("owes its trigger until the stream shows it answered", () => {
+      expect(fold([quiet("reject")])).toEqual({
+        fired: [],
+        owed: { "gone-quiet": asked },
+        stale: ["gone-quiet"],
+      });
+    });
+
+    it("stays said through the commit that answers it, whether or not that moved the instance", () => {
+      expect(fold([quiet("reject"), commit(2, "a", "a", asked)])).toEqual(said);
+
+      const moved = new LatchFold();
+      moved.apply(quiet("reject"));
+      moved.moved(asked);
+      expect(moved.result()).toEqual(said);
+    });
+
+    it("is armed again by the next commit from anything else", () => {
+      expect(
+        fold([
+          quiet("reject"),
+          commit(2, "a", "a", asked),
+          commit(3, "a", "a", other),
+        ])
+      ).toBeUndefined();
+      // Also when the proposal was still owed: the instance has been heard from.
+      expect(
+        fold([quiet("reject"), commit(2, "a", "a", other)])
+      ).toBeUndefined();
+      expect(fold([quiet("warn"), commit(2, "a", "a", other)])).toBeUndefined();
+
+      const moved = new LatchFold();
+      moved.apply(quiet("reject"));
+      moved.moved(other);
+      expect(moved.result()).toBeUndefined();
+    });
+
+    it("is forgotten by a move with no commit behind it, as on a reload", () => {
+      const latch = new LatchFold();
+      latch.apply(quiet("warn"));
+      latch.moved();
+      expect(latch.result()).toBeUndefined();
+    });
+
+    it("leaves a time-in-state bound alone when it is armed again", () => {
+      expect(
+        fold([violation("warn"), quiet("warn"), commit(2, "a", "a", other)])
+      ).toEqual({ fired: ["too-slow"], owed: {} });
+    });
+
+    it("is armed again when another writer is known to have committed, leaving time-in-state bounds alone", () => {
+      const latch = new LatchFold();
+      latch.apply(violation("warn"));
+      latch.apply(quiet("warn"));
+      latch.heardElsewhere();
+      expect(latch.result()).toEqual({ fired: ["too-slow"], owed: {} });
+    });
+
+    it("is carried by a snapshot and taken in from one", () => {
+      const latch = new LatchFold(said);
+      expect(latch.result()).toEqual(said);
+      latch.apply(commit(3, "a", "a", other));
+      expect(latch.result()).toBeUndefined();
+    });
+
+    it("is carried by a replay, so a reload does not ask again", () => {
+      const replayed = replay({
+        snapshot: undefined,
+        seq: 2,
+        events: [
+          commit(0, null, "a", other),
+          commit(1, "a", "a", other),
+          { ...quiet("reject"), seq: 1 },
+          commit(2, "a", "b", asked),
+        ],
+      });
+      expect(replayed?.temporal).toEqual(said);
+      expect(replayed?.lastCommittedAt).toBe(20);
+    });
+  });
+
   it("starts from what a snapshot recorded, and does not owe again what has fired", () => {
     const seeded = new LatchFold({
       fired: ["too-slow"],

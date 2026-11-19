@@ -18,6 +18,17 @@ export interface StayResult<V extends Values = Values> {
   readonly values?: V;
 }
 
+/**
+ * Request a merge into the current values, staying in the current state.
+ *
+ * `values` names only what changes. Everything else the instance knows is carried
+ * forward.
+ */
+export interface PatchResult<V extends Values = Values> {
+  readonly kind: "patch";
+  readonly values: Partial<V>;
+}
+
 /** Decline to change anything and route through the failure path. */
 export interface FailResult {
   readonly kind: "fail";
@@ -27,7 +38,7 @@ export interface FailResult {
 export type HandlerResult<
   S extends string = string,
   V extends Values = Values,
-> = TransitionToResult<S, V> | StayResult<V> | FailResult;
+> = TransitionToResult<S, V> | StayResult<V> | PatchResult<V> | FailResult;
 
 /**
  * Request a transition to `state`.
@@ -74,6 +85,21 @@ export function stay<V extends Values = Values>(values?: V): StayResult<V> {
 }
 
 /**
+ * Stay in the current state and merge `values` into what the instance already holds.
+ *
+ * The update for an instance that is memory about something: record the one thing that
+ * was just learned without restating the rest, so a field nobody mentioned cannot be
+ * dropped by accident.
+ *
+ * The merge is shallow. A field named here replaces the one held, whole, including when
+ * it is an object or an array. The committed event carries the full merged values, as
+ * every commit does, so a replay never has to know a merge happened.
+ */
+export function patch<P extends Values>(values: P): PatchResult<P> {
+  return Object.freeze({ kind: "patch" as const, values });
+}
+
+/**
  * Fail the attempt. The instance keeps its previous committed state and values.
  *
  * Accepts anything throwable. Non-Error values are wrapped so the failure path always
@@ -95,6 +121,12 @@ export function isStay<S extends string, V extends Values>(
   return result.kind === "stay";
 }
 
+export function isPatch<S extends string, V extends Values>(
+  result: HandlerResult<S, V>
+): result is PatchResult<V> {
+  return result.kind === "patch";
+}
+
 export function isFail<S extends string, V extends Values>(
   result: HandlerResult<S, V>
 ): result is FailResult {
@@ -104,7 +136,7 @@ export function isFail<S extends string, V extends Values>(
 /**
  * Whether a handler's return value is a well-formed result.
  *
- * A handler that returns something else has not resolved to one of the three results,
+ * A handler that returns something else has not resolved to one of the four results,
  * which the runtime treats the same way it treats a throw.
  */
 export function isHandlerResult(value: unknown): value is HandlerResult {
@@ -112,7 +144,12 @@ export function isHandlerResult(value: unknown): value is HandlerResult {
     return false;
   }
   const { kind } = value as { kind?: unknown };
-  return kind === "transitionTo" || kind === "stay" || kind === "fail";
+  return (
+    kind === "transitionTo" ||
+    kind === "stay" ||
+    kind === "patch" ||
+    kind === "fail"
+  );
 }
 
 /** Coerce anything throwable into an Error without discarding the original. */

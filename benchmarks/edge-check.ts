@@ -184,6 +184,8 @@ function snapshot(state: string): InstanceSnapshot {
     state,
     values: VALUES,
     seq: 1,
+    enteredAt: 0,
+    lastCommittedAt: 0,
   });
 }
 

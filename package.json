@@ -1,7 +1,7 @@
 {
   "name": "ekman",
   "version": "0.1.0",
-  "description": "Declarative, embeddable state management for backend services. A runtime you embed, not a platform you operate.",
+  "description": "Per-key memory and state for the things your service watches. Embedded, budgeted, queryable. A runtime you embed, not a platform you operate.",
   "license": "Apache-2.0",
   "type": "module",
   "sideEffects": false,
@@ -30,18 +30,18 @@
     "LICENSE"
   ],
   "keywords": [
-    "state-machine",
-    "state-management",
-    "states",
-    "status",
-    "real-time",
+    "memory",
+    "state",
+    "entity",
+    "fleet",
+    "embedded",
+    "runtime",
     "actor",
     "virtual-actor",
     "stateful",
-    "entity",
-    "embedded",
-    "runtime",
-    "workflow"
+    "state-machine",
+    "status",
+    "real-time"
   ],
   "publishConfig": {
     "access": "public"
@@ -78,8 +78,11 @@
     "demo:coordination": "tsx demos/coordination.ts",
     "demo:concurrency": "tsx demos/concurrency.ts",
     "demo:unknown": "tsx demos/unknown.ts",
+    "demo:service-health": "tsx demos/service-health.ts",
     "example:api": "tsx examples/deploy-service/src/main.ts",
     "example:smoke": "tsx examples/deploy-service/smoke.ts",
+    "example:health": "tsx examples/service-health/src/main.ts",
+    "example:health:smoke": "tsx examples/service-health/smoke.ts",
     "lint": "ultracite check",
     "format": "ultracite fix"
   },

@@ -9,7 +9,12 @@ import { fenceReason } from "./fence";
 import type { InstanceRecord } from "./instance";
 import type { ExecutionPolicy, ResolvedPolicy } from "./policy";
 import { backoffDelay, defaultRetryable, resolvePolicy } from "./policy";
-import type { HandlerResult, StayResult, TransitionToResult } from "./results";
+import type {
+  HandlerResult,
+  PatchResult,
+  StayResult,
+  TransitionToResult,
+} from "./results";
 import { isHandlerResult, toError } from "./results";
 import type { TelemetryEvent } from "./telemetry";
 import { telemetryNow, triggerRef } from "./telemetry";
@@ -513,7 +518,7 @@ async function runHandler<S extends string, V extends Values>(
       kind: "fail",
       error: new Error(
         `handler for state "${snapshot.state}" returned ${describe(result)} ` +
-          "instead of transitionTo(), stay() or fail()"
+          "instead of transitionTo(), stay(), patch() or fail()"
       ),
     };
   }
@@ -671,6 +676,28 @@ function applyConstraints<S extends string, V extends Values>(
 }
 
 /**
+ * The values a result asks to commit.
+ *
+ * Omitted values carry the current ones forward rather than clearing them. A patch is
+ * merged over the current ones here, once, so everything downstream of this (constraints,
+ * the event, the store, a replay) sees whole values and never a delta.
+ */
+function nextValues<S extends string, V extends Values>(
+  instance: InstanceRecord<S, V>,
+  result: TransitionToResult<S, V> | StayResult<V> | PatchResult<V>
+): Readonly<V> {
+  if (result.kind === "patch") {
+    return sealValues(
+      { ...instance.values, ...result.values } as V,
+      instance.key
+    );
+  }
+  return result.values === undefined
+    ? instance.values
+    : sealValues(result.values, instance.key);
+}
+
+/**
  * Apply a transitionTo or stay result, through the fence.
  *
  * Every committed result in the runtime passes through here, which is what makes the
@@ -682,7 +709,7 @@ function applyConstraints<S extends string, V extends Values>(
 async function commit<S extends string, V extends Values>(
   instance: InstanceRecord<S, V>,
   definition: EntityDefinition<string, S, V, Trigger>,
-  result: TransitionToResult<S, V> | StayResult<V>,
+  result: TransitionToResult<S, V> | StayResult<V> | PatchResult<V>,
   trigger: Trigger,
   deps: DispatchDeps,
   cause: EventCause,
@@ -705,11 +732,7 @@ async function commit<S extends string, V extends Values>(
   }
 
   const state = result.kind === "transitionTo" ? result.state : instance.state;
-  // Omitted values carry the current ones forward rather than clearing them.
-  const values =
-    result.values === undefined
-      ? instance.values
-      : sealValues(result.values, instance.key);
+  const values = nextValues(instance, result);
 
   // Constraints are skipped for an attempt that cannot commit anyway. Recording a
   // violation for a result that was never going to land would put noise in the stream

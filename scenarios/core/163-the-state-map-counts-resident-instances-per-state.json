@@ -1,0 +1,69 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/163-the-state-map-counts-resident-instances-per-state",
+  "name": "the state map groups every instance of an entity by state, oldest in state first, and a memory-only runtime says the map is partial",
+  "level": "core",
+  "given": {
+    "runtime": { "clock": { "start": 0, "stepMs": 0 } },
+    "entities": [
+      {
+        "name": "services",
+        "initial": "healthy",
+        "states": [
+          {
+            "state": "healthy",
+            "cases": [
+              {
+                "when": { "trigger": "degrade" },
+                "do": { "result": "transitionTo", "to": "degraded" }
+              },
+              {
+                "when": { "trigger": "lose" },
+                "do": { "result": "transitionTo", "to": "unreachable" }
+              }
+            ],
+            "else": { "result": "stay" }
+          },
+          { "state": "degraded", "else": { "result": "stay" } },
+          { "state": "unreachable", "else": { "result": "stay" } }
+        ]
+      }
+    ]
+  },
+  "when": [
+    { "send": { "key": "services:a", "trigger": { "type": "probe" } } },
+    { "advance": 1000 },
+    { "send": { "key": "services:b", "trigger": { "type": "degrade" } } },
+    { "advance": 1000 },
+    { "send": { "key": "services:e", "trigger": { "type": "degrade" } } },
+    { "send": { "key": "services:d", "trigger": { "type": "lose" } } },
+    { "send": { "key": "services:c", "trigger": { "type": "probe" } } }
+  ],
+  "then": {
+    "maps": [
+      {
+        "entity": "services",
+        "byState": {
+          "healthy": ["services:a", "services:c"],
+          "degraded": ["services:b", "services:e"],
+          "unreachable": ["services:d"]
+        },
+        "total": 5,
+        "complete": false,
+        "reasons": ["no-durable-store"]
+      },
+      {
+        "entity": "services",
+        "limitPerState": 1,
+        "byState": {
+          "healthy": ["services:a"],
+          "degraded": ["services:b"],
+          "unreachable": ["services:d"]
+        },
+        "total": 5,
+        "complete": false,
+        "reasons": ["no-durable-store", "limit-reached"]
+      }
+    ]
+  }
+}

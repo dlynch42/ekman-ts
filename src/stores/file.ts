@@ -33,6 +33,7 @@ import {
   EMPTY_SEQ,
   entityOf,
   isAfterSnapshot,
+  lastCommitOf,
   latestSeq,
   replay,
   scanKeys,
@@ -491,7 +492,7 @@ export class FileStore implements Store {
     durability: "durable" as const,
     conditionalAppend: true,
     multiWriter: false,
-    scan: { byState: true, olderThan: true },
+    scan: { byState: true, olderThan: true, staleFor: true },
     forget: true,
     compact: true,
   });
@@ -1236,6 +1237,7 @@ export class FileStore implements Store {
         seq: current.seq,
         at: Date.now(),
         enteredAt: current.enteredAt,
+        ...lastCommitOf(current),
         ...(current.temporal === undefined
           ? {}
           : { temporal: current.temporal }),

@@ -301,6 +301,47 @@ async function theOpsEndpoints(): Promise<void> {
     counters["constraint.escalated"]
   );
 
+  const map = await call("GET", "/ops/map");
+  const byState = body(map).byState as Record<
+    string,
+    { count: number; keys: string[] } | undefined
+  >;
+  const counted = Object.values(byState).reduce(
+    (sum, entry) => sum + (entry?.count ?? 0),
+    0
+  );
+  check(
+    "the map counts every deployment once",
+    counted > 0 && counted === body(map).total,
+    { counted, total: body(map).total }
+  );
+  check(
+    "and is the whole answer over a durable store",
+    body(map).complete === true,
+    body(map).reasons
+  );
+  check(
+    "and carries no values unless asked",
+    body(map).values === undefined,
+    body(map).values
+  );
+
+  const withValues = await call("GET", "/ops/map?values=true");
+  const values = body(withValues).values as Record<string, unknown>;
+  check(
+    "the map carries what each deployment knows when asked",
+    Object.keys(values).length === counted,
+    Object.keys(values).length
+  );
+
+  const misspelt = await call("GET", "/ops/stuck?state=deployin");
+  check(
+    "a state the entity does not have is a 400 that names the choices",
+    misspelt.status === 400 &&
+      String(body(misspelt).message).includes("deploying"),
+    body(misspelt)
+  );
+
   const health = await call("GET", "/health");
   check("health returns 200", health.status === 200, health.status);
 }

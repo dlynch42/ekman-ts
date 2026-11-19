@@ -348,6 +348,67 @@
               "policy": { "$ref": "#/$defs/violationPolicy" }
             }
           }
+        },
+        "stale": {
+          "description": "Bounds on how long an instance may go without a commit. Evaluated by a sweep, and firing delivers a trigger.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["after"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string" },
+              "in": {
+                "description": "States the bound watches. Omitted means every state.",
+                "type": "array",
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "after": {
+                "description": "Milliseconds an instance may go without a commit.",
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "propose": {
+                "description": "Carried on the delivered trigger for the handler to act on. The runtime never applies it directly.",
+                "type": "string"
+              },
+              "trigger": {
+                "description": "Type of the delivered trigger. Defaults to constraint.stale.",
+                "type": "string"
+              },
+              "policy": { "$ref": "#/$defs/violationPolicy" }
+            }
+          }
+        },
+        "rules": {
+          "description": "Conditions over what an instance knows. Evaluated after every commit in a watched state, and coming to hold delivers a trigger.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["when"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string" },
+              "in": {
+                "description": "States the rule watches. Omitted means every state.",
+                "type": "array",
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "when": {
+                "description": "The condition, read against what was just committed. It holds when the check does.",
+                "$ref": "#/$defs/check"
+              },
+              "propose": {
+                "description": "Carried on the delivered trigger for the handler to act on. The runtime never applies it directly.",
+                "type": "string"
+              },
+              "trigger": {
+                "description": "Type of the delivered trigger. Defaults to rule.matched.",
+                "type": "string"
+              },
+              "policy": { "$ref": "#/$defs/violationPolicy" }
+            }
+          }
         }
       }
     },
@@ -436,7 +497,7 @@
       "additionalProperties": false,
       "properties": {
         "result": {
-          "enum": ["transitionTo", "stay", "fail"]
+          "enum": ["transitionTo", "stay", "patch", "fail"]
         },
         "to": {
           "description": "A state name, or a value expression resolving to one. An escalation carries its target on the trigger."
@@ -636,7 +697,14 @@
                   "additionalProperties": false,
                   "properties": {
                     "kind": {
-                      "enum": ["transition", "guard", "invariant", "temporal"]
+                      "enum": [
+                        "transition",
+                        "guard",
+                        "invariant",
+                        "temporal",
+                        "rule",
+                        "stale"
+                      ]
                     },
                     "name": { "type": "string" }
                   }
@@ -646,7 +714,7 @@
                   "enum": ["reject", "warn"]
                 },
                 "attempted": {
-                  "description": "The change a violation was refusing. Absent on a temporal violation, which is attached to no result.",
+                  "description": "The change a violation was refusing. Absent on a temporal violation and on a rule's match, which are attached to no result.",
                   "type": "object",
                   "additionalProperties": false,
                   "properties": {
@@ -759,11 +827,62 @@
                   }
                 ]
               },
+              "staleFor": {
+                "description": "Milliseconds since the last commit, or a duration such as 5m. Inclusive at the bound.",
+                "oneOf": [
+                  { "type": "integer", "minimum": 0 },
+                  {
+                    "type": "string",
+                    "pattern": "^\\d+(\\.\\d+)?(ms|s|m|h|d)$"
+                  }
+                ]
+              },
               "limit": { "type": "integer", "minimum": 0 },
+              "includeValues": {
+                "description": "Ask for each match's values. Without it, a match carrying values is a failure.",
+                "type": "boolean"
+              },
               "keys": {
                 "description": "Matching keys, oldest in state first, ties broken on the key.",
                 "type": "array",
                 "items": { "type": "string" }
+              },
+              "values": {
+                "description": "Values a match must carry, by key, each asserted as a subset.",
+                "type": "object",
+                "additionalProperties": { "type": "object" }
+              },
+              "complete": { "type": "boolean" },
+              "reasons": {
+                "description": "Asserted as a set.",
+                "type": "array",
+                "items": { "$ref": "#/$defs/partiality" }
+              }
+            }
+          }
+        },
+        "maps": {
+          "description": "State maps read after everything settles, each with the answer it must give.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["entity", "byState"],
+            "additionalProperties": false,
+            "properties": {
+              "entity": { "type": "string", "minLength": 1 },
+              "limitPerState": { "type": "integer", "minimum": 0 },
+              "byState": {
+                "description": "Every state holding an instance, each with its keys, oldest in state first, ties broken on the key. States are compared as a set.",
+                "type": "object",
+                "additionalProperties": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                }
+              },
+              "total": {
+                "description": "How many instances the map counted. A per-state limit does not reduce it.",
+                "type": "integer",
+                "minimum": 0
               },
               "complete": { "type": "boolean" },
               "reasons": {
@@ -813,7 +932,8 @@
         "unsupported-criteria",
         "limit-reached",
         "compacted",
-        "history-capped"
+        "history-capped",
+        "resident-only"
       ]
     },
     "errorCode": {

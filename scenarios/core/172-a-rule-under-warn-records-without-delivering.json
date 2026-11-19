@@ -1,0 +1,168 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/172-a-rule-under-warn-records-without-delivering",
+  "name": "under warn a rule records that its condition came to hold and delivers nothing, so the rules that would fire can be found before any is allowed to act",
+  "level": "core",
+  "given": {
+    "runtime": {
+      "clock": {
+        "start": 0,
+        "stepMs": 0
+      }
+    },
+    "entities": [
+      {
+        "name": "services",
+        "initial": "healthy",
+        "constraints": {
+          "rules": [
+            {
+              "name": "too-many-failures",
+              "in": ["healthy"],
+              "when": {
+                "values": "failures",
+                "gte": 3,
+                "reason": "three failed probes or more"
+              },
+              "propose": "degraded",
+              "policy": "warn"
+            }
+          ]
+        },
+        "states": [
+          {
+            "state": "healthy",
+            "cases": [
+              {
+                "when": {
+                  "trigger": "rule.matched"
+                },
+                "do": {
+                  "result": "transitionTo",
+                  "to": "degraded"
+                }
+              },
+              {
+                "when": {
+                  "trigger": "settle"
+                },
+                "do": {
+                  "result": "stay"
+                }
+              }
+            ],
+            "else": {
+              "result": "stay",
+              "values": {
+                "failures": {
+                  "$trigger": "failures"
+                }
+              }
+            }
+          },
+          {
+            "state": "degraded",
+            "else": {
+              "result": "stay"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "services:api",
+        "trigger": {
+          "type": "probe",
+          "failures": 3
+        }
+      }
+    },
+    {
+      "send": {
+        "key": "services:api",
+        "trigger": {
+          "type": "probe",
+          "failures": 4
+        }
+      }
+    },
+    {
+      "send": {
+        "key": "services:api",
+        "trigger": {
+          "type": "settle"
+        }
+      }
+    }
+  ],
+  "then": {
+    "telemetry": [
+      {
+        "type": "constraint.violated",
+        "kind": "rule",
+        "policy": "warn"
+      }
+    ],
+    "telemetryAbsent": [
+      {
+        "type": "constraint.escalated"
+      }
+    ],
+    "events": {
+      "services:api": [
+        {
+          "type": "transition",
+          "from": null,
+          "to": "healthy",
+          "seq": 0
+        },
+        {
+          "type": "transition",
+          "from": "healthy",
+          "to": "healthy",
+          "seq": 1,
+          "values": {
+            "failures": 3
+          }
+        },
+        {
+          "type": "violation",
+          "seq": 1,
+          "policy": "warn",
+          "reason": "three failed probes or more",
+          "constraint": {
+            "kind": "rule",
+            "name": "too-many-failures"
+          },
+          "cause": {
+            "type": "rule.matched",
+            "id": "t2"
+          }
+        },
+        {
+          "type": "transition",
+          "from": "healthy",
+          "to": "healthy",
+          "seq": 2,
+          "values": {
+            "failures": 4
+          }
+        },
+        {
+          "type": "transition",
+          "from": "healthy",
+          "to": "healthy",
+          "seq": 3
+        }
+      ]
+    },
+    "state": {
+      "services:api": {
+        "state": "healthy"
+      }
+    }
+  }
+}

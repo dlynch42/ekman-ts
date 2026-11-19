@@ -37,7 +37,7 @@ src/
     server.ts          node:http, a small router, error codes -> status codes
     routes/
       deployments.ts   create, send an event, read one, read its history
-      ops.ts           /ops/stuck, /ops/incidents, /ops/sweep, /ops/prune, /ops/metrics
+      ops.ts           /ops/stuck, /ops/incidents, /ops/map, /ops/sweep, /ops/prune, /ops/metrics
   workers/
     consumer.ts        a fake queue that redelivers, bursts, and sends a typo
   app.ts               the route table
@@ -130,6 +130,10 @@ curl localhost:3000/deployments/billing-api/history
 
 # incidents opened in reaction to failed deployments
 curl localhost:3000/ops/incidents
+
+# the whole fleet: how many deployments are in each state, and which
+# (add ?values=true for what each one knows)
+curl localhost:3000/ops/map
 
 # runtime telemetry, which never appears in any deployment's history
 # `memory` is resident bytes; `storage` is bytes on disk, which eviction never frees

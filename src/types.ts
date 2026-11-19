@@ -3,7 +3,13 @@ import type { ConstraintsConfig } from "./constraints";
 import type { TransitionEvent } from "./events";
 import type { MemoryConfig } from "./memory";
 import type { ExecutionPolicy } from "./policy";
-import type { HistoryResult, QueryCriteria, QueryResult } from "./query";
+import type {
+  HistoryResult,
+  QueryCriteria,
+  QueryResult,
+  StateMap,
+  StateMapOptions,
+} from "./query";
 import type { HandlerResult } from "./results";
 import type { Coordination, StoreLayer } from "./stack";
 // Type-only, and so erased: `telemetry.ts` names `OverflowPolicy` from here, and this
@@ -42,6 +48,13 @@ export interface InstanceSnapshot<
   readonly state: S;
   readonly values: Readonly<V>;
   readonly seq: number;
+  /** When the instance entered its current state, on the runtime's clock. */
+  readonly enteredAt: number;
+  /**
+   * When the instance last committed anything, on the runtime's clock: the last time it
+   * was heard from. A values-only commit advances this and leaves `enteredAt` alone.
+   */
+  readonly lastCommittedAt: number;
 }
 
 export interface HandlerContext {
@@ -301,8 +314,19 @@ export interface EntityHandle<
   inspect: (id: string) => InstanceSnapshot<S, V> | undefined;
   /** The full per-key stream, read through the store when one is configured. */
   history: (id: string) => Promise<HistoryResult<S, V>>;
-  /** This entity's instances by state and time in state. */
-  query: (criteria?: Omit<QueryCriteria, "entity">) => Promise<QueryResult>;
+  /**
+   * This entity's instances by state and time in state. A state the entity does not have
+   * is a compile error here.
+   *
+   * Declared as a method, where its neighbours are properties, so that a handle with
+   * narrow states still fits a parameter typed as a plain `EntityHandle`.
+   */
+  // biome-ignore lint/style/useConsistentMethodSignatures: see above; a property signature would make the handle invariant in its states
+  query(
+    criteria?: Omit<QueryCriteria<S, V>, "entity">
+  ): Promise<QueryResult<S, V>>;
+  /** Where every instance of this entity is: a count and the keys for each state. */
+  map: (options?: StateMapOptions) => Promise<StateMap<S>>;
   /**
    * Delete an instance outright, from memory and from every store layer.
    *
