@@ -239,6 +239,28 @@ async function theBoundary(): Promise<void> {
     quiet.json
   );
 
+  const noCount = await call("GET", "/map?limitPerState=oops");
+  check(
+    "a limit that is not a count is a 400, not a server error",
+    noCount.status === 400,
+    noCount
+  );
+  const limited = await call("GET", "/map?limitPerState=0");
+  check(
+    "a limit that is a count lists that many keys and says it left some out",
+    limited.status === 200 &&
+      (limited.json.reasons as string[]).includes("limit-reached"),
+    limited.json
+  );
+
+  const noDuration = await call("GET", "/quiet?for=wat");
+  check(
+    "a time that is not a duration is a 400 that says what one looks like",
+    noDuration.status === 400 &&
+      String(noDuration.json.message).includes("30s"),
+    noDuration
+  );
+
   const misspelt = await call("GET", "/quiet?state=helthy");
   check(
     "a state the entity does not have is a 400",

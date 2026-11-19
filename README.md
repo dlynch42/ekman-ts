@@ -110,18 +110,18 @@ await ekman.sweep();   // or `temporal: { sweepMs }` on the runtime, to sweep on
 
 // 7. Where the whole fleet is, in one call, and what one service knows.
 const map = await ekman.map("services");
-console.log(map.byState);
+for (const [state, entry] of Object.entries(map.byState)) {
+  console.log(state, entry?.count, entry?.keys);
+}
 console.log(ekman.entities.services.inspect("payments-api")?.values);
 
 await ekman.close();
 ```
 
 ```
-{
-  healthy: { count: 1, keys: [ 'services:auth-api' ] },
-  degraded: { count: 1, keys: [ 'services:payments-api' ] },
-  unreachable: { count: 1, keys: [ 'services:search-api' ] }
-}
+healthy 1 [ 'services:auth-api' ]
+degraded 1 [ 'services:payments-api' ]
+unreachable 1 [ 'services:search-api' ]
 { failures: 3, latencyMs: 1300 }
 ```
 

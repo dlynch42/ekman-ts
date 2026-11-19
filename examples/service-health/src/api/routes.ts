@@ -7,7 +7,7 @@
  * arrive as a rule's proposal or a freshness bound's.
  */
 
-import { isTransitionEvent } from "ekman";
+import { isTransitionEvent, parseDuration } from "ekman";
 import type { Probe } from "../entities/service";
 import { SERVICE_STATES } from "../entities/service";
 import { ekman, services } from "../lib/runtime";
@@ -39,6 +39,30 @@ function probeFrom(body: Record<string, unknown>): Probe {
     // Kept short. It is stored with every commit that follows it.
     ...(error === undefined ? {} : { error: error.slice(0, MAX_ERROR_LENGTH) }),
   };
+}
+
+const WHOLE_NUMBER = /^\d+$/;
+
+/**
+ * A count named in a URL. Checked here because it is text from outside: handed on as it
+ * came, anything that is not a count would be refused by the runtime as a mistake in this
+ * service's own configuration, and the caller would be told the server had failed.
+ */
+function countFrom(given: string, name: string): number {
+  if (!WHOLE_NUMBER.test(given)) {
+    throw new BadRequest(`${name} must be a whole number, 0 or more`);
+  }
+  return Number(given);
+}
+
+/** A duration named in a URL, such as `30s`, checked for the same reason. */
+function durationFrom(given: string, name: string): string {
+  try {
+    parseDuration(given, name);
+  } catch (error) {
+    throw new BadRequest((error as Error).message, { cause: error });
+  }
+  return given;
 }
 
 export const routes: readonly Route[] = [
@@ -101,7 +125,9 @@ export const routes: readonly Route[] = [
       // someone acting on "nothing is unreachable" needs to know it was the whole answer.
       const limit = ctx.query.get("limitPerState");
       const map = await services.map(
-        limit === null ? {} : { limitPerState: Number(limit) }
+        limit === null
+          ? {}
+          : { limitPerState: countFrom(limit, "limitPerState") }
       );
       return json(200, map);
     },
@@ -113,7 +139,7 @@ export const routes: readonly Route[] = [
     handle: async (ctx): Promise<Reply> => {
       // Which services have said nothing lately, with what was last known about each.
       // The same measurement the freshness bound uses, asked on demand.
-      const staleFor = ctx.query.get("for") ?? "30s";
+      const staleFor = durationFrom(ctx.query.get("for") ?? "30s", "for");
       const given = ctx.query.get("state");
       const state = SERVICE_STATES.find((known) => known === given);
       if (given !== null && state === undefined) {
