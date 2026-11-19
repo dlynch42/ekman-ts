@@ -715,6 +715,45 @@ describe("a rule across a reload", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it("does not send a failed proposal again once a snapshot says the rule is done", async () => {
+    // The handler fails, so nothing in the stream answers the proposal. The rule is done
+    // all the same, and a snapshot taken afterwards says so. The store hands the original
+    // match back beside that snapshot, and it must not read as a new one.
+    const dir = mkdtempSync(join(tmpdir(), "ekman-rules-"));
+    let calls = 0;
+    const alwaysThrows = services([tooMany], () => {
+      calls += 1;
+      return "throw";
+    });
+    const ekman = new Ekman({
+      entities: [alwaysThrows],
+      store: fileStore(dir),
+      // Room for one service, so a commit to another pushes the first out.
+      memory: { maxBytes: 50, eviction: { policy: "lru" } },
+      onUnhandled: () => undefined,
+    });
+    const api = ekman.entities.services;
+
+    await api.send("api", { type: "set", failures: 3 });
+    await vi.waitFor(() => expect(calls).toBe(1));
+    // Long enough for the refusal to be recorded, and no commit to this key after it:
+    // the match and the snapshot then carry the same sequence.
+    await new Promise((resolve) => setImmediate(resolve));
+    await api.send("other", { type: "noop" });
+    await vi.waitFor(() =>
+      expect(ekman.residentKeys).not.toContain("services:api")
+    );
+
+    // Still over the threshold, on a record rebuilt from the snapshot.
+    await api.send("api", failing);
+    await settled(ekman);
+
+    expect(calls).toBe(1);
+    expect(await matches(ekman)).toHaveLength(1);
+    await ekman.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it("stays fired when the stream is replayed with no snapshot", async () => {
     const store = memoryStore();
     const declining = services([tooMany], () => "decline");

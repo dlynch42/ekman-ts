@@ -41,6 +41,12 @@ export const config = Object.freeze({
 
   dataDir: str("DATA_DIR", join(defaultLogDir(), "service-health")),
 
+  /**
+   * How large one service's log may grow on disk before it is folded into a snapshot.
+   * Folding keeps what is known and gives up old history. Zero keeps every event.
+   */
+  logBytes: num("LOG_BYTES", 64 * KB),
+
   /** Resident memory for everything this process remembers about every service. */
   memoryBytes: num("MEMORY_BYTES", 256 * KB),
 

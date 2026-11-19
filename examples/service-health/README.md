@@ -99,6 +99,7 @@ proposed as `unreachable` on the first sweep after it.
 | `HOST` | `127.0.0.1` | Interface to listen on. Loopback unless told otherwise |
 | `DATA_DIR` | `.ekman/logs/service-health` | Where the file store writes |
 | `MEMORY_BYTES` | `262144` | Resident memory budget |
+| `LOG_BYTES` | `65536` | How large one service's log grows on disk before old events are folded into a snapshot. `0` keeps every event |
 | `FAILURES_BEFORE_DEGRADED` | `3` | Failed probes in a row before the rule proposes `degraded` |
 | `QUIET_AFTER_MS` | `60000` | Silence before the freshness bound proposes `unreachable` |
 | `SWEEP_MS` | `5000` | How often the freshness bound is evaluated |

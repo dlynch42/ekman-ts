@@ -14,7 +14,16 @@ export const ekman = new Ekman({
 
   // The file store is the commit authority. What is known about each service, how long it
   // has been in its state and when it was last heard from all survive a restart.
-  store: ["memory", { kind: "file", dir: config.dataDir }],
+  // A service is probed for as long as it exists, so its log is capped: past the cap the
+  // store folds old events into a snapshot. What is known survives; old history does not.
+  store: [
+    "memory",
+    {
+      kind: "file",
+      dir: config.dataDir,
+      retention: { perLogBytes: config.logBytes },
+    },
+  ],
 
   // What this process remembers has a ceiling. A service nobody has probed lately is
   // snapshotted out and comes back when its next probe arrives.

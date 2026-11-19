@@ -27,6 +27,9 @@ process.env.DATA_DIR = dir;
 process.env.QUIET_AFTER_MS = String(QUIET_AFTER_MS);
 process.env.SWEEP_MS = "40";
 process.env.FAILURES_BEFORE_DEGRADED = "3";
+// Small, so a service's log is folded into a snapshot within a few probes, as it would be
+// after hours of them at the default.
+process.env.LOG_BYTES = "600";
 // The prober is the application's loop. Here the test is the one sending probes.
 process.env.PROBE_MS = "0";
 
@@ -237,6 +240,39 @@ async function theBoundary(): Promise<void> {
       instances.length > 0 &&
       instances.every((match) => match.values !== undefined),
     quiet.json
+  );
+
+  // Enough probes that the store has folded this service's early history away.
+  for (let sent = 0; sent < 12; sent += 1) {
+    // biome-ignore lint/performance/noAwaitInLoops: one probe after another
+    await probe("auth-api", ok);
+  }
+  const folded = await call("GET", "/services/auth-api");
+  check(
+    "a service whose history has been folded away is still found, and says so",
+    folded.status === 200 &&
+      folded.json.state === "healthy" &&
+      folded.json.complete === false,
+    folded
+  );
+
+  const tooMany = await call("GET", `/map?limitPerState=${"9".repeat(400)}`);
+  check(
+    "a limit too large to be a count is a 400",
+    tooMany.status === 400,
+    tooMany
+  );
+
+  const big = await fetch(`${base}/services/auth-api/probes`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...ok, error: "x".repeat(64 * 1024) }),
+  });
+  check(
+    "a body over the limit is answered with a 413 the client can read",
+    big.status === 413 &&
+      ((await big.json()) as { error: string }).error === "payload_too_large",
+    big.status
   );
 
   const noCount = await call("GET", "/map?limitPerState=oops");

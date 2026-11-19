@@ -156,6 +156,9 @@ export class LatchFold {
   readonly #owed = new Map<string, EventCause>();
   /** The freshness bounds among the names in the two above. */
   readonly #stale = new Set<string>();
+  /** How many commits this fold has taken, and the count at which each name was fired. */
+  #commits = 0;
+  readonly #firedAt = new Map<string, number>();
 
   constructor(seed?: TemporalLatch) {
     this.merge(seed);
@@ -172,11 +175,12 @@ export class LatchFold {
    */
   moved(cause?: EventCause): void {
     const answered = cause === undefined ? [] : this.#answeredStale(cause);
+    this.#commits += 1;
     this.#fired.clear();
     this.#owed.clear();
     this.#stale.clear();
     for (const name of answered) {
-      this.#fired.add(name);
+      this.fire(name);
       this.#stale.add(name);
     }
   }
@@ -186,6 +190,9 @@ export class LatchFold {
     if (event.type === "violation") {
       const { kind, name } = event.constraint;
       if (kind === "rule") {
+        if (this.#sameMatch(name)) {
+          return;
+        }
         // A rule that matches again was armed again in between, which no event records.
         this.#fired.delete(name);
       } else if (
@@ -198,7 +205,7 @@ export class LatchFold {
         this.#stale.add(name);
       }
       if (event.policy === "warn") {
-        this.#fired.add(event.constraint.name);
+        this.fire(name);
       } else {
         this.#owed.set(event.constraint.name, event.cause);
       }
@@ -206,6 +213,7 @@ export class LatchFold {
     }
 
     if (event.type === "transition") {
+      this.#commits += 1;
       this.#heard(event.cause);
     }
     const answered =
@@ -240,6 +248,7 @@ export class LatchFold {
   fire(name: string): void {
     this.#owed.delete(name);
     this.#fired.add(name);
+    this.#firedAt.set(name, this.#commits);
   }
 
   /**
@@ -298,6 +307,19 @@ export class LatchFold {
       owed: Object.fromEntries(this.#owed),
       ...(this.#stale.size === 0 ? {} : { stale: [...this.#stale] }),
     };
+  }
+
+  /**
+   * Whether a rule's violation is the match it is already done for, read a second time.
+   *
+   * A rule is armed again by a commit that stops its condition holding, and matches
+   * again at a later one. So a violation with no commit since the rule was marked done
+   * cannot be a new match. It is the one a snapshot already accounts for, handed back
+   * beside that snapshot because it carries the snapshot's own sequence. Taking it for a
+   * new match would make a proposal whose handler failed owed all over again.
+   */
+  #sameMatch(name: string): boolean {
+    return this.#fired.has(name) && this.#firedAt.get(name) === this.#commits;
   }
 
   /** The freshness bounds whose owed trigger is the one with this cause. */

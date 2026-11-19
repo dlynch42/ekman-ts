@@ -84,27 +84,53 @@ function match(route: Route, method: string, segments: readonly string[]) {
   return { name };
 }
 
+/**
+ * Read a request body, up to the configured limit and no further.
+ *
+ * Counted as it arrives, on the stream's own events. Past the limit nothing more is kept:
+ * the rest is read and thrown away, so the client can finish sending and read the 413.
+ * Leaving the stream early instead, as breaking out of a `for await` over it does,
+ * destroys it, and the client sees a reset connection where the answer should be.
+ */
+function received(req: IncomingMessage): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let refused = false;
+
+    req.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (refused) {
+        return;
+      }
+      if (size > config.maxBodyBytes) {
+        refused = true;
+        chunks.length = 0;
+        reject(
+          new PayloadTooLarge(
+            `request body is over ${config.maxBodyBytes} bytes`
+          )
+        );
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
+
 async function readBody(
   req: IncomingMessage
 ): Promise<Record<string, unknown>> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of req) {
-    size += (chunk as Buffer).length;
-    if (size > config.maxBodyBytes) {
-      throw new PayloadTooLarge(
-        `request body is over ${config.maxBodyBytes} bytes`
-      );
-    }
-    chunks.push(chunk as Buffer);
-  }
-  if (size === 0) {
+  const raw = await received(req);
+  if (raw.length === 0) {
     return {};
   }
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    parsed = JSON.parse(raw.toString("utf8"));
   } catch (error) {
     throw new BadRequest("body is not valid JSON", { cause: error });
   }

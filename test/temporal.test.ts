@@ -239,9 +239,38 @@ describe("rebuilding what a stay in a state has already been told", () => {
         fold([
           matched("reject"),
           commit(2, "a", "a", { type: "rule.matched", id: "t7" }),
+          // The commit that stopped the condition holding, then the one that made it
+          // hold again. A second match always has both behind it.
+          commit(3, "a", "a", { type: "probe", id: "t8" }),
+          commit(4, "a", "a", { type: "probe", id: "t8" }),
           matched("reject", "t9"),
         ])
       ).toEqual({
+        fired: [],
+        owed: { "too-many": { type: "rule.matched", id: "t9" } },
+      });
+    });
+
+    it("does not take a match a snapshot already accounts for as a new one", () => {
+      // A snapshot says the rule is done, and the store hands back the violation that
+      // made it so, since it carries the snapshot's own sequence. With no commit in
+      // between it cannot be a second match.
+      const seeded = new LatchFold({ fired: ["too-many"], owed: {} });
+      seeded.apply(matched("reject"));
+      expect(seeded.result()).toEqual({ fired: ["too-many"], owed: {} });
+
+      // The same holds for one read twice in a stream, under either policy.
+      expect(fold([matched("warn"), matched("warn")])).toEqual({
+        fired: ["too-many"],
+        owed: {},
+      });
+    });
+
+    it("still reads a match after a later commit as a rule armed again", () => {
+      const seeded = new LatchFold({ fired: ["too-many"], owed: {} });
+      seeded.apply(commit(2, "a", "a", { type: "probe", id: "t8" }));
+      seeded.apply(matched("reject", "t9"));
+      expect(seeded.result()).toEqual({
         fired: [],
         owed: { "too-many": { type: "rule.matched", id: "t9" } },
       });

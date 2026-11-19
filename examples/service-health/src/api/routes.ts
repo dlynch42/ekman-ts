@@ -7,7 +7,7 @@
  * arrive as a rule's proposal or a freshness bound's.
  */
 
-import { isTransitionEvent, parseDuration } from "ekman";
+import { parseDuration } from "ekman";
 import type { Probe } from "../entities/service";
 import { SERVICE_STATES } from "../entities/service";
 import { ekman, services } from "../lib/runtime";
@@ -49,10 +49,12 @@ const WHOLE_NUMBER = /^\d+$/;
  * service's own configuration, and the caller would be told the server had failed.
  */
 function countFrom(given: string, name: string): number {
-  if (!WHOLE_NUMBER.test(given)) {
+  const count = Number(given);
+  // Digits alone are not enough: enough of them is a number too large to be a count.
+  if (!(WHOLE_NUMBER.test(given) && Number.isSafeInteger(count))) {
     throw new BadRequest(`${name} must be a whole number, 0 or more`);
   }
-  return Number(given);
+  return count;
 }
 
 /** A duration named in a URL, such as `30s`, checked for the same reason. */
@@ -86,19 +88,26 @@ export const routes: readonly Route[] = [
     method: "GET",
     path: "/services/:name",
     handle: async (ctx): Promise<Reply> => {
-      // History reads through the store, so this answers for a service that is not in
-      // memory as well as for one that is.
-      const { events, complete } = await services.history(ctx.name);
-      const last = events.filter(isTransitionEvent).at(-1);
-      if (last === undefined) {
+      // What a service is now comes from the instance, in memory or in the store, and
+      // never from its history. A store folds old events into a snapshot, so a service
+      // that plainly exists can have a history with no commit left in it.
+      const key = services.key(ctx.name);
+      const current =
+        services.inspect(ctx.name) ??
+        (await services.query({ includeValues: true })).instances.find(
+          (match) => match.key === key
+        );
+      if (current === undefined) {
         return json(404, { error: "not_found", message: "no such service" });
       }
+
+      const { events, complete } = await services.history(ctx.name);
       return json(200, {
-        key: last.key,
-        state: last.to,
-        values: last.values,
-        seq: last.seq,
-        lastCommittedAt: last.at,
+        key,
+        state: current.state,
+        values: current.values,
+        seq: current.seq,
+        lastCommittedAt: current.lastCommittedAt,
         // Every proposal made to this service and why, straight out of its own stream.
         proposals: events.flatMap((event) =>
           event.type === "violation"
@@ -112,6 +121,8 @@ export const routes: readonly Route[] = [
               ]
             : []
         ),
+        // False when the store has folded part of this service's history away, in which
+        // case the list above is what is left of it.
         complete,
       });
     },
