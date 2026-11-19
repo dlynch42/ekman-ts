@@ -97,11 +97,11 @@ export class InstanceRecord<
   readonly #temporal = new LatchFold();
   #stateEntry = 0;
   /**
-   * Rules whose proposal is queued or running, with the entry into the state each was
-   * raised for. Memory only: a key with a trigger queued is never evicted, so there is
-   * nothing here for a store to hold.
+   * Rules whose proposal is queued or running, with the id of that proposal's trigger.
+   * Memory only: a key with a trigger queued is never evicted, so there is nothing here
+   * for a store to hold.
    */
-  readonly #proposing = new Map<string, number>();
+  readonly #proposing = new Map<string, string>();
   /** How many callers are holding this record resident. See `pin`. */
   #pins = 0;
 
@@ -355,26 +355,49 @@ export class InstanceRecord<
     this.#proposing.delete(rule);
   }
 
-  /** Whether a rule's proposal for the current stay is still on its way to a handler. */
+  /** Whether a proposal this rule raised is still on its way to a handler. */
   isProposing(rule: string): boolean {
-    return this.#proposing.get(rule) === this.#stateEntry;
+    return this.#proposing.has(rule);
   }
 
-  /** Note that a rule's proposal has been sent and not yet answered. */
-  proposing(rule: string): void {
-    this.#proposing.set(rule, this.#stateEntry);
+  /** Note that a rule's proposal has been sent, under this trigger id, and not yet answered. */
+  proposing(rule: string, id: string): void {
+    this.#proposing.set(rule, id);
   }
 
-  /** Note that a rule's proposal was answered, unless a later stay has raised its own. */
-  proposed(rule: string, entry: number): void {
-    if (this.#proposing.get(rule) === entry) {
+  /**
+   * Note that a proposal was answered.
+   *
+   * Only the proposal the rule is waiting on counts. A rule can be armed again and match
+   * again while an earlier proposal is still queued, and that earlier one being answered
+   * says nothing about the later one, which is still on its way.
+   */
+  proposed(rule: string, id: string): void {
+    if (this.#proposing.get(rule) === id) {
       this.#proposing.delete(rule);
+    }
+  }
+
+  /**
+   * Record that a proposal was refused for good, in a way the stream does not show, so
+   * the rule is done until it is armed again.
+   *
+   * Only while that proposal is the one the rule is still owed. If the rule was armed
+   * again or the instance moved in the meantime, the refusal is about a match that is
+   * over, and marking the rule done would silence the next one.
+   */
+  refused(rule: string, id: string): void {
+    if (this.#temporal.owed(rule)?.id === id) {
+      this.#temporal.fire(rule);
     }
   }
 
   #rearmTemporal(): void {
     this.#stateEntry += 1;
     this.#temporal.moved();
+    // A proposal still queued was raised for the stay that just ended. The new one
+    // raises its own.
+    this.#proposing.clear();
   }
 
   /**

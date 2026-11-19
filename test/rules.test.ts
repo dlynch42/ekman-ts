@@ -20,6 +20,15 @@ interface Known extends Record<string, unknown> {
   failures: number;
 }
 
+/** Holds a `set` trigger sent with `gated: true` inside its handler until released. */
+let gate: Promise<void> = Promise.resolve();
+let release: () => void = () => undefined;
+function closeGate(): void {
+  gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+}
+
 const tooMany: RuleConstraint<Health, Known> = {
   name: "too-many",
   in: "healthy",
@@ -47,7 +56,11 @@ function services(
           });
         }
         if (trigger.type === "set") {
-          return stay({ failures: trigger.failures as number });
+          const failures = trigger.failures as number;
+          // Held open by a test that needs something queued behind this commit.
+          return trigger.gated === true
+            ? gate.then(() => stay({ failures }))
+            : stay({ failures });
         }
         if (trigger.type !== DEFAULT_RULE_TRIGGER) {
           return stay();
@@ -206,6 +219,121 @@ describe("a rule", () => {
     expect(await matches(ekman)).toHaveLength(1);
     await ekman.close();
   });
+
+  it("does not send a proposal twice when an earlier one is answered while it is still queued", async () => {
+    const seen: string[] = [];
+    const ekman = new Ekman({
+      entities: [
+        services([tooMany], (trigger) => {
+          seen.push(trigger.id as string);
+          return "decline";
+        }),
+      ],
+    });
+    const api = ekman.entities.services;
+    closeGate();
+
+    // The first proposal is queued behind two more commits: one that stops the condition
+    // holding, which arms the rule again, and one that makes it hold again, which raises
+    // a second proposal. That last commit is held open so a trigger can be queued between
+    // the two proposals.
+    const batch = Promise.all([
+      api.send("api", { type: "set", failures: 3 }),
+      api.send("api", { type: "probe", ok: true }),
+      api.send("api", { type: "set", failures: 4, gated: true }),
+    ]);
+    await vi.waitFor(async () => expect((await matches(ekman)).length).toBe(1));
+    const between = api.send("api", failing);
+    release();
+    await batch;
+    await between;
+    await settled(ekman);
+
+    // The inbox ran: first proposal, the commit between, second proposal. The first being
+    // answered must not make the commit between send the second again.
+    expect(await matches(ekman)).toHaveLength(2);
+    expect(seen).toHaveLength(2);
+    expect(new Set(seen).size).toBe(2);
+    await ekman.close();
+  });
+
+  it("does not silence a rule over the refusal of a proposal from an earlier match", async () => {
+    let calls = 0;
+    const ekman = new Ekman({
+      entities: [
+        services([tooMany], () => {
+          calls += 1;
+          return calls === 1 ? "throw" : "decline";
+        }),
+      ],
+      onUnhandled: () => undefined,
+    });
+    const api = ekman.entities.services;
+
+    // Queued together, so the first proposal runs after the rule has been armed again
+    // and has matched again. Its handler fails, which is a refusal of the first match.
+    await Promise.all([
+      api.send("api", { type: "set", failures: 3 }),
+      api.send("api", { type: "probe", ok: true }),
+      api.send("api", { type: "set", failures: 4 }),
+    ]);
+    await vi.waitFor(() => expect(calls).toBe(2));
+    await settled(ekman);
+
+    // Armed again and matching again: the rule has to be free to say so a third time.
+    await api.send("api", { type: "probe", ok: true });
+    await api.send("api", { type: "set", failures: 5 });
+    await vi.waitFor(() => expect(calls).toBe(3));
+
+    expect(await matches(ekman)).toHaveLength(3);
+    await ekman.close();
+  });
+
+  it.each([
+    ["nothing", null, "null"],
+    ["undefined", undefined, "undefined"],
+    ["a string", "no such field", "no such field"],
+  ])(
+    "counts a condition that throws %s as holding, and still commits",
+    async (_what, thrown, said) => {
+      const audited: number[] = [];
+      const ekman = new Ekman({
+        entities: [
+          services(
+            [
+              {
+                name: "broken",
+                when: () => {
+                  throw thrown;
+                },
+              },
+            ],
+            () => "decline"
+          ),
+        ],
+        audit: [
+          {
+            name: "seen",
+            deliver: (event) => {
+              audited.push(event.seq);
+            },
+          },
+        ],
+      });
+
+      // The condition runs after the commit is applied. Whatever it throws, the sender is
+      // told the commit landed and the audit sink still hears of it.
+      const committed = await ekman.entities.services.send("api", failing);
+      expect(committed.seq).toBe(1);
+      await settled(ekman);
+
+      expect((await matches(ekman)).map((match) => match.reason)).toEqual([
+        `the condition threw: ${said}`,
+      ]);
+      await vi.waitFor(() => expect(audited).toContain(1));
+      await ekman.close();
+    }
+  );
 
   it("takes a string from the condition as the reason", async () => {
     const ekman = new Ekman({

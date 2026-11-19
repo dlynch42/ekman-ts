@@ -10,6 +10,7 @@ import type {
   RuleTrigger,
   TemporalTrigger,
 } from "./constraints";
+import { thrownMessage } from "./constraints";
 import type { DispatchDeps } from "./dispatch";
 import { dispatch } from "./dispatch";
 import { EkmanError } from "./errors";
@@ -1162,8 +1163,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       ...(rule.propose === undefined ? {} : { propose: rule.propose }),
       reason,
     };
-    const entry = instance.stateEntry;
-    instance.proposing(rule.name);
+    instance.proposing(rule.name, cause.id);
 
     this.send(key, trigger)
       .then(
@@ -1174,9 +1174,9 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
         }
       )
       .then((outcome) => {
-        instance.proposed(rule.name, entry);
+        instance.proposed(rule.name, cause.id);
         if (outcome === "refused") {
-          instance.markFired(rule.name, entry);
+          instance.refused(rule.name, cause.id);
         }
         this.#emit({
           type: "constraint.escalated",
@@ -2191,7 +2191,7 @@ function heldBy(
   try {
     outcome = rule.when(snapshot);
   } catch (thrown) {
-    return `the condition threw: ${(thrown as Error).message}`;
+    return `the condition threw: ${thrownMessage(thrown)}`;
   }
   if (outcome === false) {
     return;

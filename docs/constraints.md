@@ -227,10 +227,13 @@ delivers nothing and is exempt from the last.
 The proposal is queued behind the commit that raised it, in the instance's own inbox, like any
 other trigger. If it is turned away for a reason that passes, such as a full inbox, it is sent
 again after the instance's next commit, under the same id, and the match is recorded only
-once. A proposal the handler fails on is not retried. Either way the failure goes to
-`onUnhandled` with `source: "escalation"`.
+once. A proposal the handler fails on is not retried by the runtime that sent it. A handler
+failure is not an event in the stream, so a runtime that later rebuilds the instance from its
+stream alone, with no snapshot, still sees the proposal as owed and sends it once more. Either
+way the failure goes to `onUnhandled` with `source: "escalation"`.
 
-A condition that throws counts as holding, with what it threw as the reason. A broken
+A condition that throws counts as holding, with what it threw as the reason, whatever was
+thrown. A broken
 condition read as "does not hold" would be a rule that silently never fires.
 
 ## Time in state

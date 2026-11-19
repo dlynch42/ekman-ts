@@ -714,6 +714,40 @@ describe("checking constraints", () => {
   });
 });
 
+describe("a check that throws something that is not an error", () => {
+  it.each([
+    ["nothing", null, "null"],
+    ["undefined", undefined, "undefined"],
+    ["a string", "bad input", "bad input"],
+  ])(
+    "reports %s as the reason and does not throw again",
+    (_what, thrown, said) => {
+      const compiled = compile({
+        invariants: [
+          {
+            name: "broken",
+            check: () => {
+              throw thrown;
+            },
+          },
+        ],
+      });
+
+      const violations = checkConstraints(compiled, {
+        next: { state: "pending", values: {} },
+        instance: snapshot,
+        trigger,
+        fromStateId: new States(STATES).idOf(snapshot.state),
+        transitioning: false,
+        mutatingValues: true,
+      });
+      expect(violations.map((violation) => violation.reason)).toEqual([
+        `the check threw: ${said}`,
+      ]);
+    }
+  );
+});
+
 describe("the error a refused result carries", () => {
   it("classifies as ConstraintViolation so an error handler can key on it", () => {
     const error = violationError(

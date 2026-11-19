@@ -113,9 +113,6 @@ function buildConstraints(spec: ConstraintsSpec): ConstraintsConfig {
   };
 }
 
-/** The trigger a rule's condition is read against: none, so a `trigger` source finds nothing. */
-const NO_TRIGGER: Trigger = Object.freeze({ type: "" });
-
 /**
  * A rule's condition, in the same grammar as a check and with the sense turned round: the
  * condition holds when the check does. It is read against the committed instance, which
@@ -127,7 +124,12 @@ function compileCondition(spec: CheckSpec): RuleConstraint["when"] {
       throw new Error(spec.throw);
     }
 
-    const subject = readSubject(spec, instance, NO_TRIGGER);
+    // A rule is evaluated against no trigger, so a `trigger` source reads nothing,
+    // whatever path it names.
+    const subject =
+      spec.trigger === undefined
+        ? readSubject(spec, instance, { type: "" })
+        : undefined;
     return holds(spec, subject) ? (spec.reason ?? true) : false;
   };
 }

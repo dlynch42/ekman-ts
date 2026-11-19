@@ -955,7 +955,7 @@ function run<S extends string, V extends Values, T extends TriggerLike>(
       kind,
       name: constraint.name,
       policy: constraint.policy,
-      reason: `the check threw: ${(thrown as Error).message}`,
+      reason: `the check threw: ${thrownMessage(thrown)}`,
     };
   }
 
@@ -969,6 +969,16 @@ function run<S extends string, V extends Values, T extends TriggerLike>(
     policy: constraint.policy,
     reason: typeof outcome === "string" ? outcome : "the check did not hold",
   };
+}
+
+/**
+ * What something thrown has to say for itself, whatever it is.
+ *
+ * Anything can be thrown: `null`, `undefined`, a string. Reading `.message` off the first
+ * two throws again, from inside the code that was reporting the first throw.
+ */
+export function thrownMessage(thrown: unknown): string {
+  return thrown instanceof Error ? thrown.message : String(thrown);
 }
 
 function resolvePolicy(

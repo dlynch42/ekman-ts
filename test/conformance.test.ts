@@ -159,6 +159,24 @@ describe("detecting a broken expectation", () => {
     ]);
   });
 
+  it("reads nothing from a trigger in a rule's condition, since a rule has none", async () => {
+    const result = await runScenario(
+      corrupt("core/171-a-rule-fires-once-per-edge", (scenario) => {
+        // Every trigger has a type, so this would hold for any trigger at all.
+        scenario.given.entities[0].constraints.rules[0].when = {
+          trigger: "type",
+          exists: true,
+        };
+      })
+    );
+
+    // The rule never matches, so both of the scenario's violations are missing.
+    expect(result.status).toBe("failed");
+    expect(result.failures[0]).toContain(
+      'events["services:api"]: expected 11 events, got 7'
+    );
+  });
+
   it("notices telemetry that was never emitted", async () => {
     const result = await runScenario(
       corrupt("core/140-temporal-escalates-as-a-trigger", (scenario) => {
