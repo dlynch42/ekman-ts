@@ -1,6 +1,5 @@
 import { sealConstraints } from "./compiled";
 import { assertKnownKeys } from "./config";
-import type { CompiledTemporal } from "./constraints";
 import { compileConstraints } from "./constraints";
 import { EkmanError } from "./errors";
 import { buildKey, KEY_SEPARATOR, segmentFault } from "./key";
@@ -103,7 +102,19 @@ export function defineEntity<
       ? undefined
       : compileConstraints<S, V, T>(name, config.constraints, states);
 
-  assertEscalationsRecognized(name, triggers, compiled?.temporal ?? []);
+  assertEscalationsRecognized(
+    name,
+    triggers,
+    "temporal constraint",
+    compiled?.temporal ?? []
+  );
+  assertEscalationsRecognized(name, triggers, "rule", compiled?.rules ?? []);
+  assertEscalationsRecognized(
+    name,
+    triggers,
+    "stale constraint",
+    compiled?.stale ?? []
+  );
 
   return Object.freeze({
     name,
@@ -250,17 +261,22 @@ function assertEntityName(name: string): void {
 }
 
 /**
- * Refuse a time bound whose escalation the entity would refuse on arrival.
+ * Refuse a time bound or a rule whose trigger the entity would refuse on arrival.
  *
- * An escalation is delivered as a trigger. An entity that declares which trigger types it
- * recognizes and leaves this one out would refuse it as unknown, and the instance the bound
- * was watching would stay exactly where it was stuck. A bound that only warns delivers
- * nothing, so it is not held to this.
+ * Both deliver a trigger. An entity that declares which trigger types it recognizes and
+ * leaves this one out would refuse it as unknown, and the instance being watched would
+ * stay exactly where it was. One that only warns delivers nothing, so it is not held to
+ * this.
  */
 function assertEscalationsRecognized(
   entity: string,
   triggers: ReadonlySet<string> | null,
-  bounds: readonly CompiledTemporal[]
+  what: string,
+  bounds: readonly {
+    readonly name: string;
+    readonly trigger: string;
+    readonly policy: "reject" | "warn";
+  }[]
 ): void {
   if (triggers === null) {
     return;
@@ -270,9 +286,9 @@ function assertEscalationsRecognized(
     if (bound.policy !== "warn" && !triggers.has(bound.trigger)) {
       throw new EkmanError(
         "INVALID_CONFIG",
-        `entity "${entity}": temporal constraint "${bound.name}" delivers trigger type ` +
+        `entity "${entity}": ${what} "${bound.name}" delivers trigger type ` +
           `"${bound.trigger}", which is not in the declared triggers list. Add it to ` +
-          "`triggers`, or set `trigger` on the constraint to one that is declared."
+          `\`triggers\`, or set \`trigger\` on the ${what} to one that is declared.`
       );
     }
   }
@@ -295,6 +311,8 @@ const CONSTRAINT_KEYS = [
   "guards",
   "invariants",
   "temporal",
+  "rules",
+  "stale",
 ] as const;
 
 const STATE_KEYS = ["handler", ...POLICY_KEYS] as const;
@@ -305,6 +323,8 @@ const DECLARATION_KEYS = {
   guards: ["name", "on", "from", "policy", "check"],
   invariants: ["name", "in", "policy", "check"],
   temporal: ["name", "in", "within", "escalateTo", "trigger", "policy"],
+  rules: ["name", "in", "when", "propose", "trigger", "policy"],
+  stale: ["name", "in", "after", "propose", "trigger", "policy"],
 } as const;
 
 /**

@@ -1,0 +1,179 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/148-a-declined-stale-proposal-is-not-repeated",
+  "name": "a stale bound fires once per silence: the commit that answers its trigger does not arm it again, and the next commit from anything else does",
+  "level": "core",
+  "given": {
+    "runtime": {
+      "clock": {
+        "start": 0,
+        "stepMs": 0
+      }
+    },
+    "entities": [
+      {
+        "name": "services",
+        "initial": "healthy",
+        "constraints": {
+          "stale": [
+            {
+              "name": "gone-quiet",
+              "in": ["healthy"],
+              "after": 1000,
+              "propose": "unreachable"
+            }
+          ]
+        },
+        "states": [
+          {
+            "state": "healthy",
+            "cases": [
+              {
+                "when": {
+                  "trigger": "constraint.stale"
+                },
+                "do": {
+                  "result": "stay"
+                }
+              }
+            ],
+            "else": {
+              "result": "stay"
+            }
+          },
+          {
+            "state": "unreachable",
+            "else": {
+              "result": "stay"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "services:a",
+        "trigger": {
+          "type": "probe"
+        }
+      }
+    },
+    {
+      "advance": 1500
+    },
+    {
+      "sweep": true
+    },
+    {
+      "advance": 1500
+    },
+    {
+      "sweep": true
+    },
+    {
+      "advance": 5000
+    },
+    {
+      "sweep": true
+    },
+    {
+      "send": {
+        "key": "services:a",
+        "trigger": {
+          "type": "probe"
+        }
+      }
+    },
+    {
+      "advance": 1500
+    },
+    {
+      "sweep": true
+    }
+  ],
+  "then": {
+    "events": {
+      "services:a": [
+        {
+          "type": "transition",
+          "from": null,
+          "to": "healthy",
+          "seq": 0
+        },
+        {
+          "type": "transition",
+          "from": "healthy",
+          "to": "healthy",
+          "seq": 1,
+          "at": 0
+        },
+        {
+          "type": "violation",
+          "seq": 1,
+          "at": 1500,
+          "policy": "reject",
+          "constraint": {
+            "kind": "stale",
+            "name": "gone-quiet"
+          },
+          "reason": "has committed nothing for 1500ms, over its bound of 1000ms",
+          "cause": {
+            "type": "constraint.stale",
+            "id": "t2"
+          }
+        },
+        {
+          "type": "transition",
+          "from": "healthy",
+          "to": "healthy",
+          "seq": 2,
+          "at": 1500,
+          "cause": {
+            "type": "constraint.stale",
+            "id": "t2"
+          }
+        },
+        {
+          "type": "transition",
+          "from": "healthy",
+          "to": "healthy",
+          "seq": 3,
+          "at": 8000
+        },
+        {
+          "type": "violation",
+          "seq": 3,
+          "at": 9500,
+          "policy": "reject",
+          "constraint": {
+            "kind": "stale",
+            "name": "gone-quiet"
+          },
+          "reason": "has committed nothing for 1500ms, over its bound of 1000ms",
+          "cause": {
+            "type": "constraint.stale",
+            "id": "t5"
+          }
+        },
+        {
+          "type": "transition",
+          "from": "healthy",
+          "to": "healthy",
+          "seq": 4,
+          "at": 9500,
+          "cause": {
+            "type": "constraint.stale",
+            "id": "t5"
+          }
+        }
+      ]
+    },
+    "state": {
+      "services:a": {
+        "state": "healthy"
+      }
+    }
+  }
+}

@@ -17,6 +17,11 @@
  *   incident handler is idempotent for that reason, not by accident.
  * - This is a reaction, not a transaction. If opening the incident is genuinely required
  *   for correctness, it belongs in the caller that owns both, not here.
+ *
+ * It is also not a rule, though it reads like one: "when a deployment fails, open an
+ * incident". A rule in an entity's constraints watches one instance and proposes a move to
+ * that same instance. This reaches from a deployment to an incident, which is a different
+ * key with its own inbox and its own history, so it stays out here.
  */
 
 import type { AuditSink, Trigger } from "ekman";

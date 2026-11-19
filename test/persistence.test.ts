@@ -1671,7 +1671,15 @@ describe("what a reload brings back", () => {
       values: before.inspected?.values,
     });
     expect(seen.row).toEqual([
-      { ...before.row[0], seq: 6, enteredAt: 1000, ageMs: 2000 },
+      {
+        ...before.row[0],
+        seq: 6,
+        enteredAt: 1000,
+        ageMs: 2000,
+        // Time in state kept running from the move. The last commit was just now.
+        lastCommittedAt: clock.now(),
+        staleMs: 0,
+      },
     ]);
     await after.close();
   });
@@ -1699,8 +1707,15 @@ describe("what a reload brings back", () => {
     await second.entities.parcels.send("a", { type: "noop" });
     const after = await picture(second);
     // The trigger that loaded it committed once, and nothing else moved.
-    expect(after.inspected).toEqual({ ...before.inspected, seq: 4 });
-    expect(after.row).toEqual([{ ...before.row[0], seq: 4 }]);
+    expect(after.inspected).toEqual({
+      ...before.inspected,
+      seq: 4,
+      // The one clock that did move: the instance was just heard from.
+      lastCommittedAt: clock.now(),
+    });
+    expect(after.row).toEqual([
+      { ...before.row[0], seq: 4, lastCommittedAt: clock.now(), staleMs: 0 },
+    ]);
     await second.close();
     rmSync(dir, { recursive: true, force: true });
   });
@@ -1730,8 +1745,15 @@ describe("what a reload brings back", () => {
     const after = await picture(second);
 
     // The trigger that loaded it committed once, and nothing else moved.
-    expect(after.inspected).toEqual({ ...before.inspected, seq: 4 });
-    expect(after.row).toEqual([{ ...before.row[0], seq: 4 }]);
+    expect(after.inspected).toEqual({
+      ...before.inspected,
+      seq: 4,
+      // The one clock that did move: the instance was just heard from.
+      lastCommittedAt: clock.now(),
+    });
+    expect(after.row).toEqual([
+      { ...before.row[0], seq: 4, lastCommittedAt: clock.now(), staleMs: 0 },
+    ]);
     const stuck = await second.query({
       entity: "parcels",
       state: "shipped",

@@ -1,7 +1,13 @@
 import { EkmanError } from "./errors";
 import type { EkmanEvent } from "./events";
 import type { LoadResult, ReplayedState, Store, StoreSnapshot } from "./store";
-import { EMPTY_SEQ, entityOf, previousSeq, replay } from "./store";
+import {
+  EMPTY_SEQ,
+  entityOf,
+  lastCommitOf,
+  previousSeq,
+  replay,
+} from "./store";
 
 /** A cache layer that could not be read, written or cleared, for the runtime to report. */
 export interface CacheFailure {
@@ -253,6 +259,7 @@ export class Caches {
       seq: current.seq,
       enteredAt: current.enteredAt,
       at: this.#now(),
+      ...lastCommitOf(current),
       ...(current.temporal === undefined ? {} : { temporal: current.temporal }),
     });
 

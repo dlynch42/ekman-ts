@@ -3,6 +3,7 @@ import type { ConstraintsConfig } from "../src/constraints";
 import {
   checkConstraints,
   compileConstraints,
+  DEFAULT_RULE_TRIGGER,
   DEFAULT_TEMPORAL_TRIGGER,
   rejection,
   violationError,
@@ -39,6 +40,8 @@ const snapshot: InstanceSnapshot = Object.freeze({
   state: "pending",
   values: Object.freeze({ total: 5 }),
   seq: 1,
+  enteredAt: 0,
+  lastCommittedAt: 0,
 });
 
 const trigger: Trigger = { type: "approve", id: "t1" };
@@ -302,6 +305,138 @@ describe("compiling constraints", () => {
         temporal: [{ in: "pending", within: 10, policy: "off" }],
       })
     ).toBeUndefined();
+  });
+});
+
+describe("compiling rules", () => {
+  const held = () => true;
+
+  it("compiles a rule with its defaults", () => {
+    const compiled = compile({
+      rules: [{ in: "pending", when: held, propose: "approved" }],
+    });
+
+    expect(compiled?.rules).toEqual([
+      {
+        name: "rule:pending:approved",
+        in: new Set(["pending"]),
+        when: held,
+        propose: "approved",
+        trigger: DEFAULT_RULE_TRIGGER,
+        policy: "reject",
+      },
+    ]);
+    // Evaluated after a commit, so it is not one of the checks a commit waits on.
+    expect(compiled?.checksAtCommit).toBe(false);
+  });
+
+  it("names a rule by its position when it proposes nothing", () => {
+    const compiled = compile({
+      rules: [
+        { in: ["pending", "approved"], when: held },
+        { when: held, name: "anywhere" },
+        { when: held },
+      ],
+    });
+
+    expect(compiled?.rules.map((rule) => rule.name)).toEqual([
+      "rule:pending|approved:0",
+      "anywhere",
+      "rule:*:2",
+    ]);
+  });
+
+  it("gives each state the rules watching it, in declaration order", () => {
+    const compiled = compile({
+      rules: [
+        { name: "everywhere", when: held },
+        { name: "pending-only", in: "pending", when: held },
+        { name: "two", in: ["approved", "shipped"], when: held },
+      ],
+    });
+    const watching = (state: string) =>
+      compiled?.rulesByState.get(state)?.map((rule) => rule.name);
+
+    expect(watching("pending")).toEqual(["everywhere", "pending-only"]);
+    expect(watching("approved")).toEqual(["everywhere", "two"]);
+    expect(watching("shipped")).toEqual(["everywhere", "two"]);
+  });
+
+  it("does not watch the state a rule proposes, where there is nothing to ask", () => {
+    const compiled = compile({
+      rules: [{ when: held, propose: "shipped" }],
+    });
+
+    expect([...(compiled?.rulesByState.keys() ?? [])]).toEqual([
+      "pending",
+      "approved",
+    ]);
+  });
+
+  it("drops a rule that is off, and compiles to nothing when that leaves nothing", () => {
+    expect(compile({ rules: [{ when: held, policy: "off" }] })).toBeUndefined();
+  });
+
+  it.each<[string, object]>([
+    ["a state it watches", { in: "nowhere", when: held }],
+    ["a state it proposes", { when: held, propose: "nowhere" }],
+    ["a condition that is not a function", { when: "always" }],
+    ["a policy that is not one", { when: held, policy: "loud" }],
+  ])("refuses a rule naming %s that does not exist", (_what, rule) => {
+    expect(code(() => compile({ rules: [rule as never] }))).toBe(
+      "INVALID_CONFIG"
+    );
+  });
+
+  it("refuses a proposal the declared transitions do not allow from a watched state", () => {
+    const transitions = {
+      allow: { pending: ["approved"], approved: ["shipped"] },
+    };
+
+    expect(() =>
+      compile({
+        transitions,
+        rules: [{ in: "pending", when: held, propose: "shipped" }],
+      })
+    ).toThrow(
+      'rule on "pending" asks for "shipped", which is not a declared transition'
+    );
+    // Watching the proposed state as well asks nothing of the graph there.
+    expect(
+      compile({
+        transitions,
+        rules: [
+          { in: ["pending", "approved"], when: held, propose: "approved" },
+        ],
+      })?.rules
+    ).toHaveLength(1);
+  });
+
+  it("does not hold a rule that watches every state to the graph", () => {
+    const compiled = compile({
+      transitions: { allow: { pending: ["approved"] } },
+      rules: [{ when: held, propose: "approved" }],
+    });
+
+    expect(compiled?.rules).toHaveLength(1);
+  });
+
+  it("refuses two rules with one name, and a rule sharing a time bound's name", () => {
+    expect(() =>
+      compile({
+        rules: [
+          { in: "pending", when: held, propose: "approved" },
+          { in: "pending", when: () => false, propose: "approved" },
+        ],
+      })
+    ).toThrow('share the name "rule:pending:approved"');
+
+    expect(() =>
+      compile({
+        temporal: [{ name: "watch", in: "pending", within: 10 }],
+        rules: [{ name: "watch", when: held }],
+      })
+    ).toThrow('share the name "watch"');
   });
 });
 
@@ -579,6 +714,40 @@ describe("checking constraints", () => {
 
     expect(rejection(violations)).toBeUndefined();
   });
+});
+
+describe("a check that throws something that is not an error", () => {
+  it.each([
+    ["nothing", null, "null"],
+    ["undefined", undefined, "undefined"],
+    ["a string", "bad input", "bad input"],
+  ])(
+    "reports %s as the reason and does not throw again",
+    (_what, thrown, said) => {
+      const compiled = compile({
+        invariants: [
+          {
+            name: "broken",
+            check: () => {
+              throw thrown;
+            },
+          },
+        ],
+      });
+
+      const violations = checkConstraints(compiled, {
+        next: { state: "pending", values: {} },
+        instance: snapshot,
+        trigger,
+        fromStateId: new States(STATES).idOf(snapshot.state),
+        transitioning: false,
+        mutatingValues: true,
+      });
+      expect(violations.map((violation) => violation.reason)).toEqual([
+        `the check threw: ${said}`,
+      ]);
+    }
+  );
 });
 
 describe("the error a refused result carries", () => {

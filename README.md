@@ -1,16 +1,19 @@
 # Ekman
 
-**Declarative, embeddable state management for backend services.**
+**Per-key memory and state for the things your service watches. Embedded, budgeted, queryable.**
 
 [![npm](https://img.shields.io/npm/v/ekman.svg)](https://www.npmjs.com/package/ekman)
 [![license](https://img.shields.io/npm/l/ekman.svg)](./LICENSE)
 [![node](https://img.shields.io/node/v/ekman.svg)](https://nodejs.org)
 [![dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](./package.json)
 
-Ekman gives a backend service addressable stateful instances: each one identified by a
-human-readable key, holding its own state and values, processing its triggers one at a time.
-Around that it owns the operational layer that homegrown versions leave out, including
-transition history, constraints, retries and timeouts, queries, and a memory budget. There is no
+Every key is one thing your service keeps track of: a deployment, an upstream API, a tenant, a
+device. Ekman holds what the service knows about it, in memory you have given a budget. Its
+state follows from that memory, through rules and time bounds you declare and handlers that
+decide. One call shows where the whole fleet is.
+
+Around that it owns the operational layer that homegrown versions leave out: one trigger at a
+time per key, transition history, constraints, retries and timeouts, and queries. There is no
 server to deploy, no cluster to run, and no sidecar: it is a library you construct at your
 entrypoint. A runtime you embed, not a platform you operate.
 
@@ -47,80 +50,126 @@ both work with no configuration on your side.
 ## Quickstart
 
 ```ts check
-import { defineEntity, Ekman, isTransitionEvent, stay, transitionTo } from "ekman";
+import { defineEntity, Ekman, patch, stay, transitionTo } from "ekman";
+import type { RuleTrigger, StaleTrigger } from "ekman";
 
-/** Stand-in for whatever actually takes the money. */
-const chargeCard = async (cents: number) =>
-  new Promise<string>((ok) => setTimeout(() => ok(`rc_${cents}`), 20));
+type State = "healthy" | "degraded" | "unreachable";
+type Probe = { type: "probe"; ok: boolean; latencyMs: number };
 
-// 1. Say what an order can be sent. This is what types `trigger` below.
-type OrderTrigger = { type: "pay"; amount: number } | { type: "cancel" };
+// 1. What a service can be sent: a probe, or a proposal the runtime raises from 3. below.
+type ServiceTrigger = Probe | RuleTrigger<State> | StaleTrigger<State>;
 
-// 2. Describe how an order behaves: states to handlers. No runtime here, no I/O.
-const orders = defineEntity.withTriggers<OrderTrigger>()("orders", {
-  initial: "pending",
-  values: { total: 0, receipt: "" },
+// 2. What is remembered about each service, and how a probe updates it. No runtime here.
+const services = defineEntity.withTriggers<ServiceTrigger>()("services", {
+  initial: "healthy",
+  values: { failures: 0, latencyMs: 0 },
   states: {
-    // One handler runs per key at a time, so read, await, write needs no lock.
-    pending: async (order, trigger) => {
-      if (trigger.type !== "pay") return stay(order.values);
-      const receipt = await chargeCard(trigger.amount);
-      return transitionTo("paid", { total: order.values.total + trigger.amount, receipt });
+    healthy: (service, trigger) => {
+      // A proposal carries the state it asks for. The handler decides, and this one agrees.
+      if (trigger.type !== "probe") return transitionTo(trigger.propose ?? "degraded");
+      // patch merges: say what was learned, and the rest is kept.
+      const failures = trigger.ok ? 0 : service.values.failures + 1;
+      return patch({ failures, latencyMs: trigger.latencyMs });
     },
-    paid: (order) => stay(order.values),
+    degraded: (_service, trigger) => {
+      if (trigger.type !== "probe") return transitionTo(trigger.propose ?? "unreachable");
+      return trigger.ok
+        ? transitionTo("healthy", { failures: 0, latencyMs: trigger.latencyMs })
+        : patch({ latencyMs: trigger.latencyMs });
+    },
+    unreachable: (_service, trigger) =>
+      trigger.type === "probe"
+        ? transitionTo("healthy", { failures: 0, latencyMs: trigger.latencyMs })
+        : stay(),
+  },
+  // 3. When state should change. Neither handler above compares a counter or reads a clock.
+  constraints: {
+    rules: [{ in: "healthy", when: (s) => s.values.failures >= 3, propose: "degraded" }],
+    stale: [{ after: 60_000, propose: "unreachable" }],
   },
 });
 
-// 3. Build the runtime once, at your entrypoint. No store means memory only.
-const ekman = new Ekman({ entities: [orders] });
+// 4. Build the runtime once, at your entrypoint. No store means memory only.
+//    The clock is injected so this example can skip a minute. A service leaves `now` out.
+let clock = Date.now();
+const ekman = new Ekman({ entities: [services], now: () => clock });
+const { send } = ekman.entities.services;
 
-// 4. Address an instance by id and send it a trigger. Resolves when the commit lands.
-const committed = await ekman.entities.orders.send("a-1", { type: "pay", amount: 4200 });
-// same thing by full key: await ekman.send("orders:a-1", { type: "pay", amount: 4200 })
-console.log(committed.state, committed.values);
+// 5. Record what was observed. Each send resolves when its commit lands.
+await send("search-api", { type: "probe", ok: true, latencyMs: 40 });
+await send("auth-api", { type: "probe", ok: true, latencyMs: 12 });
+for (const latencyMs of [900, 1200, 1500, 1400]) {
+  await send("payments-api", { type: "probe", ok: false, latencyMs });
+}
 
-// 5. Read it back. inspect() is synchronous; history() is the whole per-key stream.
-const { events } = await ekman.entities.orders.history("a-1");
-console.log(events.filter(isTransitionEvent).map((e) => `${e.from ?? "(new)"} -> ${e.to}`));
+// 6. A minute passes. Two services are still being probed. search-api has gone quiet.
+clock += 61_000;
+await send("auth-api", { type: "probe", ok: true, latencyMs: 15 });
+await send("payments-api", { type: "probe", ok: false, latencyMs: 1300 });
+await ekman.sweep();   // or `temporal: { sweepMs }` on the runtime, to sweep on a timer
+
+// 7. Where the whole fleet is, in one call, and what one service knows.
+const map = await ekman.map("services");
+for (const [state, entry] of Object.entries(map.byState)) {
+  console.log(state, entry?.count, entry?.keys);
+}
+console.log(ekman.entities.services.inspect("payments-api")?.values);
 
 await ekman.close();
 ```
 
 ```
-paid { total: 4200, receipt: 'rc_4200' }
-[ '(new) -> pending', 'pending -> paid' ]
+healthy 1 [ 'services:auth-api' ]
+degraded 1 [ 'services:payments-api' ]
+unreachable 1 [ 'services:search-api' ]
+{ failures: 3, latencyMs: 1300 }
 ```
 
-The keys of `states` are the only source of the state union, so `initial: "pending"` is checked
-and a typo is a compile error. The trigger union does the same for payloads: `trigger.amount`
-is a `number` once the type is narrowed to `pay`, and `entities.orders.send` refuses anything
-outside the union. Leave the union out, with plain `defineEntity("orders", ...)`, and payload
+Nothing told `payments-api` to become `degraded`. Its third failed probe made the rule's
+condition hold, the runtime sent the instance a `rule.matched` trigger proposing `degraded`,
+and the handler agreed. Nothing told `search-api` it was `unreachable` either: it committed
+nothing for a minute, the sweep noticed, and the freshness bound proposed it. Both arrive as
+triggers, so every state change is still one handler returning `transitionTo`, and all of it is
+in each key's history.
+
+The keys of `states` are the only source of the state union, so `initial: "healthy"` is checked
+and a typo is a compile error. The trigger union does the same for payloads: `trigger.latencyMs`
+is a `number` once the type is narrowed to `probe`, and `entities.services.send` refuses anything
+outside the union. Leave the union out, with plain `defineEntity("services", ...)`, and payload
 fields are `unknown`. See [Typed triggers](./docs/entities.md#typed-triggers).
 
 **Make it durable.** Nothing above survives the process. Name a store and it does:
 
 ```ts
-const ekman = new Ekman({ entities: [orders], store: "file" });   // writes to .ekman/logs/
+const ekman = new Ekman({ entities: [services], store: "file" });   // writes to .ekman/logs/
 ```
 
 Commits are written before they are applied, so a `send()` that resolves has already reached the
-commit authority.
+commit authority. What each instance knows, how long it has been in its state and when it was
+last heard from all come back with it.
 
 **Restrict which moves are legal.** Declare the graph and an illegal transition is refused before
-it commits:
+it commits. Here a service that went `unreachable` does not come back on its own:
 
 ```ts
-constraints: { transitions: { allow: { pending: ["paid"], paid: [] } } },
+constraints: {
+  transitions: {
+    allow: { healthy: ["degraded", "unreachable"], degraded: ["healthy", "unreachable"], unreachable: [] },
+  },
+},
 ```
 
 ```
-CONSTRAINT_VIOLATED | transitions: "paid" to "pending" is not a declared transition.
-From "paid" the declared targets are: (none)
+CONSTRAINT_VIOLATED | transitions: "unreachable" to "healthy" is not a declared transition.
+From "unreachable" the declared targets are: (none)
 ```
 
 ## Why
 
-Stateful backend logic starts simple and degrades into scattered control flow:
+A service that watches other things ends up remembering things about them, and the memory
+drifts. A health map lives in one module, a retry counter in another, a "last seen" column in
+a table somewhere, and none of them agree about what state the thing is in. Then the logic
+around that memory degrades into scattered control flow:
 
 - A large file of `switch`/`case` blocks, duplicated across every service that touches the same workflow.
 - Transitions, retries, memory updates and failure paths coordinated by hand in application code.
@@ -128,12 +177,79 @@ Stateful backend logic starts simple and degrades into scattered control flow:
 - Concurrent triggers reaching the same instance while its previous work is still running.
 
 Orchestration platforms address this by having you deploy and operate their runtime. State
-machine libraries address dispatch, and leave identity, ordering, persistence, retries and
-querying to you. Ekman is the middle: the semantics of the first, delivered the way the second is.
+machine libraries address dispatch, and leave identity, memory, persistence, retries and
+querying to you. Ekman is the memory and the map, embedded: one place that holds what your
+service knows about each key, decides its state one trigger at a time, and can say where every
+one of them is. [How it compares](./docs/faq.md)
 
 ## Core concepts
 
 Each of these has a full page in [docs/](./docs).
+
+### Keys and instances
+
+```ts
+await ekman.send("services:payments-api", { type: "probe", ok: false, latencyMs: 900 });
+```
+
+A key is `<entity>:<segment>...`, and it is the identity of one thing your service watches. One
+key owns one instance's state, values, inbox ordering, resident memory, persistence, sequence
+numbering and history. Nothing is shared across keys, which is why nothing has to be locked
+across them. [More](./docs/concepts.md)
+
+### Memory
+
+```ts
+return patch({ latencyMs: trigger.latencyMs });   // merge what was learned; the rest is kept
+
+memory: { maxBytes: 32 * 1024 * 1024, eviction: { policy: "lru", snapshotOnEvict: true } },
+```
+
+An instance's values are what the service knows about that key. `patch` merges one observation
+into them, `stay` and `transitionTo` replace them, and every commit carries the whole of them
+into history. Each instance also records when it entered its state and when it last committed
+anything.
+
+The memory has a budget. Instances are accounted at commit, in UTF-8 bytes of the key, state name
+and serialized values. Eviction only touches idle instances, and reload is transparent: your code
+cannot tell a resident instance from one that just came back off disk.
+[More](./docs/memory.md)
+
+### Rules and time bounds
+
+```ts
+constraints: {
+  rules:    [{ in: "healthy", when: (s) => s.values.failures >= 3, propose: "degraded" }],
+  stale:    [{ after: 60_000, propose: "unreachable" }],
+  temporal: [{ in: "deploying", within: 10 * 60_000, escalateTo: "failed" }],
+},
+```
+
+Three ways to say when state should change, none of which changes it. A rule watches a
+condition over values and proposes a state once, when the condition comes to hold. A freshness
+bound watches how long since an instance last committed anything, and fires once per silence.
+A time-in-state bound watches how long an instance has sat in one state. Each arrives as a
+trigger, so your handler decides, and each can run under `warn` first to show what it would
+do. [More](./docs/constraints.md#rules-state-that-follows-from-memory)
+
+### The state map
+
+```ts
+const map = await ekman.map("services");
+// { byState: { healthy: { count: 397, keys: [...] }, degraded: { count: 3, keys: [...] } }, total: 400, ... }
+
+const stuck = await ekman.query({ entity: "deployments", state: "deploying", olderThan: "5m" });
+const quiet = await ekman.query({ entity: "services", staleFor: "5m", includeValues: true });
+const { events } = await ekman.history("services:payments-api");
+```
+
+`map` is the whole fleet in one call: how many instances are in each state, and which. A query
+narrows it by state, by time in state (`olderThan`, measured from the last move, so a handler
+updating a counter does not reset it) and by time since the last commit (`staleFor`), carries
+each match's values when asked with `includeValues`, and filters by them with `where`.
+`history` is one key's whole ordered stream. Every result says whether it is the whole answer;
+returning a partial one as if it were complete is the thing a query here will never do, because
+an operator acting on "nothing is stuck" needs that to have meant it. [More](./docs/queries.md)
 
 ### Entities and handlers
 
@@ -155,19 +271,25 @@ const orders = defineEntity.withTriggers<OrderTrigger>()("orders", {
 });
 ```
 
-A handler receives the instance, the trigger and a context, and returns one of three results:
-`transitionTo`, `stay`, or `fail`. Nothing else commits, and throwing is equivalent to `fail`.
+A handler receives the instance, the trigger and a context, and returns one of four results:
+`transitionTo`, `stay`, `patch`, or `fail`. Nothing else commits, and throwing is equivalent to `fail`.
 [More](./docs/entities.md)
 
-### Keys and instances
+### Constraints
 
 ```ts
-await ekman.send("deployments:abc123", { type: "deploy" });
+constraints: {
+  transitions: { allow: { pending: ["deploying"], deploying: ["live", "failed"] } },
+  guards:      [{ on: "deploying", from: "pending", check: (n) => n.values.region !== undefined }],
+  invariants:  [{ name: "attempts-sane", check: (n) => n.values.attempts >= 0 }],
+},
 ```
 
-A key is `<entity>:<segment>...`. One key owns one instance's state, values, inbox ordering,
-resident memory, persistence, sequence numbering and history. Nothing is shared across keys,
-which is why nothing has to be locked across them. [More](./docs/concepts.md)
+The three kinds that refuse a result before it commits, beside the three above that propose.
+All six are opt-in, each with its own `reject` / `warn` / `off` dial. `warn` lets you turn a
+constraint on, read the violations real traffic produces, and switch to `reject` once you know
+what your graph actually is; `observeEdges` and `allowFrom` turn those violations into the map to
+paste back in. [More](./docs/constraints.md)
 
 ### Ordering and the bounded inbox
 
@@ -194,23 +316,6 @@ that watch it and invalidates the attempt's commit token for those that do not. 
 handler keeps running, eventually tries to commit, and is refused. That is what makes a zombie
 handler harmless rather than merely unlikely. [More](./docs/execution.md)
 
-### Constraints
-
-```ts
-constraints: {
-  transitions: { allow: { pending: ["deploying"], deploying: ["live", "failed"] } },
-  guards:      [{ on: "deploying", from: "pending", check: (n) => n.values.region !== undefined }],
-  invariants:  [{ name: "attempts-sane", check: (n) => n.values.attempts >= 0 }],
-  temporal:    [{ in: "deploying", within: 10 * 60_000, escalateTo: "failed" }],
-},
-```
-
-Four kinds, all opt-in, each with its own `reject` / `warn` / `off` dial. `warn` lets you turn a
-constraint on, read the violations real traffic produces, and switch to `reject` once you know
-what your graph actually is; `observeEdges` and `allowFrom` turn those violations into the map to
-paste back in. A time-in-state bound fires as a trigger rather than a write, so your handler
-decides. [More](./docs/constraints.md)
-
 ### Durability and stores
 
 ```ts
@@ -223,28 +328,6 @@ first, and a layer in front of it answers the load of an instance that is not re
 store declares what it can do, and the runtime refuses configurations those declarations cannot
 satisfy rather than quietly under-delivering.
 [More](./docs/durability.md)
-
-### Memory budget
-
-```ts
-memory: { maxBytes: 32 * 1024 * 1024, eviction: { policy: "lru", snapshotOnEvict: true } },
-```
-
-Instances are accounted at commit, in UTF-8 bytes of the key, state name and serialized values.
-Eviction only touches idle instances, and reload is transparent: your code cannot tell a resident
-instance from one that just came back off disk. [More](./docs/memory.md)
-
-### Queries and history
-
-```ts
-const stuck = await ekman.query({ entity: "deployments", state: "deploying", olderThan: "5m" });
-const { instances, complete, reasons } = stuck;
-```
-
-Time in state is measured from the last move, so a handler updating a progress counter does not
-keep resetting the clock. Every result says whether it is the whole answer; returning a partial
-one as if it were complete is the thing a query here will never do, because an operator acting on
-"nothing is stuck" needs that to have meant it. [More](./docs/queries.md)
 
 ### Telemetry and audit
 
@@ -269,12 +352,14 @@ Full surface in [docs/api.md](./docs/api.md). The parts you need first:
 | `post(key, trigger)` | `void` | Fire and forget. Failures go to `onUnhandled`. |
 | `inspect(key)` | `InstanceSnapshot \| undefined` | Synchronous. Resident instances only. |
 | `history(key)` | `Promise<HistoryResult>` | The per-key ordered stream. |
-| `query(criteria)` | `Promise<QueryResult>` | Instances by entity, state and time in state. |
+| `query(criteria)` | `Promise<QueryResult>` | Instances by entity, state and time in state, with their values on request. |
+| `map(entity, options?)` | `Promise<StateMap>` | A count and the keys for each state an entity's instances are in. |
+| `residentMap(entity)` | `StateMap` | **Synchronous.** The same map from resident instances only. |
 | `forget(key)` | `Promise<void>` | Delete an instance from memory and every store layer. |
 | `sweep()` | `Promise<number>` | Evaluate time-in-state constraints now. |
 | `sweepStorage()` | `Promise<StorageSweep>` | Run the store's retention pass. |
 | `close(options?)` | `Promise<void>` | Refuse new triggers, let in-flight work land up to `timeoutMs`, then close the stores. |
-| `entities.<name>` | `EntityHandle` | Typed handle: `send`, `post`, `inspect`, `history`, `query`, `forget`, `key`, all by id. |
+| `entities.<name>` | `EntityHandle` | Typed handle: `send`, `post`, `inspect`, `history`, `query`, `map`, `forget`, `key`, all by id. |
 | `memoryUsage` / `storageUsage` | `{ bytes, ... }` | Resident bytes, and bytes on disk. |
 
 ### Exports
@@ -283,19 +368,20 @@ Full surface in [docs/api.md](./docs/api.md). The parts you need first:
 |---|---|
 | Runtime | `Ekman` |
 | Entities | `defineEntity`, `statesFromEntries` |
-| Results | `transitionTo`, `stay`, `fail` |
+| Results | `transitionTo`, `stay`, `patch`, `fail` |
 | Keys | `buildKey`, `parseKey`, `KEY_SEPARATOR` |
 | Errors | `EkmanError`, `ConstraintViolationError`, `isEkmanError`, `isConstraintViolation`, `ERROR_CODES`, `ERROR_FALLBACK` |
 | Events | `isTransitionEvent` |
 | Diagrams | `analyze`, `toMermaid`, `toDot`, `observeEdges`, `allowFrom` |
 | Stores | `createStore`, `defaultLogDir`, `replay`, `latestSeq`, `scanKeys`, `EMPTY_SEQ` |
 | Option lists | `OVERFLOW_POLICIES`, `EVICTION_POLICIES`, `RETENTION_POLICIES`, `DEFAULT_CAPACITY` |
-| Misc | `parseDuration`, `accountBytes`, `DEFAULT_TEMPORAL_TRIGGER`, `TELEMETRY_FALLBACK`, `SPEC_VERSION` |
+| Misc | `parseDuration`, `accountBytes`, `DEFAULT_TEMPORAL_TRIGGER`, `DEFAULT_RULE_TRIGGER`, `DEFAULT_STALE_TRIGGER`, `TELEMETRY_FALLBACK`, `SPEC_VERSION` |
 
 That is every runtime export. The types they take and return are exported alongside them:
 the config shapes (`EkmanConfig`, `EntityConfig`, `ExecutionPolicy`, `StorageConfig`), the
-results (`CommitResult`, `QueryResult`, `StorageSweep`), every event and telemetry event,
-`TemporalTrigger`, the trigger a time-in-state bound delivers, `UnhandledContext`, what
+results (`CommitResult`, `QueryResult`, `StateMap`, `StorageSweep`), every event and telemetry event,
+`TemporalTrigger`, the trigger a time-in-state bound delivers, `RuleTrigger` and `StaleTrigger`, the ones a
+rule and a freshness bound deliver, `UnhandledContext`, what
 `onUnhandled` is told about a failure, and `StateGraph`, the read-only view of an entity's
 states.
 
@@ -318,9 +404,19 @@ this instant only.
 
 ## Examples and demos
 
-[`examples/deploy-service`](./examples/deploy-service) is a small deployment tracker built the way
-you would actually build one: two entities, an HTTP API, a queue consumer, and one runtime shared
-by both.
+Two small services, each built the way you would actually build one.
+
+[`examples/service-health`](./examples/service-health) is shaped like memory. Each key is a
+dependency, its values are what has been observed about it, a rule and a freshness bound propose
+its state, and `/map` says where all of them are.
+
+```
+npm run example:health         # start it and watch /map change
+npm run example:health:smoke   # boot it on an ephemeral port, drive it end to end, assert
+```
+
+[`examples/deploy-service`](./examples/deploy-service) is shaped like a workflow: a deployment
+tracker with two entities, an HTTP API, a queue consumer, and one runtime shared by both.
 
 ```
 examples/deploy-service/src/
@@ -343,13 +439,14 @@ at the same instant need nothing there to be safe. Then stop the process and sta
 everything is still there.
 
 <details>
-<summary>Thirteen runnable demos</summary>
+<summary>Fourteen runnable demos</summary>
 
 Each demo asserts rather than only printing, so a broken claim fails the run instead of scrolling
 past, and each ends by saying what its output means.
 
 | Command | What it makes checkable |
 |---|---|
+| `demo:service-health` | Forty services remembered by key. Handlers only record probes: a rule proposes `degraded` after three failures in a row, a freshness bound proposes `unreachable` after a minute of silence, and one `map` call says where all forty are. |
 | `demo:ordering` | Five triggers at one slow key, doing a read-modify-write with an `await` in the middle, and not one lost update. No lock anywhere in the handler. Ends with a full queue refusing a trigger. |
 | `demo:concurrency` | The same argument under load. 5,000 increments across 200 keys, run three ways: no coordination (fast, thousands of lost updates), a promise chain per key by hand (correct), and through the runtime. Samples itself every 5ms, then reports what the runtime costs per commit over hand-rolling the same serialization. |
 | `demo:fencing` | A handler that ignores its timeout, runs to completion, tries to commit, and is refused. Plus `commit.raced`, where a commit that already reached the store stands. |
@@ -431,17 +528,19 @@ Reports pass or fail per scenario per level, and exits non-zero if a claimed lev
 
 | Page | Covers |
 |---|---|
-| [Concepts](./docs/concepts.md) | The execution model, keys, per-key ordering, what a commit is |
+| [Concepts](./docs/concepts.md) | The key as the identity of one thing, per-key ordering, what a commit is |
+| [Memory and eviction](./docs/memory.md) | The byte budget and eviction policies |
+| [Constraints](./docs/constraints.md) | Rules, freshness and time bounds, then graphs, guards, invariants, graph discovery |
+| [Queries and history](./docs/queries.md) | `map`, `query`, `history`, and the partiality contract |
 | [Entities](./docs/entities.md) | `defineEntity`, handlers, results, error handlers, unknown policy |
 | [Runtime and API](./docs/api.md) | Every config option and every method |
 | [Ordering and the inbox](./docs/ordering.md) | Capacity and the three overflow policies |
 | [Execution policy](./docs/execution.md) | Retries, timeouts, backoff, fencing |
-| [Constraints](./docs/constraints.md) | Graphs, guards, invariants, time bounds, graph discovery |
+| [Handlers that own external resources](./docs/external-resources.md) | What the runtime cannot do for a handler that creates things outside it |
 | [Durability and stores](./docs/durability.md) | Store kinds, layering, compaction, retention |
-| [Memory and eviction](./docs/memory.md) | The byte budget and eviction policies |
-| [Queries and history](./docs/queries.md) | `query`, `history`, and the partiality contract |
 | [Telemetry and audit](./docs/telemetry.md) | The runtime's own event stream, and audit sinks |
 | [Error codes](./docs/errors.md) | Every code, and a suggested HTTP mapping |
+| [Questions people ask first](./docs/faq.md) | How this compares, and when not to use it |
 
 ## Scope
 

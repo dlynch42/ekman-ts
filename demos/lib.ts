@@ -3,7 +3,7 @@
  *
  * Nothing here is part of Ekman, and nothing here is needed to use it. It exists so each
  * demo is mostly the runtime being driven rather than the same four printing functions
- * copied thirteen times, which is the part a reader is actually there for.
+ * copied fourteen times, which is the part a reader is actually there for.
  */
 
 import type { EkmanEvent } from "ekman";

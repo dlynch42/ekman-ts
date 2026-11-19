@@ -122,17 +122,25 @@ export function refusalOutcome(
 }
 
 /**
- * What an instance's time-in-state bounds have already said about its current stay in a
- * state, in a form a store can hold.
+ * What an instance's time-in-state bounds and rules have already said about its current
+ * stay in a state, in a form a store can hold.
  *
- * `fired` names the bounds that are done for this stay. `owed` names the ones whose
- * violation is recorded and whose escalation was turned away for a reason that passes,
- * with the cause that violation named, so whoever loads the instance next can deliver it
- * under the same id and record nothing twice.
+ * `fired` names the bounds and rules that are done for now. `owed` names the ones whose
+ * violation is recorded and whose trigger was turned away for a reason that passes, with
+ * the cause that violation named, so whoever loads the instance next can deliver it under
+ * the same id and record nothing twice.
+ *
+ * One record serves both kinds, which is why their names are distinct within an entity.
  */
 export interface TemporalLatch {
   readonly fired: readonly string[];
   readonly owed: Readonly<Record<string, EventCause>>;
+  /**
+   * Which of the names above are freshness bounds. They follow a different rule: one
+   * stays said through the commit that answered it, a move included, and is forgotten at
+   * the next commit from anything else. Absent when none is named.
+   */
+  readonly stale?: readonly string[];
 }
 
 /**
@@ -146,34 +154,68 @@ export interface TemporalLatch {
 export class LatchFold {
   readonly #fired = new Set<string>();
   readonly #owed = new Map<string, EventCause>();
+  /** The freshness bounds among the names in the two above. */
+  readonly #stale = new Set<string>();
+  /** How many commits this fold has taken, and the count at which each name was fired. */
+  #commits = 0;
+  readonly #firedAt = new Map<string, number>();
 
   constructor(seed?: TemporalLatch) {
     this.merge(seed);
   }
 
-  /** The instance moved to another state, so nothing said about the last one carries over. */
-  moved(): void {
+  /**
+   * The instance moved to another state, so nothing said about the last one carries over.
+   *
+   * With one exception. A freshness bound is about how long the instance has been quiet
+   * and not about where it is, so one whose trigger caused this move has been answered
+   * and stays said in the new state.
+   *
+   * @param cause what caused the move, when it was a commit and not a reload
+   */
+  moved(cause?: EventCause): void {
+    const answered = cause === undefined ? [] : this.#answeredStale(cause);
+    this.#commits += 1;
     this.#fired.clear();
     this.#owed.clear();
+    this.#stale.clear();
+    for (const name of answered) {
+      this.fire(name);
+      this.#stale.add(name);
+    }
   }
 
   /** Take one event recorded during the current stay in a state. */
   apply(event: EkmanEvent): void {
     if (event.type === "violation") {
-      if (
-        event.constraint.kind !== "temporal" ||
-        this.#fired.has(event.constraint.name)
+      const { kind, name } = event.constraint;
+      if (kind === "rule") {
+        if (this.#sameMatch(name)) {
+          return;
+        }
+        // A rule that matches again was armed again in between, which no event records.
+        this.#fired.delete(name);
+      } else if (
+        !(kind === "temporal" || kind === "stale") ||
+        this.#fired.has(name)
       ) {
         return;
       }
+      if (kind === "stale") {
+        this.#stale.add(name);
+      }
       if (event.policy === "warn") {
-        this.#fired.add(event.constraint.name);
+        this.fire(name);
       } else {
         this.#owed.set(event.constraint.name, event.cause);
       }
       return;
     }
 
+    if (event.type === "transition") {
+      this.#commits += 1;
+      this.#heard(event.cause);
+    }
     const answered =
       event.type === "transition" ||
       (event.type === "rejected" && !TRANSIENT_REFUSALS.has(event.code));
@@ -206,6 +248,28 @@ export class LatchFold {
   fire(name: string): void {
     this.#owed.delete(name);
     this.#fired.add(name);
+    this.#firedAt.set(name, this.#commits);
+  }
+
+  /**
+   * Arm a rule again, because its condition stopped holding. Whatever it had said, and
+   * any proposal it was still owed, belonged to a match that is over.
+   */
+  rearm(name: string): void {
+    this.#fired.delete(name);
+    this.#owed.delete(name);
+    this.#stale.delete(name);
+  }
+
+  /**
+   * Another writer committed, so the instance was heard from where this fold could not
+   * see. Every freshness bound is armed again. Whatever still stands is in that writer's
+   * account of the stay, which the caller merges in next.
+   */
+  heardElsewhere(): void {
+    for (const name of [...this.#stale]) {
+      this.rearm(name);
+    }
   }
 
   /** Record an escalation as owed to a bound that has not fired. */
@@ -228,6 +292,9 @@ export class LatchFold {
     for (const [name, cause] of Object.entries(other?.owed ?? {})) {
       this.owe(name, cause);
     }
+    for (const name of other?.stale ?? []) {
+      this.#stale.add(name);
+    }
   }
 
   /** The latch as it stands, or undefined when there is nothing in it. */
@@ -235,7 +302,45 @@ export class LatchFold {
     if (this.#fired.size === 0 && this.#owed.size === 0) {
       return;
     }
-    return { fired: [...this.#fired], owed: Object.fromEntries(this.#owed) };
+    return {
+      fired: [...this.#fired],
+      owed: Object.fromEntries(this.#owed),
+      ...(this.#stale.size === 0 ? {} : { stale: [...this.#stale] }),
+    };
+  }
+
+  /**
+   * Whether a rule's violation is the match it is already done for, read a second time.
+   *
+   * A rule is armed again by a commit that stops its condition holding, and matches
+   * again at a later one. So a violation with no commit since the rule was marked done
+   * cannot be a new match. It is the one a snapshot already accounts for, handed back
+   * beside that snapshot because it carries the snapshot's own sequence. Taking it for a
+   * new match would make a proposal whose handler failed owed all over again.
+   */
+  #sameMatch(name: string): boolean {
+    return this.#fired.has(name) && this.#firedAt.get(name) === this.#commits;
+  }
+
+  /** The freshness bounds whose owed trigger is the one with this cause. */
+  #answeredStale(cause: EventCause): string[] {
+    return [...this.#stale].filter((name) => {
+      const owed = this.#owed.get(name);
+      return owed?.id === cause.id && owed.type === cause.type;
+    });
+  }
+
+  /**
+   * A commit landed, so the instance has been heard from. Every freshness bound is armed
+   * again, except one this commit is the answer to.
+   */
+  #heard(cause: EventCause): void {
+    const answered = this.#answeredStale(cause);
+    for (const name of [...this.#stale]) {
+      if (!answered.includes(name)) {
+        this.rearm(name);
+      }
+    }
   }
 
   #settle(cause: EventCause): void {

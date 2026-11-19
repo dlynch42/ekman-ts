@@ -2,7 +2,7 @@
 
 [Back to the main README](../README.md)
 
-Thirteen runnable programs, one per behaviour. Each one **asserts rather than only printing**, so
+Fourteen runnable programs, one per behaviour. Each one **asserts rather than only printing**, so
 a broken claim fails the run instead of scrolling past, and each ends by saying what its output
 means. If a demo passes, the claim it stands behind is true on your machine.
 
@@ -12,6 +12,12 @@ npm run demo:ordering
 
 Nothing here needs setup. The ones that write to disk use a temporary directory and clean up after
 themselves.
+
+## Memory and the map
+
+| Command | What it makes checkable |
+|---|---|
+| `demo:service-health` | Forty services, remembered by key. Handlers only record probes: a rule proposes `degraded` after three failures in a row, once, and a handler that declines stays put. Two services go quiet and a freshness bound proposes `unreachable`, once per silence. Then one `map` call says where all forty are. |
 
 ## Ordering and concurrency
 

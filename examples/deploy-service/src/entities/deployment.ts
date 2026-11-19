@@ -19,12 +19,16 @@ import {
 } from "ekman";
 import { config } from "../lib/config";
 
-export type DeploymentState =
-  | "queued"
-  | "deploying"
-  | "live"
-  | "failed"
-  | "rolled-back";
+/** Every state a deployment can be in. A list, so a state named in a URL can be checked. */
+export const DEPLOYMENT_STATES = [
+  "queued",
+  "deploying",
+  "live",
+  "failed",
+  "rolled-back",
+] as const;
+
+export type DeploymentState = (typeof DEPLOYMENT_STATES)[number];
 
 export interface DeploymentValues extends Record<string, unknown> {
   service: string;

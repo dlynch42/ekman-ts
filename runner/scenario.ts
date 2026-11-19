@@ -138,27 +138,57 @@ export interface ConstraintsSpec {
     readonly trigger?: string;
     readonly policy?: ViolationPolicySpec;
   }[];
+  readonly stale?: readonly {
+    readonly name?: string;
+    /** The states the bound watches. Omitted means every state. */
+    readonly in?: readonly string[];
+    /** Milliseconds an instance may go without a commit. */
+    readonly after: number;
+    readonly propose?: string;
+    readonly trigger?: string;
+    readonly policy?: ViolationPolicySpec;
+  }[];
+  readonly rules?: readonly {
+    readonly name?: string;
+    /** The states the rule watches. Omitted means every state. */
+    readonly in?: readonly string[];
+    /**
+     * The condition, in the grammar guards and invariants use, read against what was
+     * just committed. The rule's condition holds when the check does, and the check's
+     * `reason` becomes the reason of the match.
+     */
+    readonly when: CheckSpec;
+    readonly propose?: string;
+    readonly trigger?: string;
+    readonly policy?: ViolationPolicySpec;
+  }[];
 }
 
 /**
- * A guard or invariant condition, expressed as data.
+ * A guard or invariant condition, or the condition of a rule, expressed as data.
  *
  * One source (`values`, `trigger`, or `state`) and one predicate (`exists`, `equals`,
  * `gte`, or `lte`), which is enough to express every condition the suite needs without a
  * expression language every port would then have to implement identically.
  */
 export interface CheckSpec {
-  /** Dot path into the values being proposed. Empty string is the whole map. */
+  /**
+   * Dot path into the values being proposed, or for a rule the values just committed.
+   * Empty string is the whole map.
+   */
   readonly values?: string;
-  /** Dot path into the trigger. */
+  /** Dot path into the trigger. A rule is not evaluated against one, so it reads nothing. */
   readonly trigger?: string;
-  /** Read the proposed state name. */
+  /** Read the proposed state name, or for a rule the committed one. */
   readonly state?: true;
   readonly exists?: boolean;
   readonly equals?: unknown;
   readonly gte?: number;
   readonly lte?: number;
-  /** Reported as the violation's reason when the check does not hold. */
+  /**
+   * Reported as the violation's reason when the check does not hold. For a rule, the
+   * reason of the match when it does.
+   */
   readonly reason?: string;
   /** Throw instead of answering, exercising the broken-check path. */
   readonly throw?: string;
@@ -182,7 +212,7 @@ export interface CaseSpec {
 }
 
 export interface DoSpec {
-  readonly result?: "transitionTo" | "stay" | "fail";
+  readonly result?: "transitionTo" | "stay" | "patch" | "fail";
   /** A state name, or a value expression resolving to one. */
   readonly to?: unknown;
   readonly values?: unknown;
@@ -272,6 +302,8 @@ export interface Then {
   readonly audit?: Readonly<Record<string, readonly string[]>>;
   /** Queries to run after everything has settled, each with the answer it must give. */
   readonly queries?: readonly QueryExpectation[];
+  /** State maps to read after everything has settled, each with the answer it must give. */
+  readonly maps?: readonly MapExpectation[];
   /** Per-key history reads, for what `then.events` cannot say. */
   readonly history?: Readonly<Record<string, HistoryExpectation>>;
 }
@@ -280,9 +312,27 @@ export interface QueryExpectation {
   readonly entity: string;
   readonly state?: string;
   readonly olderThan?: number | string;
+  /** Minimum time since the last commit, as milliseconds or a duration. */
+  readonly staleFor?: number | string;
   readonly limit?: number;
+  /** Ask for each match's values. Without it, a match carrying values is a failure. */
+  readonly includeValues?: boolean;
   /** Matching keys, oldest in state first. */
   readonly keys: readonly string[];
+  /** Values a match must carry, by key, each asserted as a subset. */
+  readonly values?: Readonly<Record<string, Record<string, unknown>>>;
+  readonly complete?: boolean;
+  /** Asserted as a set when present. */
+  readonly reasons?: readonly string[];
+}
+
+export interface MapExpectation {
+  readonly entity: string;
+  readonly limitPerState?: number;
+  /** Every state holding an instance, each with its keys, oldest in state first. */
+  readonly byState: Readonly<Record<string, readonly string[]>>;
+  /** How many instances the map counted, which a per-state limit does not reduce. */
+  readonly total?: number;
   readonly complete?: boolean;
   /** Asserted as a set when present. */
   readonly reasons?: readonly string[];

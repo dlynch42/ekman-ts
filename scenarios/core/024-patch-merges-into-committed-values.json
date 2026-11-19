@@ -1,0 +1,146 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/024-patch-merges-into-committed-values",
+  "name": "a patch result merges the fields it names into the committed values, keeps the rest, stays in the state, and commits an event carrying the whole of them",
+  "level": "core",
+  "given": {
+    "runtime": {
+      "clock": {
+        "start": 0,
+        "stepMs": 0
+      }
+    },
+    "entities": [
+      {
+        "name": "accounts",
+        "initial": "open",
+        "values": {
+          "owner": "amy",
+          "balance": 0
+        },
+        "states": [
+          {
+            "state": "open",
+            "cases": [
+              {
+                "when": {
+                  "trigger": "deposit"
+                },
+                "do": {
+                  "result": "patch",
+                  "values": {
+                    "balance": {
+                      "$trigger": "amount"
+                    }
+                  }
+                }
+              },
+              {
+                "when": {
+                  "trigger": "rename"
+                },
+                "do": {
+                  "result": "patch",
+                  "values": {
+                    "owner": {
+                      "$trigger": "to"
+                    }
+                  }
+                }
+              }
+            ],
+            "else": {
+              "result": "stay"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "accounts:1",
+        "trigger": {
+          "type": "deposit",
+          "amount": 40
+        }
+      }
+    },
+    {
+      "send": {
+        "key": "accounts:1",
+        "trigger": {
+          "type": "rename",
+          "to": "bo"
+        }
+      }
+    }
+  ],
+  "then": {
+    "sends": [
+      {
+        "outcome": "committed",
+        "state": "open",
+        "seq": 1,
+        "values": {
+          "owner": "amy",
+          "balance": 40
+        }
+      },
+      {
+        "outcome": "committed",
+        "state": "open",
+        "seq": 2,
+        "values": {
+          "owner": "bo",
+          "balance": 40
+        }
+      }
+    ],
+    "events": {
+      "accounts:1": [
+        {
+          "type": "transition",
+          "from": null,
+          "to": "open",
+          "seq": 0,
+          "values": {
+            "owner": "amy",
+            "balance": 0
+          }
+        },
+        {
+          "type": "transition",
+          "from": "open",
+          "to": "open",
+          "seq": 1,
+          "values": {
+            "owner": "amy",
+            "balance": 40
+          }
+        },
+        {
+          "type": "transition",
+          "from": "open",
+          "to": "open",
+          "seq": 2,
+          "values": {
+            "owner": "bo",
+            "balance": 40
+          }
+        }
+      ]
+    },
+    "state": {
+      "accounts:1": {
+        "state": "open",
+        "seq": 2,
+        "values": {
+          "owner": "bo",
+          "balance": 40
+        }
+      }
+    }
+  }
+}

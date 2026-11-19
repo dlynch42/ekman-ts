@@ -268,13 +268,19 @@ Exactly one of `result` or `throw`.
 
 | Field | Applies to | Meaning |
 |---|---|---|
-| `result` | all | `transitionTo`, `stay`, or `fail`. |
+| `result` | all | `transitionTo`, `stay`, `patch`, or `fail`. |
 | `to` | `transitionTo` | Target state name. Required. |
-| `values` | `transitionTo`, `stay` | A value expression, see below. Omitted means the current values unchanged. |
+| `values` | `transitionTo`, `stay`, `patch` | A value expression, see below. For `transitionTo` and `stay` it replaces the values, and omitted means the current values unchanged. For `patch` it is merged over them. |
 | `error` | `fail` | Error message. |
 | `errorName` | `fail`, `throw` | Error name, used for error-handler classification. Defaults to `Error`. |
 | `throw` | all | Throw instead of returning. The message. Exercises the thrown-error path. |
 | `delayMs` | all | Await this many milliseconds before producing the result. Drives ordering and timeout scenarios. |
+
+`patch` stays in the current state and commits the current values with the named fields
+laid over them. The merge is shallow: a field named replaces the one held, whole. The
+committed event carries the full merged values, never the fields alone, so a stream reads
+the same whether a commit was a `stay` or a `patch`, and constraints are checked against the
+merged whole.
 
 A case's `when` may also match on `attempt`, the 1-based attempt number. Every declared
 condition must match. This is what makes retry behaviour expressible:
@@ -328,11 +334,15 @@ none accepts any well-formed result.
   "temporal": [
     { "name": "deploy-timeout", "in": "deploying", "within": 600000,
       "escalateTo": "stalled", "trigger": "deploy.stalled" }
+  ],
+  "rules": [
+    { "name": "too-many-failures", "in": ["healthy"],
+      "when": { "values": "failures", "gte": 3 }, "propose": "degraded" }
   ]
 }
 ```
 
-Four kinds, each checked at a defined moment:
+Six kinds, each checked at a defined moment:
 
 | Kind | Checked |
 |---|---|
@@ -340,6 +350,8 @@ Four kinds, each checked at a defined moment:
 | `guards` | Before committing a `transitionTo` into the state named by `on`. |
 | `invariants` | Before committing any result that changes state or values. |
 | `temporal` | On a sweep, against how long the instance has been in `in`. |
+| `rules` | After every commit of an instance in a state named by `in`, against what was just committed. |
+| `stale` | On a sweep, against how long ago the instance last committed anything. |
 
 Every constraint carries a `policy`, defaulting to `reject`:
 
@@ -383,6 +395,94 @@ The escalation trigger carries:
 
 `type` defaults to `constraint.temporal` when the constraint declares no `trigger`.
 
+#### Stale
+
+A stale constraint bounds how long an instance may go without a commit. It is evaluated
+on a sweep and delivers a trigger, like a temporal constraint, and reads a different
+clock.
+
+| Field | Meaning |
+|---|---|
+| `after` | Required. Milliseconds an instance may go without a commit. |
+| `in` | The states the bound watches. Omitted means every state. |
+| `propose` | The state the bound asks for, carried on the trigger. |
+| `trigger` | Type of the delivered trigger. Defaults to `constraint.stale`. |
+| `name` | Defaults to `stale:<in joined by \|>:<after>`, with `*` for every state. |
+| `policy` | As for a temporal constraint. |
+
+What every port owes:
+
+- **The clock is the time of the last commit**, of any kind. Initialization is a commit.
+  A commit that leaves the state alone resets this clock and leaves time in state running.
+- **Inclusive at the bound**, like `within`.
+- **A violation event** of kind `stale`, with no `attempted`, at the sequence of the last
+  commit, whose cause is the trigger about to be delivered.
+- **Once per silence.** The commit that answers the bound's own trigger does not arm it
+  again, whether it moved the instance or not. The next commit with any other cause does.
+  Under `warn`, where nothing is delivered, the next commit arms it.
+- **Not asked in the state it proposes.**
+- **It survives a reload**, and covers instances a store holds and the runtime does not,
+  exactly as a temporal constraint does.
+- **Refused at definition** for the reasons a rule is.
+
+The trigger carries:
+
+```json
+{ "type": "constraint.stale", "constraint": "gone-quiet",
+  "state": "healthy", "sinceMs": 1500, "propose": "unreachable" }
+```
+
+#### Rules
+
+A rule is a condition over what an instance knows, with a state to propose when the
+condition comes to hold. It refuses nothing. Like a temporal constraint, it delivers a
+trigger and the handler decides.
+
+| Field | Meaning |
+|---|---|
+| `when` | Required. The condition, as a [check](#checks) read against the committed instance. The condition holds when the check does. |
+| `in` | The states the rule watches. Omitted means every state. |
+| `propose` | The state the rule asks for, carried on the trigger. |
+| `trigger` | Type of the delivered trigger. Defaults to `rule.matched`. |
+| `name` | Defaults to `rule:<in joined by \|>:<propose>`, with `*` for every state and the rule's position in the list when it proposes nothing. |
+| `policy` | `reject` records the match and delivers the trigger. `warn` records it and delivers nothing. `off` is not evaluated. |
+
+What every port owes:
+
+- **Evaluated after a commit is applied**, never before, and only for an instance in a
+  watched state. Initialization and a load from a store are not commits, so neither
+  evaluates a rule.
+- **A match is a violation event** of kind `rule`, at the sequence of the commit that
+  produced it, with no `attempted`. Its `reason` is the check's `reason`, or
+  `the condition held`. Its cause is the trigger about to be delivered.
+- **Once per edge.** A rule that has matched is not evaluated to a second match while its
+  condition goes on holding. It is armed again when the condition stops holding, and when
+  the instance moves to another state.
+- **Not asked in the state it proposes.** A rule does not watch its own `propose` state,
+  whatever `in` says.
+- **The trigger is queued behind the commit that raised it**, in the instance's own inbox,
+  and is not awaited by that commit. It is counted like any accepted trigger, so it takes
+  the next trigger id.
+- **What has fired survives a reload.** A runtime that loads the instance later does not
+  propose again for a condition that went on holding, and does propose again once the
+  condition has stopped holding and come to hold again.
+- **Refused at definition**: a state that does not exist, a `propose` that is not a
+  declared transition from a watched state when the entity declares transitions (a rule
+  with no `in` is not held to this), a name shared with another rule or with a temporal
+  constraint, and a trigger type missing from a declared `triggers` list unless the rule
+  only warns.
+
+The trigger carries:
+
+```json
+{ "type": "rule.matched", "rule": "too-many-failures",
+  "state": "healthy", "propose": "degraded", "reason": "the condition held" }
+```
+
+A proposal is delivered after the `send` that raised it has settled, so a scenario that
+asserts what the handler did with it sends one more trigger to the same key. Ordering per
+key puts that trigger behind the proposal, and awaiting it is awaiting both.
+
 ### Checks
 
 A handler cannot be code in a language-neutral file, and neither can a condition. A check
@@ -390,13 +490,13 @@ declares one source and one predicate:
 
 | Field | Meaning |
 |---|---|
-| `values` | Dot path into the values being proposed. Empty string is the whole map. |
-| `trigger` | Dot path into the trigger. |
-| `state` | `true` to read the proposed state name. |
+| `values` | Dot path into the values being proposed, or for a rule the values just committed. Empty string is the whole map. |
+| `trigger` | Dot path into the trigger. A rule is evaluated against no trigger, so this reads nothing there. |
+| `state` | `true` to read the proposed state name, or for a rule the committed one. |
 | `exists` | Whether the subject is expected to be present. |
 | `equals` | The subject must equal this. |
 | `gte`, `lte` | Numeric bounds. |
-| `reason` | Reported as the violation's `reason` when the check does not hold. |
+| `reason` | Reported as the violation's `reason` when the check does not hold. For a rule, the reason of the match when it does. |
 | `throw` | Throw instead of answering, exercising the broken-check path. |
 
 ```json
@@ -425,7 +525,7 @@ An ordered array of steps.
 | `drain` | Wait for every outstanding send to settle. |
 | `wait` | Pause this many milliseconds. |
 | `advance` | Move the declared clock forward this many milliseconds. |
-| `sweep` | Evaluate temporal constraints once and settle whatever they escalate. |
+| `sweep` | Evaluate temporal and stale constraints once and settle whatever they escalate. |
 | `restart` | Throw the runtime away and build a new one against the same storage. |
 | `forget` | Delete an instance outright: its resident state and its stream in every layer. |
 
@@ -609,7 +709,7 @@ only a `type` asserts no event of that type was emitted at all.
 | `handler.timedOut` | An attempt ran past its timeout and was abandoned. | `attempt`, `timeoutMs` |
 | `commit.fenced` | A superseded attempt tried to commit and was refused. | `attempt`, `reason`, `tokenSeq`, `currentSeq` |
 | `constraint.violated` | A constraint did not hold. | `kind`, `constraint`, `policy`, `state`, `reason` |
-| `constraint.escalated` | A temporal constraint fired and its trigger was delivered. | `constraint`, `elapsedMs`, `escalateTo`, `delivered` |
+| `constraint.escalated` | A temporal constraint, a stale constraint or a rule fired and its trigger was sent. | `kind`, `constraint`, `elapsedMs` (not for a rule), `escalateTo`, `delivered` |
 | `commit.raced` | A commit reached the store, and a timeout arrived while it was in flight. | `attempt`, `reason`, `seq` |
 | `memory.accounted` | Resident accounting, after every commit. | `bytes`, `residentBytes`, `residentCount`, `maxBytes`, `overBudget` |
 | `memory.refused` | A new instance was refused because the budget is full. | `residentBytes`, `maxBytes` |
@@ -720,8 +820,10 @@ Queries run after everything has settled, each with the answer it must give.
 | Field | Meaning |
 |---|---|
 | `entity` | Required. |
-| `state`, `olderThan`, `limit` | The criteria. `olderThan` is milliseconds or a duration such as `"5m"`. |
+| `state`, `olderThan`, `staleFor`, `limit` | The criteria. `olderThan` and `staleFor` are milliseconds or a duration such as `"5m"`. |
+| `includeValues` | Ask for each match's committed values. |
 | `keys` | Matching keys, **oldest in state first**. An exact list, in order. |
+| `values` | Values a match must carry, by key. Each is asserted as a subset, as `then.state` values are. |
 | `complete` | Whether the answer is the whole answer. |
 | `reasons` | Why not, asserted as a set. |
 
@@ -737,6 +839,18 @@ with itself.
 `olderThan` is inclusive: an instance that has been in a state for exactly the bound
 matches.
 
+`staleFor` reads the other clock: the time since the instance last committed anything.
+Every commit resets it, one that leaves the state alone included, and initialization is a
+commit. It is inclusive too, it combines with `olderThan`, and with a durable store it
+keeps running through a restart. It is the measurement a stale constraint uses.
+
+A match carries values only when the query asked for them. That half is asserted on every
+query: one that does not set `includeValues` fails if any match comes back with values.
+
+A field this table does not list is refused as a malformed scenario, here and in
+`then.maps`, since a misspelt criterion would ask a different question and assert nothing
+about the one that was meant.
+
 Partiality reasons:
 
 | Reason | Meaning |
@@ -745,10 +859,53 @@ Partiality reasons:
 | `unsupported-criteria` | A store could not evaluate a filter, so the runtime applied it afterwards. |
 | `limit-reached` | The answer was truncated. |
 | `compacted` | A store folded part of the stream into a snapshot, so a history is missing its middle. |
+| `resident-only` | Only memory was asked, so anything evicted or not loaded is left out. Nothing a scenario can run reports it: it belongs to the synchronous map of resident instances, which a runner does not call. |
 | `history-capped` | No store holds the stream and the runtime keeps a bounded number of events per key in memory, so a history is missing its oldest events. |
 
 A result is `complete` exactly when there are no reasons. A memory-only runtime is never
 complete, even when it happens to hold everything, because it cannot know that it does.
+
+### `then.maps`
+
+State maps read after everything has settled, each with the answer it must give.
+
+```json
+[
+  {
+    "entity": "services",
+    "byState": {
+      "healthy": ["services:a", "services:c"],
+      "degraded": ["services:b"]
+    },
+    "total": 3,
+    "complete": true,
+    "reasons": []
+  }
+]
+```
+
+| Field | Meaning |
+|---|---|
+| `entity` | Required. |
+| `limitPerState` | List at most this many keys per state. |
+| `byState` | Required. Every state holding at least one instance, each with its keys. |
+| `total` | How many instances the map counted. |
+| `complete` | Whether the map is the whole answer. |
+| `reasons` | Why not, asserted as a set. |
+
+A map is the union a query over the entity makes, grouped by state: resident instances and
+stored ones, the resident view winning on a key in both. An evicted instance is counted
+under the state the store holds for it.
+
+`byState` is compared as a set of states, since the order of the states carries no meaning.
+A state the scenario does not name must hold nothing, and a state it names must hold exactly
+the keys listed, **oldest in state first**, ties broken on the key, as in `then.queries`.
+
+`limitPerState` shortens each state's list and nothing else. The count of a state and the
+`total` are of every instance found, so a truncated map still says how many there are. A
+map that left a key out reports `limit-reached`; one whose limit left nothing out does not.
+
+A map is `complete` exactly when a query over the entity would be and no key was left out.
 
 ### `then.history`
 
@@ -845,7 +1002,8 @@ Anything that cannot be made deterministic must not be asserted.
    | `13x` | guards and invariants |
    | `14x` | temporal constraints |
    | `15x` | memory budget and eviction |
-   | `16x` | queries against a memory-only runtime, and partiality |
+   | `16x` | queries and the state map against a memory-only runtime, and partiality |
+   | `17x` | rules: conditions over values that propose a move |
 
    Durable scenarios number from `01x` again, in their own directory:
 
@@ -854,10 +1012,10 @@ Anything that cannot be made deterministic must not be asserted.
    | `01x` | durability: commits surviving a restart, replay |
    | `02x` | eviction with a store: snapshot on evict, transparent reload |
    | `03x` | audit sinks |
-   | `04x` | queries by state and time in state |
+   | `04x` | queries by state and time in state, values on request, and the state map |
    | `05x` | history as the whole per-key stream |
    | `06x` | deleting an instance outright |
-   | `07x` | temporal constraints over a store |
+   | `07x` | temporal constraints and rules over a store |
 
 3. Assert the narrowest thing that proves the requirement. Over-asserting makes the suite
    brittle for the next port.

@@ -77,6 +77,9 @@ jobs:
       - name: Example smoke test
         run: npm run example:smoke
 
+      - name: Service health example smoke test
+        run: npm run example:health:smoke
+
       - name: Test
         run: npm test
 

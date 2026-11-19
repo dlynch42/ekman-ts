@@ -1,0 +1,95 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "durable/041-the-state-map-counts-stored-instances-and-reports-partiality",
+  "name": "the state map counts an evicted instance under the state the store holds for it, and is complete until a per-state limit leaves keys out",
+  "level": "durable",
+  "given": {
+    "runtime": {
+      "clock": { "start": 0, "stepMs": 0 },
+      "store": [{ "kind": "file" }],
+      "memory": { "maxBytes": 60, "eviction": { "policy": "lru" } }
+    },
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "open",
+        "states": [
+          {
+            "state": "open",
+            "cases": [
+              {
+                "when": { "trigger": "close" },
+                "do": {
+                  "result": "transitionTo",
+                  "to": "closed",
+                  "values": { "who": { "$trigger": "who" } }
+                }
+              }
+            ],
+            "else": {
+              "result": "stay",
+              "values": { "who": { "$trigger": "who" } }
+            }
+          },
+          { "state": "closed", "else": { "result": "stay" } }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "orders:1",
+        "trigger": { "type": "close", "who": "a" }
+      }
+    },
+    { "advance": 1000 },
+    {
+      "send": {
+        "key": "orders:2",
+        "trigger": { "type": "touch", "who": "b" }
+      }
+    },
+    { "advance": 1000 },
+    {
+      "send": {
+        "key": "orders:3",
+        "trigger": { "type": "touch", "who": "c" }
+      }
+    },
+    {
+      "send": {
+        "key": "orders:4",
+        "trigger": { "type": "close", "who": "d" }
+      }
+    }
+  ],
+  "then": {
+    "telemetry": [
+      { "type": "instance.evicted", "key": "orders:1", "snapshotted": true }
+    ],
+    "maps": [
+      {
+        "entity": "orders",
+        "byState": {
+          "closed": ["orders:1", "orders:4"],
+          "open": ["orders:2", "orders:3"]
+        },
+        "total": 4,
+        "complete": true,
+        "reasons": []
+      },
+      {
+        "entity": "orders",
+        "limitPerState": 1,
+        "byState": {
+          "closed": ["orders:1"],
+          "open": ["orders:2"]
+        },
+        "total": 4,
+        "complete": false,
+        "reasons": ["limit-reached"]
+      }
+    ]
+  }
+}

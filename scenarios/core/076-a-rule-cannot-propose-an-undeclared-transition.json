@@ -1,0 +1,82 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/076-a-rule-cannot-propose-an-undeclared-transition",
+  "name": "a rule proposing a state its watched state has no declared transition to is refused at definition",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "services",
+        "initial": "healthy",
+        "constraints": {
+          "rules": [
+            {
+              "name": "too-many-failures",
+              "in": ["healthy"],
+              "when": {
+                "values": "failures",
+                "gte": 3,
+                "reason": "three failed probes or more"
+              },
+              "propose": "retired"
+            }
+          ],
+          "transitions": {
+            "allow": {
+              "healthy": ["degraded"],
+              "degraded": ["retired"]
+            }
+          }
+        },
+        "states": [
+          {
+            "state": "healthy",
+            "cases": [
+              {
+                "when": {
+                  "trigger": "rule.matched"
+                },
+                "do": {
+                  "result": "stay"
+                }
+              },
+              {
+                "when": {
+                  "trigger": "settle"
+                },
+                "do": {
+                  "result": "stay"
+                }
+              }
+            ],
+            "else": {
+              "result": "stay",
+              "values": {
+                "failures": {
+                  "$trigger": "failures"
+                }
+              }
+            }
+          },
+          {
+            "state": "degraded",
+            "else": {
+              "result": "stay"
+            }
+          },
+          {
+            "state": "retired",
+            "else": {
+              "result": "stay"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "then": {
+    "buildError": {
+      "code": "INVALID_CONFIG"
+    }
+  }
+}

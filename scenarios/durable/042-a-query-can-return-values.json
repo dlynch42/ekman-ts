@@ -1,0 +1,58 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "durable/042-a-query-can-return-values",
+  "name": "a query that asks for values carries them for resident and stored instances alike, and one that does not ask carries none",
+  "level": "durable",
+  "given": {
+    "runtime": {
+      "clock": { "start": 0, "stepMs": 0 },
+      "store": [{ "kind": "file" }],
+      "memory": { "maxBytes": 60, "eviction": { "policy": "lru" } }
+    },
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "open",
+        "states": [
+          {
+            "state": "open",
+            "else": {
+              "result": "stay",
+              "values": { "who": { "$trigger": "who" } }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    { "send": { "key": "orders:1", "trigger": { "type": "t", "who": "a" } } },
+    { "advance": 1000 },
+    { "send": { "key": "orders:2", "trigger": { "type": "t", "who": "b" } } },
+    { "advance": 1000 },
+    { "send": { "key": "orders:3", "trigger": { "type": "t", "who": "c" } } }
+  ],
+  "then": {
+    "telemetry": [
+      { "type": "instance.evicted", "key": "orders:1", "snapshotted": true }
+    ],
+    "queries": [
+      {
+        "entity": "orders",
+        "includeValues": true,
+        "keys": ["orders:1", "orders:2", "orders:3"],
+        "values": {
+          "orders:1": { "who": "a" },
+          "orders:2": { "who": "b" },
+          "orders:3": { "who": "c" }
+        },
+        "complete": true,
+        "reasons": []
+      },
+      {
+        "entity": "orders",
+        "keys": ["orders:1", "orders:2", "orders:3"]
+      }
+    ]
+  }
+}

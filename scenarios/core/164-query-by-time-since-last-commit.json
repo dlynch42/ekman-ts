@@ -1,0 +1,92 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/164-query-by-time-since-last-commit",
+  "name": "instances can be found by how long ago they last committed anything, which a commit that leaves the state alone resets and time in state does not",
+  "level": "core",
+  "given": {
+    "runtime": {
+      "clock": {
+        "start": 0,
+        "stepMs": 0
+      }
+    },
+    "entities": [
+      {
+        "name": "services",
+        "initial": "healthy",
+        "states": [
+          {
+            "state": "healthy",
+            "else": {
+              "result": "stay"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "services:quiet",
+        "trigger": {
+          "type": "probe"
+        }
+      }
+    },
+    {
+      "send": {
+        "key": "services:chatty",
+        "trigger": {
+          "type": "probe"
+        }
+      }
+    },
+    {
+      "advance": 4000
+    },
+    {
+      "send": {
+        "key": "services:chatty",
+        "trigger": {
+          "type": "probe"
+        }
+      }
+    },
+    {
+      "advance": 1000
+    }
+  ],
+  "then": {
+    "queries": [
+      {
+        "entity": "services",
+        "staleFor": "5s",
+        "keys": ["services:quiet"],
+        "complete": false,
+        "reasons": ["no-durable-store"]
+      },
+      {
+        "entity": "services",
+        "staleFor": 5001,
+        "keys": []
+      },
+      {
+        "entity": "services",
+        "staleFor": 1000,
+        "keys": ["services:chatty", "services:quiet"]
+      },
+      {
+        "entity": "services",
+        "olderThan": "5s",
+        "keys": ["services:chatty", "services:quiet"]
+      },
+      {
+        "entity": "services",
+        "olderThan": "5s",
+        "staleFor": "5s",
+        "keys": ["services:quiet"]
+      }
+    ]
+  }
+}

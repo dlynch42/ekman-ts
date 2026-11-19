@@ -41,7 +41,13 @@ export interface RejectedEvent {
 }
 
 /** Which kind of constraint produced a violation. */
-export type ConstraintKind = "transition" | "guard" | "invariant" | "temporal";
+export type ConstraintKind =
+  | "transition"
+  | "guard"
+  | "invariant"
+  | "temporal"
+  | "rule"
+  | "stale";
 
 /**
  * A constraint that did not hold.
@@ -65,8 +71,8 @@ export interface ViolationEvent<S extends string = string> {
   readonly policy: "reject" | "warn";
   readonly reason: string;
   /**
-   * The change that was being attempted. Absent on a temporal violation, which is not
-   * attached to a result.
+   * The change that was being attempted. Absent on a temporal or stale violation and on
+   * a rule's match, none of which is attached to a result.
    */
   readonly attempted?: { readonly from: S; readonly to: S };
 }

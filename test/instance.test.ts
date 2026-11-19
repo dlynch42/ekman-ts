@@ -96,6 +96,8 @@ describe("InstanceRecord", () => {
       state: "pending",
       values: { a: 1 },
       seq: 0,
+      enteredAt: 1000,
+      lastCommittedAt: 1000,
     });
     expect(Object.isFrozen(snapshot)).toBe(true);
   });
@@ -571,6 +573,18 @@ describe("reloading after another writer moved the key", () => {
       cause: { type: "x", id: `c${at}` },
     });
 
+  /** Record that a bound has said what it had to say, the way a sweep under `warn` does. */
+  const said = (
+    instance: InstanceRecord<string, Record<string, unknown>>,
+    kind: "temporal" | "stale",
+    name: string
+  ) =>
+    instance.violation({
+      violation: { kind, name, policy: "warn", reason: "over its bound" },
+      at: 1,
+      cause: { type: `constraint.${kind}`, id: `v-${name}` },
+    });
+
   const overtaken = async (
     others: (
       other: InstanceRecord<string, Record<string, unknown>>
@@ -579,8 +593,9 @@ describe("reloading after another writer moved the key", () => {
     const store = memoryStore();
     const mine = record(store);
     await mine.ready();
-    mine.markFired("too-slow", mine.stateEntry);
-    const entry = mine.stateEntry;
+    said(mine, "temporal", "too-slow");
+    said(mine, "stale", "gone-quiet");
+    await mine.flushed();
 
     const theirs = record(store);
     await theirs.ready();
@@ -588,26 +603,60 @@ describe("reloading after another writer moved the key", () => {
 
     await move(mine, "pending", 99).catch(() => undefined);
     await mine.ready();
-    return { mine, entry };
+    return mine;
   };
 
   it("re-arms its bounds when the reload finds a new entry into the state", async () => {
-    const { mine, entry } = await overtaken(async (theirs) => {
+    const mine = await overtaken(async (theirs) => {
       await move(theirs, "approved", 5);
       await move(theirs, "pending", 6);
     });
 
     expect(mine.state).toBe("pending");
-    expect(mine.stateEntry).not.toBe(entry);
     expect(mine.hasFired("too-slow")).toBe(false);
+    expect(mine.hasFired("gone-quiet")).toBe(false);
   });
 
-  it("keeps them when the other writer only changed values", async () => {
-    const { mine, entry } = await overtaken((theirs) =>
-      move(theirs, "pending", 5)
-    );
+  it("keeps a time-in-state bound when the other writer only changed values", async () => {
+    const mine = await overtaken((theirs) => move(theirs, "pending", 5));
 
-    expect(mine.stateEntry).toBe(entry);
     expect(mine.hasFired("too-slow")).toBe(true);
+  });
+
+  it("arms a freshness bound again when the other writer only changed values", async () => {
+    // The instance was heard from, by a commit this record did not make. What its
+    // freshness bound said here was about a silence that commit ended.
+    const mine = await overtaken((theirs) => move(theirs, "pending", 5));
+
+    expect(mine.seq).toBe(1);
+    expect(mine.hasFired("gone-quiet")).toBe(false);
+  });
+
+  it("keeps a freshness bound said when the other writer's commit was the answer to it", async () => {
+    const store = memoryStore();
+    const mine = record(store);
+    await mine.ready();
+    const asked = { type: "constraint.stale", id: "t9" };
+    mine.violation({
+      violation: {
+        kind: "stale",
+        name: "gone-quiet",
+        policy: "reject",
+        reason: "over its bound",
+      },
+      at: 1,
+      cause: asked,
+    });
+    await mine.flushed();
+
+    const theirs = record(store);
+    await theirs.ready();
+    await commit(theirs, { state: "pending", values: {}, at: 5, cause: asked });
+
+    await move(mine, "pending", 99).catch(() => undefined);
+    await mine.ready();
+
+    expect(mine.hasFired("gone-quiet")).toBe(true);
+    expect(mine.undelivered("gone-quiet")).toBeUndefined();
   });
 });

@@ -6,8 +6,11 @@
 await ekman.send("deployments:abc123", { type: "deploy", region: "us-east-1" });
 ```
 
-That line contains most of the model. `deployments` names an entity, `abc123` identifies one
-instance of it, and the trigger is delivered to that instance's inbox rather than applied to it.
+That line contains most of the model. A key is the identity of one thing your service keeps
+track of: here a deployment, elsewhere an upstream API, a tenant or a device. `deployments`
+names an entity, `abc123` identifies one instance of it, and the instance is what the service
+remembers about that one thing. The trigger is delivered to that instance's inbox rather than
+applied to it.
 
 ## The key is the unit of everything
 
