@@ -252,6 +252,17 @@ export class LatchFold {
     this.#stale.delete(name);
   }
 
+  /**
+   * Another writer committed, so the instance was heard from where this fold could not
+   * see. Every freshness bound is armed again. Whatever still stands is in that writer's
+   * account of the stay, which the caller merges in next.
+   */
+  heardElsewhere(): void {
+    for (const name of [...this.#stale]) {
+      this.rearm(name);
+    }
+  }
+
   /** Record an escalation as owed to a bound that has not fired. */
   owe(name: string, cause: EventCause): void {
     if (!this.#fired.has(name)) {

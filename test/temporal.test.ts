@@ -324,6 +324,14 @@ describe("rebuilding what a stay in a state has already been told", () => {
       ).toEqual({ fired: ["too-slow"], owed: {} });
     });
 
+    it("is armed again when another writer is known to have committed, leaving time-in-state bounds alone", () => {
+      const latch = new LatchFold();
+      latch.apply(violation("warn"));
+      latch.apply(quiet("warn"));
+      latch.heardElsewhere();
+      expect(latch.result()).toEqual({ fired: ["too-slow"], owed: {} });
+    });
+
     it("is carried by a snapshot and taken in from one", () => {
       const latch = new LatchFold(said);
       expect(latch.result()).toEqual(said);

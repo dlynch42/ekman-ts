@@ -533,7 +533,9 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       at,
       reading
     )) {
-      if ((staleForMs ?? 0) <= (match.staleMs as number)) {
+      // Only when the query asked. A clock that steps backwards can put the last commit
+      // ahead of now, and a filter nobody set must not drop the instance over that.
+      if (staleForMs === undefined || staleForMs <= (match.staleMs as number)) {
         matches.set(match.key, match);
       }
     }
@@ -1799,11 +1801,10 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   /**
    * Evaluate one instance against the constraints watching the state it is in.
    *
-   * Constraints run in declaration order. One is marked fired only once its escalation has
-   * been delivered or refused for good, so an escalation turned away by a full inbox is
-   * raised again by the next sweep. The pass ends as soon as the instance has left the
-   * state: the remaining constraints watch somewhere it no longer is. An outcome is only
-   * recorded against the entry into the state that the escalation was raised for.
+   * Constraints run in declaration order. One is done once its escalation has been
+   * answered or refused for good, so an escalation turned away by a full inbox is raised
+   * again by the next sweep. The pass ends as soon as the instance has left the state: the
+   * remaining constraints watch somewhere it no longer is.
    *
    * @returns how many escalations were raised, delivered or not
    */
@@ -1836,12 +1837,8 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       }
 
       fired += 1;
-      const entry = instance.stateEntry;
       // biome-ignore lint/performance/noAwaitInLoops: two constraints on one state fire in declaration order, and the second runs only if the first left the instance where it was
-      const outcome = await this.#escalate(instance, constraint, elapsedMs, at);
-      if (outcome !== "refused-transiently") {
-        instance.markFired(constraint.name, entry);
-      }
+      await this.#escalate(instance, constraint, elapsedMs, at);
     }
 
     return fired;
@@ -2008,31 +2005,24 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       unsupported.add("staleFor");
     }
 
+    // What a row already says is settled before anything is loaded. A store that could
+    // not filter hands back every instance of the entity, and reading each one's values
+    // or last commit only to discard it on its state would replay the whole entity.
+    const filtered = unsupported.size > 0;
+    const narrowed = filtered
+      ? result.matches.filter((match) => isPlaced(match, criteria))
+      : result.matches;
     const read = await this.#readMissing(
       authority,
       criteria,
-      result.matches,
+      narrowed,
       unsupported.has("staleFor")
     );
-    if (unsupported.size === 0) {
-      return { matches: read, complete: result.complete, filtered: false };
-    }
+    const matches = unsupported.has("staleFor")
+      ? read.filter((match) => isQuiet(match, staleForMs as number, now))
+      : read;
 
-    const matches = read.filter((match) => {
-      const wrongState =
-        unsupported.has("state") &&
-        state !== undefined &&
-        match.state !== state;
-      const tooRecent =
-        unsupported.has("olderThan") &&
-        (olderThanMs ?? 0) > now - match.enteredAt;
-      const heardFrom =
-        unsupported.has("staleFor") &&
-        !isQuiet(match, staleForMs as number, now);
-      return !(wrongState || tooRecent || heardFrom);
-    });
-
-    return { matches, complete: result.complete, filtered: true };
+    return { matches, complete: result.complete, filtered };
   }
 
   /**
@@ -2070,7 +2060,14 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
         }
         const loaded = await authority.load(match.key);
         const current = loaded === undefined ? undefined : replay(loaded);
-        if (current === undefined || !satisfies(current, criteria)) {
+        if (
+          current === undefined ||
+          !isPlaced(current, criteria) ||
+          !(
+            criteria.staleForMs === undefined ||
+            isQuiet(current, criteria.staleForMs, criteria.now)
+          )
+        ) {
           return;
         }
         return {
@@ -2151,6 +2148,12 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     } catch (error) {
       outcome = refusalOutcome(error);
       this.#onUnhandled(error, { source: "escalation", key: instance.key });
+    }
+    if (outcome === "refused") {
+      // The one ending the stream does not show. A commit or a recorded refusal has
+      // settled the bound already, and one turned away for a reason that passes stays
+      // owed for the next sweep.
+      instance.refused(constraint.name, cause.id);
     }
 
     this.#emit({
@@ -2308,7 +2311,7 @@ function assertLimit(
 }
 
 /** Whether one committed revision of an instance meets a scan's state and age criteria. */
-function satisfies(
+function isPlaced(
   current: { readonly state: string; readonly enteredAt: number },
   criteria: ScanCriteria
 ): boolean {
@@ -2418,7 +2421,11 @@ function nextDue(
  * Whether a scan row has gone at least this long without a commit. A row whose last
  * commit time the store does not know has not: unknown is not stale.
  */
-function isQuiet(match: ScanMatch, forMs: number, at: number): boolean {
+function isQuiet(
+  match: { readonly lastCommittedAt?: number | undefined },
+  forMs: number,
+  at: number
+): boolean {
   return (
     match.lastCommittedAt !== undefined && at - match.lastCommittedAt >= forMs
   );

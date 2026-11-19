@@ -96,7 +96,6 @@ export class InstanceRecord<
    * as long as the instance sits there.
    */
   readonly #temporal = new LatchFold();
-  #stateEntry = 0;
   /**
    * Rules whose proposal is queued or running, with the id of that proposal's trigger.
    * Memory only: a key with a trigger queued is never evicted, so there is nothing here
@@ -322,31 +321,6 @@ export class InstanceRecord<
     return this.#temporal.hasFired(constraint);
   }
 
-  /**
-   * Which entry into its state this record is on. Advances every time the state changes.
-   *
-   * An escalation is raised for one entry and answered some time later, behind whatever
-   * was already queued. If the instance left the state and came back in between, the
-   * answer belongs to an entry that is over, and recording it against the current one
-   * would silence that entry's own bound. Callers read this before raising an escalation
-   * and hand it back when recording the outcome.
-   */
-  get stateEntry(): number {
-    return this.#stateEntry;
-  }
-
-  /**
-   * Record that a constraint fired, unless the entry it fired for is no longer current.
-   *
-   * For an outcome the stream does not show. One it does show, a commit or a recorded
-   * refusal, has settled the constraint already.
-   */
-  markFired(constraint: string, entry: number): void {
-    if (entry === this.#stateEntry) {
-      this.#temporal.fire(constraint);
-    }
-  }
-
   /** The trigger id of an escalation still owed to this constraint, if one was turned away. */
   undelivered(constraint: string): string | undefined {
     return this.#temporal.owed(constraint)?.id;
@@ -393,21 +367,20 @@ export class InstanceRecord<
   }
 
   /**
-   * Record that a proposal was refused for good, in a way the stream does not show, so
-   * the rule is done until it is armed again.
+   * Record that the trigger a bound or a rule raised was refused for good, in a way the
+   * stream does not show, so it is done until it is armed again.
    *
-   * Only while that proposal is the one the rule is still owed. If the rule was armed
-   * again or the instance moved in the meantime, the refusal is about a match that is
-   * over, and marking the rule done would silence the next one.
+   * Only while that trigger is the one still owed. If the instance moved, or was heard
+   * from, or the rule was armed again in the meantime, the refusal is about something
+   * that is over, and marking the bound or rule done would silence the next time.
    */
-  refused(rule: string, id: string): void {
-    if (this.#temporal.owed(rule)?.id === id) {
-      this.#temporal.fire(rule);
+  refused(name: string, id: string): void {
+    if (this.#temporal.owed(name)?.id === id) {
+      this.#temporal.fire(name);
     }
   }
 
   #rearmTemporal(cause?: EventCause): void {
-    this.#stateEntry += 1;
     this.#temporal.moved(cause);
     // A proposal still queued was raised for the stay that just ended. The new one
     // raises its own.
@@ -796,6 +769,12 @@ export class InstanceRecord<
       current.enteredAt !== this.#enteredAt
     ) {
       this.#rearmTemporal();
+    } else {
+      // A reload follows a conflict, so another writer committed, here without moving
+      // the instance: it has been heard from since this record last looked. What its
+      // freshness bounds had said here is out of date, and the store's account, merged
+      // below, says what still stands.
+      this.#temporal.heardElsewhere();
     }
     // The store's account of the stay is taken in either way. Another runtime can have
     // answered an escalation without moving the instance, and this one would raise it

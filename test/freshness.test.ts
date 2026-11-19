@@ -445,6 +445,44 @@ describe("a freshness bound", () => {
     await ekman.close();
   });
 
+  it("is armed again by a probe that lands while its trigger is still queued", async () => {
+    // A probe is already running when the sweep finds the instance quiet. The sweep's
+    // trigger queues behind it. The probe then commits, so the instance has been heard
+    // from and the silence is over, and the trigger that follows is answering nothing.
+    let hold: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      hold = resolve;
+    });
+    const slow = defineEntity("services", {
+      initial: "healthy",
+      states: {
+        healthy: (_service, trigger) =>
+          trigger.type === "slow-probe" ? held.then(() => stay()) : stay(),
+      },
+      constraints: { stale: [{ name: "gone-quiet", after: 1000 }] },
+    });
+    const time = clock();
+    const ekman = new Ekman({ entities: [slow], now: time.now });
+
+    await ekman.send("services:api", probe);
+    time.advance(1500);
+    const running = ekman.send("services:api", { type: "slow-probe" });
+    const sweeping = ekman.sweep();
+    await vi.waitFor(async () =>
+      expect(await violations(ekman)).toHaveLength(1)
+    );
+    hold();
+    await running;
+    expect(await sweeping).toBe(1);
+
+    // Heard from again, and then quiet again: the bound has to be free to say so.
+    await ekman.send("services:api", probe);
+    time.advance(1500);
+    expect(await ekman.sweep()).toBe(1);
+    expect(await violations(ekman)).toHaveLength(2);
+    await ekman.close();
+  });
+
   it("stays said after its own trigger moved the instance", async () => {
     const elsewhere: StaleConstraint<Health> = {
       name: "anywhere",
@@ -856,6 +894,104 @@ describe("querying by time since the last commit", () => {
     expect(
       (await ekman.query({ entity: "services", staleFor: 2501 })).instances
     ).toHaveLength(1);
+    await ekman.close();
+  });
+
+  it("does not drop an instance from a query that set no such filter, when the clock steps back", async () => {
+    const time = clock(0);
+    const ekman = new Ekman({ entities: [services([])], now: time.now });
+    await ekman.entities.services.send("api", probe);
+    time.advance(200);
+    await ekman.entities.services.send("api", probe);
+    // The clock is corrected backwards, to before that last commit.
+    time.advance(-100);
+
+    const { instances } = await ekman.query({ entity: "services" });
+    expect(instances.map((m) => [m.key, m.ageMs, m.staleMs])).toEqual([
+      ["services:api", 100, -100],
+    ]);
+    await ekman.close();
+  });
+
+  it("holds a row read late to the silence that was asked for", async () => {
+    // The store applies the filter and leaves values out. By the time the runtime reads
+    // them the instance has committed, so it is no longer quiet and is no longer a match.
+    const inner = memoryStore();
+    const time = clock();
+    const first = new Ekman({
+      entities: [services([])],
+      store: inner,
+      now: time.now,
+    });
+    await first.entities.services.send("api", probe);
+    await first.close();
+    time.advance(5000);
+
+    const racing = wrap(inner, {
+      scan: async ({ includeValues: _ignored, ...criteria }) => {
+        const found = await inner.scan(criteria);
+        const other = new Ekman({
+          entities: [services([])],
+          store: inner,
+          now: time.now,
+        });
+        await other.entities.services.send("api", probe);
+        await other.close();
+        return found;
+      },
+    });
+    const ekman = new Ekman({
+      entities: [services([])],
+      store: racing,
+      now: time.now,
+    });
+
+    const { instances } = await ekman.query({
+      entity: "services",
+      staleFor: 1000,
+      includeValues: true,
+    });
+    expect(instances).toEqual([]);
+    await ekman.close();
+  });
+
+  it("settles what a row already says before loading anything for it", async () => {
+    // A store that hands back every instance, with no values and no filtering. Reading
+    // values for rows the state already rules out would replay the whole entity.
+    const inner = memoryStore();
+    const first = new Ekman({ entities: [services([])], store: inner });
+    for (const name of ["a", "b", "c", "d"]) {
+      // biome-ignore lint/performance/noAwaitInLoops: four commits, in order
+      await first.entities.services.send(name, probe);
+    }
+    await first.entities.services.send("d", {
+      type: DEFAULT_STALE_TRIGGER,
+      propose: "unreachable",
+    });
+    await first.close();
+
+    const loads: string[] = [];
+    const blunt = wrap(inner, {
+      capabilities: {
+        ...inner.capabilities,
+        scan: { byState: false, olderThan: false },
+      },
+      load: (key) => {
+        loads.push(key);
+        return inner.load(key);
+      },
+      scan: ({ state: _s, includeValues: _v, ...criteria }) =>
+        inner.scan(criteria),
+    });
+    const ekman = new Ekman({ entities: [services([])], store: blunt });
+
+    const result = await ekman.query({
+      entity: "services",
+      state: "unreachable",
+      includeValues: true,
+    });
+    expect(result.instances.map((m) => m.key)).toEqual(["services:d"]);
+    expect(loads).toEqual(["services:d"]);
     await ekman.close();
   });
 
