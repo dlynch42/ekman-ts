@@ -427,6 +427,22 @@ export interface StorageConfig {
   readonly sweepMs?: number;
 }
 
+/** How the runtime treats the cache layers of a layered store. */
+export interface CacheConfig {
+  /**
+   * How long one call into a cache layer may take, in milliseconds. Defaults to 5 seconds.
+   *
+   * A cache is never allowed to cost more than itself. A read that takes longer is a
+   * miss, and the commit authority answers. A write that takes longer is a failed write.
+   * Both are reported as `store.cacheFailed`. A layer whose reads, or whose writes, go
+   * unanswered three times in a row is not used again by this runtime, which is reported
+   * as `store.cacheSuspended`.
+   *
+   * Has no effect on the commit authority, or on a stack with no cache layer.
+   */
+  readonly timeoutMs?: number;
+}
+
 /** What `close()` accepts. */
 export interface CloseOptions {
   /** How long to wait for in-flight work, in milliseconds. Defaults to 30 seconds. */
@@ -451,6 +467,8 @@ export interface EkmanConfig<
    * processes is refused at startup rather than accepted and quietly under-delivered.
    */
   readonly coordination?: Coordination;
+  /** The time bound on calls into cache layers. */
+  readonly cache?: CacheConfig;
   /**
    * Where commits go. Omitted means memory only, which is a valid documented mode rather
    * than a degraded one: nothing survives the process, and nothing pretends to.
@@ -464,6 +482,7 @@ export interface EkmanConfig<
    * ```ts
    * store: "file"                                  // durable, in .ekman/logs
    * store: ["memory", "file"]                      // layered, fastest first
+   * store: [{ kind: "memory", maxKeys: 10_000 }, "file"]  // a cache with a bound
    * store: { kind: "file", dir: "/var/lib/svc" }   // somewhere specific
    * store: ["memory", redisStore(client)]          // an adapter core does not ship
    * store: "none"                                  // keeps nothing, and says so

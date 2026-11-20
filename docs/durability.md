@@ -26,6 +26,7 @@ client you are not using.
 | `"file"` | Durable. Writes to `.ekman/logs/`. |
 | `"none"` | Says out loud that this runtime keeps nothing. |
 | `{ kind: "file", dir, retention }` | The file store with options. |
+| `{ kind: "memory", keep, maxKeys }` | The memory store with options, for when it is a [cache](#a-memory-cache). |
 | a `Store` instance | An adapter Ekman does not ship. |
 
 ## Layering
@@ -38,15 +39,29 @@ Layers are listed fastest first. **Exactly one layer is the commit authority** a
 truth: the last durable one. The rest are caches.
 
 A commit goes to the authority, and resolves there. The caches are written afterwards, in order
-per key, and no commit, `history()` or `close()` ever waits for one. A cache write still queued
-when the runtime closes is dropped.
+per key, and no commit or `history()` ever waits for one.
+
+`close()` waits for cache writes only when a cache outlives the process, as a file store placed
+in front of another authority does. A write it never received would leave it one commit behind
+for the next process to load. The wait shares the deadline of `close({ timeoutMs })`, and
+whatever is still queued at the deadline is dropped and counted in `runtime.closed` as
+`cachePending`. A write that ran out of `cache.timeoutMs` and has still not settled is waited
+for and counted too, since it can land after the layers close. A stack whose caches are all `"memory"` is never waited for: what they are owed
+dies with them. With a cache of each kind, a key's writes reach its caches in one order, so
+they are waited for together.
+
+A cache that outlives the process can still end up behind, after a crash between the
+authority's write and its own, or a shutdown that ran out of time. The next process then loads
+that key from the cache, the authority refuses the commit built on it, and that one `send()`
+rejects with `STORE_CONFLICT`. The key is cleared from the caches and the next send loads from
+the authority. Nothing stale is committed.
 
 When an instance that is not resident is loaded, the caches are asked first, fastest first, and
 the first that holds the key answers. If none does, the authority answers and the caches are
 filled from it, so the next load of that key is a cache's. This is the one read a cache serves.
 A load that arrives while writes for its key are still on their way to the caches does not wait
-for them either: the authority answers it, so a cache that is slow, or never answers, costs the
-key its cache and nothing else.
+for them either: the authority answers it, so a cache that is slow costs the key its cache and
+nothing else.
 `history()` and `query()` always read the authority, because a cache holds the state of a key
 and not necessarily its whole stream.
 
@@ -73,14 +88,66 @@ Two things follow from a cache being read first:
   built on it is refused by the authority with `STORE_CONFLICT`, the key is cleared from the
   caches, and the next trigger loads from the authority.
 
-A `"memory"` cache keeps every event it is sent, for every key, for the life of the process, and
-none of that is counted by the [memory budget](./memory.md). It trades memory for skipping a disk
-read when an evicted instance comes back. If the budget is the point, leave it out and use
-`store: "file"` alone.
-
 An `instance.restored` event says what the layer that answered held: `from: "snapshot"` when a
-cache was filled from the authority and has had few events since, whatever the authority's own
-log looks like.
+cache answered from a snapshot and has had few events since, whatever the authority's own log
+looks like.
+
+### A memory cache
+
+A `"memory"` layer in front of another store trades memory for skipping a disk read when an
+evicted instance comes back. None of what it holds is counted by the
+[memory budget](./memory.md), so it has bounds of its own.
+
+**It keeps state and not the stream.** A cache answers one read, the load of an instance, and
+that needs the key's state. So as a cache the memory store holds one snapshot per key and at
+most the last 16 events, folding them into the snapshot as they gather. A key costs it the same
+on its millionth commit as on its first. Pass `keep: "stream"` to have it hold every event, as
+it does when it is the only layer.
+
+**It can be told the most keys to hold:**
+
+```ts
+store: [{ kind: "memory", maxKeys: 10_000 }, "file"],
+```
+
+At the limit the key used least recently is dropped. A dropped key is a miss: the authority
+answers the next load of it and the cache is filled again. Without `maxKeys` it holds every key
+it has been sent for the life of the process, so set it when the budget is the point.
+
+Both are for a cache. On the commit authority, where `keep: "state"` would lose the history
+and `maxKeys` would lose committed state, they are refused at startup with `INVALID_CONFIG`.
+
+A memory store you wrap in a layer of your own is not told that it is a cache. Build it with
+`createStore({ kind: "memory", keep: "state" })` to get the same behaviour.
+
+### A cache that does not answer
+
+A cache layer is somebody else's code, often on the other end of a network, and it may never
+answer. Every call the runtime makes into one has a time bound:
+
+```ts
+cache: { timeoutMs: 5_000 },   // the default
+```
+
+- A read that runs out is a miss. The authority answers, so the load costs the bound once
+  and not forever.
+- A write that runs out is a failed write, and the writes queued behind it for that key go
+  ahead. It may still land later, so the cache is neither read nor written for that key until
+  the write has settled and the key has been deleted from it.
+- Both are reported as `store.cacheFailed`.
+- A cache whose reads, or whose writes, run out three times in a row is not used again by
+  this runtime. Nothing queued for it is sent. This is reported once, as
+  `store.cacheSuspended`, and a restart is what brings the layer back.
+- `forget()` still deletes the key from the authority and from every cache that answers, and
+  then rejects with `STORE_UNAVAILABLE` for a cache that was given up on, which may still
+  hold the key. Call `forget()` again once that cache is back.
+
+The bound cannot be turned off, only raised. It applies to cache layers alone: a commit waits
+for the authority for as long as the authority takes, and the handler's own `timeoutMs` is what
+bounds that.
+
+A layer that settles on the same turn it is called, as `"memory"` does, never has a timer set
+for it.
 
 ## Capabilities, and configurations that are refused
 
@@ -291,7 +358,7 @@ Two things about `load` and `snapshot` are easy to get wrong:
   for instance, takes it from `replay`, as it takes everything else. Never fill it in from
   somewhere else: absent means unknown, and the runtime treats unknown as not stale.
 
-Two declarations the runtime holds you to:
+What the runtime holds you to:
 
 - `capabilities.scan` says whether your `scan` applies the `state` and `olderThan` criteria. A
   scan that could not apply one names it in `unsupported`, as `"state"` or `"olderThan"`, and
@@ -309,6 +376,10 @@ Two declarations the runtime holds you to:
   What a store must not do is carry values other than the last committed ones.
 - `usage` is optional, and a method: `usage(): StoreUsage`. Implement it when the store can
   say what it holds. `ekman.storageUsage` sums it across the stack.
+- `capabilities.evicts` says your store drops keys by itself to stay inside a bound of its own.
+  It is optional and absent means no. Only a cache layer should: the write it then refuses
+  with `STORE_CONFLICT`, for a key it no longer holds, is taken as a miss and not reported as
+  `store.cacheFailed`.
 
 ## Next
 

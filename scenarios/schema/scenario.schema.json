@@ -60,6 +60,7 @@
             "instance.restored",
             "audit.failed",
             "store.cacheFailed",
+            "store.cacheSuspended",
             "storage.swept",
             "runtime.closed"
           ]

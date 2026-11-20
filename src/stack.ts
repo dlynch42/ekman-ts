@@ -2,7 +2,8 @@ import { EkmanError } from "./errors";
 import type { Store } from "./store";
 import type { FileStoreOptions } from "./stores/file";
 import { fileStore } from "./stores/file";
-import { memoryStore } from "./stores/memory";
+import type { MemoryKeep } from "./stores/memory";
+import { MemoryStore, memoryStore } from "./stores/memory";
 
 /**
  * A store described rather than constructed.
@@ -18,6 +19,17 @@ export type StoreSpec =
       readonly kind: "memory";
       readonly name?: string;
       readonly authority?: boolean;
+      /**
+       * What to keep for a key: `stream`, every event, or `state`, one snapshot. Defaults
+       * to `state` for a cache layer and `stream` otherwise. `state` is refused on the
+       * commit authority.
+       */
+      readonly keep?: MemoryKeep;
+      /**
+       * The most keys to hold, dropping the least recently used. For a cache layer only,
+       * and refused on the commit authority.
+       */
+      readonly maxKeys?: number;
     }
   | ({ readonly kind: "file"; readonly dir?: string } & FileStoreOptions);
 
@@ -289,6 +301,21 @@ export function resolveStack(
         "durable layer is configured behind it. The authority owns the truth, so this " +
         "would discard committed state on restart. Mark the durable layer as the authority."
     );
+  }
+
+  MemoryStore.placed(authority, "authority");
+  if (authority.capabilities.evicts === true) {
+    // Whatever the store is, and however it came to drop keys: with nothing behind it, a
+    // key it drops is committed state gone.
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      `store layer "${authority.name}" is the commit authority and declares that it drops ` +
+        "keys to stay inside a bound of its own. Nothing is behind an authority to answer " +
+        "for a key it dropped. Use it in front of another store, as a cache."
+    );
+  }
+  for (const cache of caches) {
+    MemoryStore.placed(cache, "cache");
   }
 
   return Object.freeze({

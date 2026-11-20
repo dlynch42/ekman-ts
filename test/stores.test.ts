@@ -27,7 +27,7 @@ import {
   STORE_DIR_NAME,
 } from "../src/stores/file";
 import { storeContract } from "../src/stores/index";
-import { memoryStore } from "../src/stores/memory";
+import { memoryStore, STATE_FOLD_EVERY } from "../src/stores/memory";
 import type { Values } from "../src/types";
 
 const NEEDS_BUDGET = /needs a totalBytes to act on/;
@@ -265,6 +265,191 @@ describe("capability declarations", () => {
     const store = memoryStore({ name: "hot", authority: true });
     expect(store.name).toBe("hot");
     expect(store.authority).toBe(true);
+  });
+});
+
+describe("a memory store that keeps state and not the stream", () => {
+  const moved = (key: string, seq: number): EkmanEvent => ({
+    type: "transition",
+    key,
+    from: seq === 0 ? null : "open",
+    to: "open",
+    seq,
+    at: seq * 10,
+    cause: { type: "touch", id: `t${seq}` },
+    values: { n: seq },
+  });
+  const refused = (key: string, seq: number): EkmanEvent => ({
+    type: "rejected",
+    key,
+    seq,
+    at: 99,
+    cause: { type: "nope", id: "t9" },
+    code: "UNKNOWN_TRIGGER",
+    reason: "not one it knows",
+  });
+  const code = (attempt: () => unknown): string | undefined => {
+    try {
+      attempt();
+    } catch (error) {
+      return (error as EkmanError).code;
+    }
+  };
+
+  it("holds a snapshot and a few events for a key, however many it was sent", async () => {
+    const store = memoryStore({ keep: "state" });
+    const sent = STATE_FOLD_EVERY * 3 + 2;
+    for (let seq = 0; seq < sent; seq += 1) {
+      // biome-ignore lint/performance/noAwaitInLoops: each append is conditional on the one before
+      await store.append("orders:1", moved("orders:1", seq), seq - 1);
+    }
+
+    const loaded = await store.load("orders:1");
+
+    expect(await store.read("orders:1")).toHaveLength(2);
+    expect(loaded?.events).toHaveLength(2);
+    expect(loaded?.snapshot?.seq).toBe(sent - 3);
+    expect(loaded?.seq).toBe(sent - 1);
+    expect(replay(loaded as LoadResult)).toMatchObject({
+      state: "open",
+      values: { n: sent - 1 },
+      seq: sent - 1,
+      enteredAt: 0,
+      lastCommittedAt: (sent - 1) * 10,
+    });
+  });
+
+  it("still refuses an append that is out of step", async () => {
+    const store = memoryStore({ keep: "state" });
+    await store.append("orders:1", moved("orders:1", 0), EMPTY_SEQ);
+
+    await expect(
+      store.append("orders:1", moved("orders:1", 2), 1)
+    ).rejects.toMatchObject({ code: "STORE_CONFLICT" });
+    expect((await store.load("orders:1"))?.seq).toBe(0);
+  });
+
+  it("takes an event that is not a commit without moving the sequence", async () => {
+    const store = memoryStore({ keep: "state" });
+    await store.append("orders:1", moved("orders:1", 0), EMPTY_SEQ);
+
+    for (let sent = 1; sent < STATE_FOLD_EVERY; sent += 1) {
+      // biome-ignore lint/performance/noAwaitInLoops: appended in order, as a runtime would
+      await store.append("orders:1", refused("orders:1", 0), 0);
+    }
+
+    expect(await store.load("orders:1")).toMatchObject({
+      seq: 0,
+      events: [],
+      snapshot: { seq: 0, at: 99 },
+    });
+  });
+
+  it("holds nothing for a key it was only ever sent refusals for", async () => {
+    const store = memoryStore({ keep: "state" });
+
+    for (let sent = 0; sent < STATE_FOLD_EVERY; sent += 1) {
+      // biome-ignore lint/performance/noAwaitInLoops: appended in order, as a runtime would
+      await store.append("orders:1", refused("orders:1", EMPTY_SEQ), EMPTY_SEQ);
+    }
+
+    expect(await store.load("orders:1")).toBeUndefined();
+  });
+
+  it("refuses a way of keeping it does not have", () => {
+    expect(code(() => memoryStore({ keep: "everything" as never }))).toBe(
+      "INVALID_CONFIG"
+    );
+  });
+});
+
+describe("a memory store with a limit on its keys", () => {
+  const first = (key: string): EkmanEvent => ({
+    type: "transition",
+    key,
+    from: null,
+    to: "open",
+    seq: 0,
+    at: 0,
+    cause: { type: "touch", id: "t0" },
+    values: {},
+  });
+
+  it("drops the key used least recently to make room", async () => {
+    const store = memoryStore({ maxKeys: 2 });
+    await store.append("orders:a", first("orders:a"), EMPTY_SEQ);
+    await store.append("orders:b", first("orders:b"), EMPTY_SEQ);
+    // A load is a use, so it is "b" that has gone longest without one.
+    await store.load("orders:a");
+
+    await store.append("orders:c", first("orders:c"), EMPTY_SEQ);
+
+    expect([...store.keys].sort()).toEqual(["orders:a", "orders:c"]);
+    expect(await store.load("orders:b")).toBeUndefined();
+  });
+
+  it("counts a key it was handed as a snapshot", async () => {
+    const store = memoryStore({ maxKeys: 1 });
+    await store.append("orders:a", first("orders:a"), EMPTY_SEQ);
+
+    await store.snapshot("orders:b", {
+      key: "orders:b",
+      entity: "orders",
+      state: "open",
+      values: {},
+      seq: 4,
+      enteredAt: 0,
+      at: 0,
+    });
+
+    expect(store.keys).toEqual(["orders:b"]);
+  });
+
+  it("stops counting a key that was deleted", async () => {
+    const store = memoryStore({ maxKeys: 2 });
+    await store.append("orders:a", first("orders:a"), EMPTY_SEQ);
+    await store.append("orders:b", first("orders:b"), EMPTY_SEQ);
+    await store.forget("orders:a");
+
+    await store.append("orders:c", first("orders:c"), EMPTY_SEQ);
+
+    expect([...store.keys].sort()).toEqual(["orders:b", "orders:c"]);
+  });
+
+  it("does not count a key it let go of with nothing kept", async () => {
+    const store = memoryStore({ keep: "state", maxKeys: 2 });
+    await store.append("orders:b", first("orders:b"), EMPTY_SEQ);
+    for (let sent = 0; sent < STATE_FOLD_EVERY; sent += 1) {
+      // biome-ignore lint/performance/noAwaitInLoops: appended in order, as a runtime would
+      await store.append(
+        "orders:a",
+        {
+          type: "rejected",
+          key: "orders:a",
+          seq: EMPTY_SEQ,
+          at: 0,
+          cause: { type: "nope", id: "t9" },
+          code: "UNKNOWN_TRIGGER",
+          reason: "not one it knows",
+        },
+        EMPTY_SEQ
+      );
+    }
+
+    await store.append("orders:c", first("orders:c"), EMPTY_SEQ);
+
+    expect([...store.keys].sort()).toEqual(["orders:b", "orders:c"]);
+  });
+
+  it("says that it drops keys, and only when it has a limit", () => {
+    expect(memoryStore({ maxKeys: 2 }).capabilities.evicts).toBe(true);
+    expect(memoryStore().capabilities.evicts).toBeUndefined();
+  });
+
+  it.each([0, -1, 1.5, Number.NaN])("refuses a limit of %s", (maxKeys) => {
+    expect(() => memoryStore({ maxKeys })).toThrow(
+      expect.objectContaining({ code: "INVALID_CONFIG" })
+    );
   });
 });
 
