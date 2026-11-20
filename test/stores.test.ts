@@ -416,6 +416,31 @@ describe("a memory store with a limit on its keys", () => {
     expect([...store.keys].sort()).toEqual(["orders:b", "orders:c"]);
   });
 
+  it("does not count a key it let go of with nothing kept", async () => {
+    const store = memoryStore({ keep: "state", maxKeys: 2 });
+    await store.append("orders:b", first("orders:b"), EMPTY_SEQ);
+    for (let sent = 0; sent < STATE_FOLD_EVERY; sent += 1) {
+      // biome-ignore lint/performance/noAwaitInLoops: appended in order, as a runtime would
+      await store.append(
+        "orders:a",
+        {
+          type: "rejected",
+          key: "orders:a",
+          seq: EMPTY_SEQ,
+          at: 0,
+          cause: { type: "nope", id: "t9" },
+          code: "UNKNOWN_TRIGGER",
+          reason: "not one it knows",
+        },
+        EMPTY_SEQ
+      );
+    }
+
+    await store.append("orders:c", first("orders:c"), EMPTY_SEQ);
+
+    expect([...store.keys].sort()).toEqual(["orders:b", "orders:c"]);
+  });
+
   it("says that it drops keys, and only when it has a limit", () => {
     expect(memoryStore({ maxKeys: 2 }).capabilities.evicts).toBe(true);
     expect(memoryStore().capabilities.evicts).toBeUndefined();

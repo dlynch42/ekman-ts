@@ -275,7 +275,7 @@ export class MemoryStore implements Store {
    * about the key's bounds has to land all the same.
    *
    * Events that replay to no state, refusals for a key that was never created, are let go
-   * with nothing kept.
+   * with nothing kept, and the key stops counting toward the limit on keys.
    */
   #fold(key: string, events: readonly EkmanEvent[]): void {
     const current = replay({
@@ -284,10 +284,13 @@ export class MemoryStore implements Store {
       seq: EMPTY_SEQ,
     });
     this.#events.delete(key);
-    if (current !== undefined) {
-      const { at } = events.at(-1) as EkmanEvent;
-      this.#snapshots.set(key, snapshotOf(key, current, at));
+    if (current === undefined) {
+      this.#recent.delete(key);
+      return;
     }
+
+    const { at } = events.at(-1) as EkmanEvent;
+    this.#snapshots.set(key, snapshotOf(key, current, at));
   }
 
   #foldAll(): void {
