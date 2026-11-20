@@ -45,7 +45,8 @@ per key, and no commit or `history()` ever waits for one.
 in front of another authority does. A write it never received would leave it one commit behind
 for the next process to load. The wait shares the deadline of `close({ timeoutMs })`, and
 whatever is still queued at the deadline is dropped and counted in `runtime.closed` as
-`cachePending`. A stack whose caches are all `"memory"` is never waited for: what they are owed
+`cachePending`. A write that ran out of `cache.timeoutMs` and has still not settled is waited
+for and counted too, since it can land after the layers close. A stack whose caches are all `"memory"` is never waited for: what they are owed
 dies with them. With a cache of each kind, a key's writes reach its caches in one order, so
 they are waited for together.
 

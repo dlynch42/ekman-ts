@@ -2540,6 +2540,29 @@ describe("closing the runtime", () => {
       ]);
     });
 
+    it("says so when a write that ran out of time is still out at its deadline", async () => {
+      const closed: TelemetryEvent[] = [];
+      const ekman = new Ekman({
+        entities: [tickets],
+        store: [outlasting("cache", never).layer, outlasting("truth").layer],
+        cache: { timeoutMs: 5 },
+        telemetry: { "runtime.closed": (event) => closed.push(event) },
+      });
+      await ekman.entities.tickets.send("t1", { type: "poke" });
+      // Long enough for the write to have run out, so nothing is queued for the key.
+      await new Promise((done) => setTimeout(done, 20));
+
+      await ekman.close({ timeoutMs: 20 });
+
+      expect(closed).toEqual([
+        expect.objectContaining({
+          drained: false,
+          pending: 0,
+          cachePending: 1,
+        }),
+      ]);
+    });
+
     it("does not wait for one held in memory", async () => {
       const closed: TelemetryEvent[] = [];
       const inner = memoryStore({ name: "cache" });

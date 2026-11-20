@@ -82,6 +82,8 @@ export class MemoryStore implements Store {
    * An object, so it reads as something that changes.
    */
   readonly #kept: { keep: MemoryKeep | undefined };
+  /** What the options asked for, which a role is decided against each time. */
+  readonly #asked: MemoryKeep | undefined;
   readonly #maxKeys: number | undefined;
 
   readonly #events = new Map<string, EkmanEvent[]>();
@@ -118,6 +120,7 @@ export class MemoryStore implements Store {
       );
     }
     this.#kept = { keep };
+    this.#asked = keep;
     this.#maxKeys = maxKeys;
     this.capabilities = Object.freeze({
       durability: "ephemeral" as const,
@@ -137,6 +140,9 @@ export class MemoryStore implements Store {
    * A cache that was not told what to keep keeps state. An authority keeps the stream,
    * and is refused if it was asked to keep less or to drop keys: both lose what it alone
    * holds. Events a store already holds when it becomes a cache are folded.
+   *
+   * Decided from what the options asked for each time, never from an earlier role, so a
+   * store that was once an authority is not held to the stream as a cache.
    */
   static placed(layer: Store, role: "authority" | "cache"): void {
     if (!(layer instanceof MemoryStore)) {
@@ -144,7 +150,7 @@ export class MemoryStore implements Store {
     }
 
     if (role === "cache") {
-      layer.#kept.keep ??= "state";
+      layer.#kept.keep = layer.#asked ?? "state";
       if (layer.#kept.keep === "state") {
         layer.#foldAll();
       }
@@ -152,7 +158,7 @@ export class MemoryStore implements Store {
     }
 
     const asked = [
-      layer.#kept.keep === "state" ? 'keep: "state"' : undefined,
+      layer.#asked === "state" ? 'keep: "state"' : undefined,
       layer.#maxKeys === undefined ? undefined : "maxKeys",
     ].filter((option) => option !== undefined);
     if (asked.length > 0) {

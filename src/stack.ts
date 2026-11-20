@@ -304,6 +304,16 @@ export function resolveStack(
   }
 
   MemoryStore.placed(authority, "authority");
+  if (authority.capabilities.evicts === true) {
+    // Whatever the store is, and however it came to drop keys: with nothing behind it, a
+    // key it drops is committed state gone.
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      `store layer "${authority.name}" is the commit authority and declares that it drops ` +
+        "keys to stay inside a bound of its own. Nothing is behind an authority to answer " +
+        "for a key it dropped. Use it in front of another store, as a cache."
+    );
+  }
   for (const cache of caches) {
     MemoryStore.placed(cache, "cache");
   }

@@ -18,6 +18,7 @@ const ABSENCE_OF_A_STORE = /names the absence/;
 const NOT_A_COORDINATION = /is not recognized/;
 const NEEDS_MULTI_WRITER = /declares it cannot/;
 const NOTHING_TO_COORDINATE = /no store is configured/;
+const DROPS_KEYS = /declares that it drops keys/;
 const NAMES_KEEP = /keep: "state"/;
 const NAMES_MAX_KEYS = /maxKeys/;
 const CACHE_UNDER_MULTI = /cache layer "memory" would be read before/;
@@ -161,6 +162,20 @@ describe("resolving a store stack", () => {
       }
     );
 
+    it("is decided by what it was asked for, not by a role it had before", async () => {
+      const store = memoryStore({ name: "moved" });
+      resolveStack(store);
+      await store.append("orders:1", first, EMPTY_SEQ);
+      expect(await store.read("orders:1")).toHaveLength(1);
+
+      // Once an authority, now a cache: it keeps state, and folds what it held.
+      resolveStack([store, durable()]);
+      expect(await store.read("orders:1")).toEqual([]);
+
+      // And an authority again, without being refused for a choice it never made.
+      expect(resolveStack(store).authority).toBe(store);
+    });
+
     it("takes both as a cache, named in the stack", () => {
       const stack = resolveStack([
         { kind: "memory", name: "hot", keep: "state", maxKeys: 10 },
@@ -169,6 +184,24 @@ describe("resolving a store stack", () => {
 
       expect(stack.caches[0]?.capabilities.evicts).toBe(true);
     });
+  });
+
+  it("refuses any authority that drops keys, whatever kind of store it is", () => {
+    const inner = memoryStore({ name: "bounded", maxKeys: 1 });
+    const wrapped: Store = {
+      name: inner.name,
+      capabilities: inner.capabilities,
+      append: inner.append.bind(inner),
+      load: inner.load.bind(inner),
+      read: inner.read.bind(inner),
+      scan: inner.scan.bind(inner),
+      snapshot: inner.snapshot.bind(inner),
+      forget: inner.forget.bind(inner),
+    };
+
+    expect(code(() => resolveStack(wrapped))).toBe("INVALID_CONFIG");
+    expect(() => resolveStack(wrapped)).toThrow(DROPS_KEYS);
+    expect(resolveStack([wrapped, durable()]).caches).toEqual([wrapped]);
   });
 
   it("picks the last durable layer as the authority", () => {

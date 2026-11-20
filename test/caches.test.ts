@@ -481,9 +481,12 @@ describe("a cache layer that does not answer", () => {
     const { layer, calls } = silent("forget");
     const { caches } = watched(layer);
 
-    await expect(caches.forget("orders:1")).rejects.toThrow(
-      "did not answer within"
-    );
+    const forgetting = caches.forget("orders:1");
+    await expect(forgetting).rejects.toThrow("did not answer within");
+    await expect(forgetting).rejects.toMatchObject({
+      code: "STORE_UNAVAILABLE",
+      key: "orders:1",
+    });
 
     caches.refill("orders:1", STATE);
     await caches.settled("orders:1");
@@ -532,6 +535,40 @@ describe("a cache layer that does not answer", () => {
       key: "orders:1",
     });
     expect(calls.forget).toBe(0);
+  });
+
+  it("still owes a shutdown the write that ran out, when it outlives the process", async () => {
+    const { layer, answer: land } = silent("append");
+    const lasting: Store = {
+      ...layer,
+      capabilities: { ...layer.capabilities, durability: "durable" },
+    };
+    const { caches } = watched(lasting);
+    caches.mirror(committed(0));
+    await caches.settled("orders:1");
+
+    // Nothing is queued for the key any more, and the write is still out there.
+    expect(caches.queued).toBe(1);
+    let idle = false;
+    const waiting = caches.idle().then(() => {
+      idle = true;
+    });
+    await outlasted();
+    expect(idle).toBe(false);
+
+    land();
+    await waiting;
+    expect(caches.queued).toBe(0);
+  });
+
+  it("owes a shutdown nothing for a write that ran out, when it is held in memory", async () => {
+    const { layer } = silent("append");
+    const { caches } = watched(layer);
+    caches.mirror(committed(0));
+    await caches.settled("orders:1");
+
+    expect(caches.queued).toBe(0);
+    await expect(caches.idle()).resolves.toBeUndefined();
   });
 
   it("is not worth a shutdown waiting for once it is given up on", async () => {

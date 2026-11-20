@@ -89,7 +89,7 @@ export class Caches {
   /** Layers given up on. Never read, written or cleared again. */
   readonly #abandoned = new Set<Store>();
   /** Keys with a write that ran out of time and has not settled yet, per layer. */
-  readonly #landing = new Map<Store, Set<string>>();
+  readonly #landing = new Map<Store, Map<string, Promise<void>>>();
   /** Tail of each key's chain, kept only while something is queued on it. */
   readonly #chains = new Map<string, Promise<void>>();
   readonly #standing = new Map<Store, Map<string, Standing>>();
@@ -113,7 +113,7 @@ export class Caches {
     this.#suspended = options.suspended ?? ignore;
     for (const layer of layers) {
       this.#standing.set(layer, new Map());
-      this.#landing.set(layer, new Set());
+      this.#landing.set(layer, new Map());
     }
   }
 
@@ -139,22 +139,57 @@ export class Caches {
     );
   }
 
-  /** How many keys have something queued. */
+  /**
+   * How many keys have something queued, or a write still out that ran out of time on a
+   * layer that outlives the process.
+   */
   get queued(): number {
-    return this.#chains.size;
+    const keys = new Set(this.#chains.keys());
+    for (const key of this.#stillOut().keys()) {
+      keys.add(key);
+    }
+    return keys.size;
   }
 
   /**
-   * Resolves once nothing is queued for any key. Never rejects.
+   * Resolves once nothing is queued for any key, and no write that ran out of time is
+   * still out on a layer that outlives the process. Never rejects.
    *
-   * Looked at again after every wait, because a write that settles can queue the delete
-   * that clears up after it.
+   * Such a write is off its key's chain, so that the chain could go on, but it is not
+   * over: if it lands after the layers close, nothing clears up after it.
+   *
+   * Looked at again after every wait, because a write that settles queues the delete that
+   * clears up after it.
    */
   async idle(): Promise<void> {
-    while (this.#chains.size > 0) {
+    for (;;) {
+      const waiting = [...this.#chains.values(), ...this.#stillOut().values()];
+      if (waiting.length === 0) {
+        return;
+      }
       // biome-ignore lint/performance/noAwaitInLoops: each pass waits for everything queued, then looks for what that queued
-      await Promise.all(this.#chains.values());
+      await Promise.all(waiting);
     }
+  }
+
+  /** Writes that ran out of time and have not settled, on lasting layers still in use. */
+  #stillOut(): Map<string, Promise<void>> {
+    const out = new Map<string, Promise<void>>();
+    for (const layer of this.#layers) {
+      if (
+        layer.capabilities.durability !== "durable" ||
+        this.#abandoned.has(layer)
+      ) {
+        continue;
+      }
+      for (const [key, settled] of this.#landing.get(layer) as Map<
+        string,
+        Promise<void>
+      >) {
+        out.set(key, settled);
+      }
+    }
+    return out;
   }
 
   /** Resolves once everything queued for a key has been tried. Never rejects. */
@@ -279,7 +314,8 @@ export class Caches {
    *
    * Queued behind the key's writes, so none of them lands afterwards and brings the
    * stream back. Every layer is tried. A layer that fails is left out for the key from
-   * then on, and the first failure is the caller's to hear. A layer that has been given
+   * then on, and the first failure is the caller's to hear. A layer that did not answer in
+   * time is a `STORE_UNAVAILABLE` naming the key. A layer that has been given
    * up on is not asked, and that is a failure too: it may still hold the key. A deletion
    * still waiting when the layers close is refused, and never run against a closed layer.
    *
@@ -315,7 +351,15 @@ export class Caches {
             }
           } catch (error) {
             this.#standing.get(layer)?.set(key, "distrusted");
-            throw error;
+            if (!(error instanceof Unanswered)) {
+              throw error;
+            }
+            // biome-ignore lint/style/useErrorCause: EkmanError takes `cause` in its options bag and forwards it to the Error constructor
+            throw new EkmanError(
+              "STORE_UNAVAILABLE",
+              `${JSON.stringify(key)} may not have been deleted: ${error.message}.`,
+              { key, cause: error }
+            );
           }
         })
       );
@@ -392,7 +436,7 @@ export class Caches {
     }
 
     this.#standing.get(layer)?.set(key, "distrusted");
-    this.#landing.get(layer)?.add(key);
+    this.#landing.get(layer)?.set(key, error.settled);
     error.settled.then(() => {
       this.#landing.get(layer)?.delete(key);
       this.#enqueue(key, () => this.#delete(layer, key, seq, true));

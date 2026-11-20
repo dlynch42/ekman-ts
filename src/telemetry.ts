@@ -339,7 +339,8 @@ export interface RuntimeClosedEvent {
   readonly pending: number;
   /**
    * How many keys still had writes queued for the cache layers, when one of them outlives
-   * the process. Those writes were dropped. Always 0 when no cache layer does.
+   * the process, or a write to such a layer that ran out of time and had not settled.
+   * What was queued was dropped. Always 0 when no cache layer outlives the process.
    */
   readonly cachePending: number;
 }
