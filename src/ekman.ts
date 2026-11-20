@@ -727,10 +727,11 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * delivering settles. Only then are the store layers closed, so none of that work meets
    * a closed connection.
    *
-   * Writes to a cache layer are waited for next, when the layer outlives the process. One
-   * it never received would leave it a commit behind the authority, for the next process
-   * to load and have its first commit refused. A cache held in memory is not waited for:
-   * what it is owed dies with it.
+   * Writes to the cache layers are waited for next, when one of them outlives the process.
+   * A write it never received would leave it a commit behind the authority, for the next
+   * process to load and have its first commit refused. A stack whose caches are all held
+   * in memory is not waited for: what they are owed dies with them. Where the two are
+   * mixed, a key's writes go to its layers in one order, so they are waited for together.
    *
    * The snapshot an eviction leaves behind is not waited for either. It is an
    * optimization whose loss costs replay time, never committed state. A cache write still

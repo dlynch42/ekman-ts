@@ -133,7 +133,9 @@ export class Caches {
    *
    * It is when a layer in use outlives the process: a write it never received leaves it
    * behind the authority for the next process to find. What a layer held in memory is
-   * owed dies with it.
+   * owed dies with it. A key's writes go to all of its layers on one chain, so with one
+   * layer of each kind the wait covers both: what is owed to the lasting layer may be
+   * queued behind a write to the other.
    */
   get outlasting(): boolean {
     return this.#layers.some(

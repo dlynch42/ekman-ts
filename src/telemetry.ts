@@ -338,8 +338,8 @@ export interface RuntimeClosedEvent {
   /** How many keys still had a handler running or a trigger waiting when it gave up. */
   readonly pending: number;
   /**
-   * How many keys still had writes queued for a cache layer that outlives the process.
-   * Those writes were dropped. Always 0 when no cache layer does.
+   * How many keys still had writes queued for the cache layers, when one of them outlives
+   * the process. Those writes were dropped. Always 0 when no cache layer does.
    */
   readonly cachePending: number;
 }
