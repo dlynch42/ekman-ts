@@ -140,6 +140,7 @@ export type {
   RuntimeClosedEvent,
   StorageSweptEvent,
   StoreCacheFailedEvent,
+  StoreCacheSuspendedEvent,
   TelemetryEvent,
   TelemetryEventType,
   TelemetrySink,
@@ -149,6 +150,7 @@ export { TELEMETRY_FALLBACK } from "./telemetry";
 export type { TemporalLatch } from "./temporal";
 export type {
   AnyEntityDefinition,
+  CacheConfig,
   CloseOptions,
   CommitResult,
   EkmanConfig,

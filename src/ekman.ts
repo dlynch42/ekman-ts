@@ -1,6 +1,6 @@
 import type { AuditSink } from "./audit";
 import { assertAuditSink, deliverTo } from "./audit";
-import { Caches } from "./caches";
+import { Caches, DEFAULT_CACHE_TIMEOUT_MS } from "./caches";
 import { assertBuilt, constraintsOf, statesOf } from "./compiled";
 import type { CommittedRecord, RuntimeDeps } from "./config";
 import { assertKnownKeys, resolveInboxConfig } from "./config";
@@ -53,6 +53,7 @@ import type { EscalationOutcome } from "./temporal";
 import { refusalOutcome, TemporalIndex } from "./temporal";
 import type {
   AnyEntityDefinition,
+  CacheConfig,
   CloseOptions,
   CommitResult,
   EkmanConfig,
@@ -193,6 +194,14 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
           store: failure.store,
           error: failure.error,
           seq: failure.seq,
+          at: telemetryNow(),
+        }),
+      timeoutMs: resolveCacheTimeout(config.cache),
+      suspended: (suspension) =>
+        this.#emit({
+          type: "store.cacheSuspended",
+          store: suspension.store,
+          timeouts: suspension.timeouts,
           at: telemetryNow(),
         }),
     });
@@ -2544,6 +2553,7 @@ const RUNTIME_KEYS = [
   "temporal",
   "storage",
   "coordination",
+  "cache",
   "store",
   "memory",
   "audit",
@@ -2554,6 +2564,25 @@ const RUNTIME_KEYS = [
 ] as const;
 
 const SWEEP_KEYS = ["sweepMs"] as const;
+
+const CACHE_KEYS = ["timeoutMs"] as const;
+
+/**
+ * The time bound on a call into a cache layer, refused when a timer could not hold it.
+ *
+ * There is no way to ask for no bound. A cache that may take forever is the failure the
+ * bound exists to contain, and the largest value a timer holds is over three weeks.
+ */
+function resolveCacheTimeout(cache: CacheConfig | undefined): number {
+  const timeoutMs = cache?.timeoutMs ?? DEFAULT_CACHE_TIMEOUT_MS;
+  if (!(timeoutMs > 0 && timeoutMs <= MAX_TIMER_MS)) {
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      `cache timeoutMs must be a positive number of milliseconds, at most ${MAX_TIMER_MS}, received ${JSON.stringify(timeoutMs)}`
+    );
+  }
+  return timeoutMs;
+}
 
 /**
  * Refuse a runtime config the runtime could not honour, before anything is built from it.
@@ -2567,6 +2596,7 @@ function assertRuntimeConfig(config: EkmanConfig): void {
   assertKnownKeys("the runtime config", config, RUNTIME_KEYS);
   assertKnownKeys("temporal", config.temporal, SWEEP_KEYS);
   assertKnownKeys("storage", config.storage, SWEEP_KEYS);
+  assertKnownKeys("cache", config.cache, CACHE_KEYS);
   assertKnownKeys("telemetry", config.telemetry, [
     ...TELEMETRY_EVENT_TYPES,
     TELEMETRY_FALLBACK,

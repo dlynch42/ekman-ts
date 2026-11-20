@@ -1411,6 +1411,59 @@ describe("forgetting an instance", () => {
     await ekman.close();
   });
 
+  it("answers from the authority when a cache layer never does, and gives up on it", async () => {
+    const cache = memoryStore({ name: "cache" });
+    const silent: Store = {
+      name: cache.name,
+      capabilities: cache.capabilities,
+      append: cache.append.bind(cache),
+      load: () => new Promise(() => undefined),
+      read: cache.read.bind(cache),
+      snapshot: cache.snapshot.bind(cache),
+      scan: cache.scan.bind(cache),
+      forget: cache.forget.bind(cache),
+    };
+    const telemetry: TelemetryEvent[] = [];
+    const ekman = new Ekman({
+      entities: [tickets],
+      store: [silent, memoryStore({ name: "truth" })],
+      cache: { timeoutMs: 5 },
+      telemetry: { "*": (event) => telemetry.push(event) },
+    });
+
+    const send = (id: string) =>
+      ekman.entities.tickets.send(id, { type: "poke" });
+    // One at a time: each load has to run out before the next is counted.
+    expect(await send("t1")).toMatchObject({ seq: 1 });
+    expect(await send("t2")).toMatchObject({ seq: 1 });
+    expect(await send("t3")).toMatchObject({ seq: 1 });
+    expect(await send("t4")).toMatchObject({ seq: 1 });
+
+    expect(
+      telemetry.filter((event) => event.type === "store.cacheFailed")
+    ).toHaveLength(3);
+    expect(
+      telemetry.filter((event) => event.type === "store.cacheSuspended")
+    ).toEqual([
+      {
+        type: "store.cacheSuspended",
+        store: "cache",
+        timeouts: 3,
+        at: expect.any(Number),
+      },
+    ]);
+    await ekman.close();
+  });
+
+  it.each([0, -1, Number.NaN, 2 ** 31])(
+    "refuses a cache time bound of %s",
+    (timeoutMs) => {
+      expect(() => new Ekman({ cache: { timeoutMs } })).toThrow(
+        expect.objectContaining({ code: "INVALID_CONFIG" })
+      );
+    }
+  );
+
   it("holds a send back until every layer has finished deleting, even when one fails", async () => {
     const cache = memoryStore({ name: "cache" });
     const truth = memoryStore({ name: "truth", authority: true });
@@ -2027,6 +2080,7 @@ describe("refusing configuration at construction", () => {
     ["execution", { execution: { maxAttempt: 2 } }, '"maxAttempt"'],
     ["temporal", { temporal: { sweepMS: 5 } }, '"sweepMS"'],
     ["storage", { storage: { sweepMS: 5 } }, '"sweepMS"'],
+    ["cache", { cache: { timeoutMS: 5 } }, '"timeoutMS"'],
     [
       "telemetry",
       { telemetry: { "handler.setled": () => undefined } },

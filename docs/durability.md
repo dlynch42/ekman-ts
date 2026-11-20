@@ -45,8 +45,8 @@ When an instance that is not resident is loaded, the caches are asked first, fas
 the first that holds the key answers. If none does, the authority answers and the caches are
 filled from it, so the next load of that key is a cache's. This is the one read a cache serves.
 A load that arrives while writes for its key are still on their way to the caches does not wait
-for them either: the authority answers it, so a cache that is slow, or never answers, costs the
-key its cache and nothing else.
+for them either: the authority answers it, so a cache that is slow costs the key its cache and
+nothing else.
 `history()` and `query()` always read the authority, because a cache holds the state of a key
 and not necessarily its whole stream.
 
@@ -81,6 +81,32 @@ read when an evicted instance comes back. If the budget is the point, leave it o
 An `instance.restored` event says what the layer that answered held: `from: "snapshot"` when a
 cache was filled from the authority and has had few events since, whatever the authority's own
 log looks like.
+
+### A cache that does not answer
+
+A cache layer is somebody else's code, often on the other end of a network, and it may never
+answer. Every call the runtime makes into one has a time bound:
+
+```ts
+cache: { timeoutMs: 5_000 },   // the default
+```
+
+- A read that runs out is a miss. The authority answers, so the load costs the bound once
+  and not forever.
+- A write that runs out is a failed write, and the writes queued behind it for that key go
+  ahead. It may still land later, so the cache is neither read nor written for that key until
+  the write has settled and the key has been deleted from it.
+- Both are reported as `store.cacheFailed`.
+- A cache whose reads, or whose writes, run out three times in a row is not used again by
+  this runtime. Nothing queued for it is sent. This is reported once, as
+  `store.cacheSuspended`, and a restart is what brings the layer back.
+
+The bound cannot be turned off, only raised. It applies to cache layers alone: a commit waits
+for the authority for as long as the authority takes, and the handler's own `timeoutMs` is what
+bounds that.
+
+A layer that settles on the same turn it is called, as `"memory"` does, never has a timer set
+for it.
 
 ## Capabilities, and configurations that are refused
 

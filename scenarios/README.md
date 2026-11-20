@@ -716,7 +716,8 @@ only a `type` asserts no event of that type was emitted at all.
 | `instance.evicted` | An instance was released to stay inside the budget. | `state`, `seq`, `bytes`, `snapshotted`, `residentBytes` |
 | `instance.restored` | An instance was rebuilt from the store. | `state`, `seq`, `from`, `replayed` |
 | `audit.failed` | An audit sink could not be delivered to, after its retries. | `sink`, `error`, `seq` |
-| `store.cacheFailed` | A cache layer could not be read, written or cleared. The commit stands. | `store`, `error`, `seq` |
+| `store.cacheFailed` | A cache layer could not be read, written or cleared, or did not answer in time. The commit stands. | `store`, `error`, `seq` |
+| `store.cacheSuspended` | A cache layer went unanswered too many times in a row and is not used again. Carries no key. | `store`, `timeouts` |
 | `runtime.closed` | The runtime finished closing. A `restart` step emits one. | `drained`, `pending` |
 
 `memory.accounted.maxBytes` is `null` when the budget is unlimited.

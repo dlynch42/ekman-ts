@@ -44,6 +44,7 @@ the longest delay a timer can hold.
 | `storage` | `{ sweepMs? }` | no automatic sweep | [Durability](./durability.md#retention) |
 | `audit` | `AuditSink[]` | none | [Telemetry](./telemetry.md#audit-sinks) |
 | `telemetry` | map of event name to handler | none | [Telemetry](./telemetry.md) |
+| `cache` | `{ timeoutMs? }` | 5 seconds per call | [Durability](./durability.md#a-cache-that-does-not-answer) |
 | `coordination` | `"single"` \| `"multi"` | `"single"` | below |
 | `now` | `() => number` | `Date.now` | below |
 | `onUnhandled` | `(error, { source, key? }) => void` | logs to stderr, naming the source | [Telemetry](./telemetry.md#unhandled-errors) |
