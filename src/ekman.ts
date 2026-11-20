@@ -727,14 +727,20 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * delivering settles. Only then are the store layers closed, so none of that work meets
    * a closed connection.
    *
-   * Two kinds of store write are not waited for, by design: the snapshot an eviction
-   * leaves behind and an append to a cache layer. Both are optimizations whose loss costs
-   * replay time or a cache miss, never committed state. A cache write still queued when
-   * the layers are closed is dropped, and never run against a layer that has been closed.
+   * Writes to a cache layer are waited for next, when the layer outlives the process. One
+   * it never received would leave it a commit behind the authority, for the next process
+   * to load and have its first commit refused. A cache held in memory is not waited for:
+   * what it is owed dies with it.
    *
-   * The wait is bounded. A handler that never settles would otherwise hold shutdown open
-   * forever, so after `timeoutMs` the layers are closed regardless and `runtime.closed`
-   * telemetry reports `drained: false` with how many keys were still busy.
+   * The snapshot an eviction leaves behind is not waited for either. It is an
+   * optimization whose loss costs replay time, never committed state. A cache write still
+   * queued when the layers are closed is dropped, and never run against a closed layer.
+   *
+   * The wait is bounded, and one deadline covers all of it. A handler that never settles,
+   * or a cache that never answers, would otherwise hold shutdown open forever, so after
+   * `timeoutMs` the layers are closed regardless and `runtime.closed` telemetry reports
+   * `drained: false`, with how many keys were still busy and how many still had cache
+   * writes queued.
    *
    * Safe to call more than once, and from several places at once: every call shares the
    * same shutdown and the first call's deadline.
@@ -757,6 +763,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   }
 
   async #shutDown(timeoutMs: number): Promise<void> {
+    const deadline = performance.now() + timeoutMs;
     this.#closing.abort();
     clearInterval(this.#sweepTimer);
     clearInterval(this.#storageSweepTimer);
@@ -774,17 +781,36 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       timeoutMs
     );
 
+    const cachePending = await this.#drainCaches(deadline);
+
     this.#emit({
       type: "runtime.closed",
-      drained,
+      drained: drained && cachePending === 0,
       pending:
         instances.filter((instance) => !instance.idle).length +
         this.#forgetting.size,
+      cachePending,
       at: telemetryNow(),
     });
 
     this.#caches.close();
     await Promise.all(this.#stack.layers.map((layer) => layer.close?.()));
+  }
+
+  /**
+   * Wait, until the shutdown's deadline, for writes owed to a cache layer that outlives
+   * the process. Answers how many keys still had some queued when the wait ended.
+   */
+  async #drainCaches(deadline: number): Promise<number> {
+    if (!this.#caches.outlasting) {
+      return 0;
+    }
+
+    const remaining = deadline - performance.now();
+    if (remaining > 0) {
+      await settledWithin(this.#caches.idle(), remaining);
+    }
+    return this.#caches.queued;
   }
 
   /** Resident bytes on the documented accounting basis, and what the budget allows. */

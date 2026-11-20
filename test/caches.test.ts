@@ -534,6 +534,23 @@ describe("a cache layer that does not answer", () => {
     expect(calls.forget).toBe(0);
   });
 
+  it("is not worth a shutdown waiting for once it is given up on", async () => {
+    const { layer } = silent("load");
+    const lasting: Store = {
+      ...layer,
+      capabilities: { ...layer.capabilities, durability: "durable" },
+    };
+    const { caches } = watched(lasting);
+    const fromAuthority = () => Promise.resolve(answer);
+    expect(caches.outlasting).toBe(true);
+
+    await caches.read("orders:1", fromAuthority);
+    await caches.read("orders:2", fromAuthority);
+    await caches.read("orders:3", fromAuthority);
+
+    expect(caches.outlasting).toBe(false);
+  });
+
   it("is kept when an answer comes between the calls that ran out", async () => {
     const { layer, answer: land } = silent("load");
     const { caches, suspensions } = watched(layer);

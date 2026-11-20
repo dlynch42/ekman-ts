@@ -64,7 +64,7 @@ rejects the error goes to `onUnhandled` rather than becoming an unhandled reject
 | `store.cacheSuspended` | A cache layer's reads, or its writes, went unanswered three times in a row, and the runtime will not use it again. Carries `store` and `timeouts`, and no key. |
 | `audit.failed` | An audit sink could not be delivered to, after its retries. |
 | `storage.swept` | A store's retention pass ran. |
-| `runtime.closed` | `close()` finished waiting for in-flight work. Carries `drained` and `pending`. |
+| `runtime.closed` | `close()` finished waiting for in-flight work. Carries `drained`, `pending` and `cachePending`. |
 
 Three of these are worth understanding rather than just counting.
 

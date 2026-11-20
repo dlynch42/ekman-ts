@@ -38,8 +38,19 @@ Layers are listed fastest first. **Exactly one layer is the commit authority** a
 truth: the last durable one. The rest are caches.
 
 A commit goes to the authority, and resolves there. The caches are written afterwards, in order
-per key, and no commit, `history()` or `close()` ever waits for one. A cache write still queued
-when the runtime closes is dropped.
+per key, and no commit or `history()` ever waits for one.
+
+`close()` waits for cache writes only when a cache outlives the process, as a file store placed
+in front of another authority does. A write it never received would leave it one commit behind
+for the next process to load. The wait shares the deadline of `close({ timeoutMs })`, and
+whatever is still queued at the deadline is dropped and counted in `runtime.closed` as
+`cachePending`. A `"memory"` cache is never waited for: what it is owed dies with it.
+
+A cache that outlives the process can still end up behind, after a crash between the
+authority's write and its own, or a shutdown that ran out of time. The next process then loads
+that key from the cache, the authority refuses the commit built on it, and that one `send()`
+rejects with `STORE_CONFLICT`. The key is cleared from the caches and the next send loads from
+the authority. Nothing stale is committed.
 
 When an instance that is not resident is loaded, the caches are asked first, fastest first, and
 the first that holds the key answers. If none does, the authority answers and the caches are

@@ -330,10 +330,18 @@ export interface StorageSweptEvent {
 export interface RuntimeClosedEvent {
   readonly type: "runtime.closed";
   readonly at: number;
-  /** Whether every key went idle before the deadline. */
+  /**
+   * Whether every key went idle before the deadline, and every write owed to a cache
+   * layer that outlives the process reached it.
+   */
   readonly drained: boolean;
   /** How many keys still had a handler running or a trigger waiting when it gave up. */
   readonly pending: number;
+  /**
+   * How many keys still had writes queued for a cache layer that outlives the process.
+   * Those writes were dropped. Always 0 when no cache layer does.
+   */
+  readonly cachePending: number;
 }
 
 export type TelemetryEvent =

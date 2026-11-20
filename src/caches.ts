@@ -67,7 +67,8 @@ type Standing = "dropped" | "distrusted";
  *
  * All of it runs on a chain per key, apart from the store-write chain a commit waits on.
  * Order within a key holds, so a fill is never overtaken by the append that follows it,
- * and neither a commit nor a load ever waits for a cache.
+ * and neither a commit nor a load ever waits for a cache. A shutdown does, for a layer
+ * that outlives the process, and only for as long as it was given.
  *
  * Every call into a layer has a time bound, because a layer is somebody else's code and
  * may never answer. A read that runs out is a miss. A write that runs out is a failed
@@ -125,6 +126,39 @@ export class Caches {
   /** Whether there is any cache layer at all. */
   get any(): boolean {
     return this.#layers.length > 0;
+  }
+
+  /**
+   * Whether anything queued here is worth a shutdown waiting for.
+   *
+   * It is when a layer in use outlives the process: a write it never received leaves it
+   * behind the authority for the next process to find. What a layer held in memory is
+   * owed dies with it.
+   */
+  get outlasting(): boolean {
+    return this.#layers.some(
+      (layer) =>
+        layer.capabilities.durability === "durable" &&
+        !this.#abandoned.has(layer)
+    );
+  }
+
+  /** How many keys have something queued. */
+  get queued(): number {
+    return this.#chains.size;
+  }
+
+  /**
+   * Resolves once nothing is queued for any key. Never rejects.
+   *
+   * Looked at again after every wait, because a write that settles can queue the delete
+   * that clears up after it.
+   */
+  async idle(): Promise<void> {
+    while (this.#chains.size > 0) {
+      // biome-ignore lint/performance/noAwaitInLoops: each pass waits for everything queued, then looks for what that queued
+      await Promise.all(this.#chains.values());
+    }
   }
 
   /** Resolves once everything queued for a key has been tried. Never rejects. */
