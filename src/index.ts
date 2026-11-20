@@ -119,6 +119,7 @@ export type {
   RetentionPolicy,
 } from "./stores/file";
 export { defaultLogDir, RETENTION_POLICIES } from "./stores/file";
+export type { MemoryKeep } from "./stores/memory";
 export type {
   AuditFailedEvent,
   CommitFencedEvent,

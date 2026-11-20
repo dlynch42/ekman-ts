@@ -26,6 +26,7 @@ client you are not using.
 | `"file"` | Durable. Writes to `.ekman/logs/`. |
 | `"none"` | Says out loud that this runtime keeps nothing. |
 | `{ kind: "file", dir, retention }` | The file store with options. |
+| `{ kind: "memory", keep, maxKeys }` | The memory store with options, for when it is a [cache](#a-memory-cache). |
 | a `Store` instance | An adapter Ekman does not ship. |
 
 ## Layering
@@ -86,14 +87,37 @@ Two things follow from a cache being read first:
   built on it is refused by the authority with `STORE_CONFLICT`, the key is cleared from the
   caches, and the next trigger loads from the authority.
 
-A `"memory"` cache keeps every event it is sent, for every key, for the life of the process, and
-none of that is counted by the [memory budget](./memory.md). It trades memory for skipping a disk
-read when an evicted instance comes back. If the budget is the point, leave it out and use
-`store: "file"` alone.
-
 An `instance.restored` event says what the layer that answered held: `from: "snapshot"` when a
-cache was filled from the authority and has had few events since, whatever the authority's own
-log looks like.
+cache answered from a snapshot and has had few events since, whatever the authority's own log
+looks like.
+
+### A memory cache
+
+A `"memory"` layer in front of another store trades memory for skipping a disk read when an
+evicted instance comes back. None of what it holds is counted by the
+[memory budget](./memory.md), so it has bounds of its own.
+
+**It keeps state and not the stream.** A cache answers one read, the load of an instance, and
+that needs the key's state. So as a cache the memory store holds one snapshot per key and at
+most the last 16 events, folding them into the snapshot as they gather. A key costs it the same
+on its millionth commit as on its first. Pass `keep: "stream"` to have it hold every event, as
+it does when it is the only layer.
+
+**It can be told the most keys to hold:**
+
+```ts
+store: [{ kind: "memory", maxKeys: 10_000 }, "file"],
+```
+
+At the limit the key used least recently is dropped. A dropped key is a miss: the authority
+answers the next load of it and the cache is filled again. Without `maxKeys` it holds every key
+it has been sent for the life of the process, so set it when the budget is the point.
+
+Both are for a cache. On the commit authority, where `keep: "state"` would lose the history
+and `maxKeys` would lose committed state, they are refused at startup with `INVALID_CONFIG`.
+
+A memory store you wrap in a layer of your own is not told that it is a cache. Build it with
+`createStore({ kind: "memory", keep: "state" })` to get the same behaviour.
 
 ### A cache that does not answer
 
@@ -333,7 +357,7 @@ Two things about `load` and `snapshot` are easy to get wrong:
   for instance, takes it from `replay`, as it takes everything else. Never fill it in from
   somewhere else: absent means unknown, and the runtime treats unknown as not stale.
 
-Two declarations the runtime holds you to:
+What the runtime holds you to:
 
 - `capabilities.scan` says whether your `scan` applies the `state` and `olderThan` criteria. A
   scan that could not apply one names it in `unsupported`, as `"state"` or `"olderThan"`, and
@@ -351,6 +375,10 @@ Two declarations the runtime holds you to:
   What a store must not do is carry values other than the last committed ones.
 - `usage` is optional, and a method: `usage(): StoreUsage`. Implement it when the store can
   say what it holds. `ekman.storageUsage` sums it across the stack.
+- `capabilities.evicts` says your store drops keys by itself to stay inside a bound of its own.
+  It is optional and absent means no. Only a cache layer should: the write it then refuses
+  with `STORE_CONFLICT`, for a key it no longer holds, is taken as a miss and not reported as
+  `store.cacheFailed`.
 
 ## Next
 

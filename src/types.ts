@@ -482,6 +482,7 @@ export interface EkmanConfig<
    * ```ts
    * store: "file"                                  // durable, in .ekman/logs
    * store: ["memory", "file"]                      // layered, fastest first
+   * store: [{ kind: "memory", maxKeys: 10_000 }, "file"]  // a cache with a bound
    * store: { kind: "file", dir: "/var/lib/svc" }   // somewhere specific
    * store: ["memory", redisStore(client)]          // an adapter core does not ship
    * store: "none"                                  // keeps nothing, and says so

@@ -942,8 +942,31 @@ describe("keeping a cache layer honest", () => {
     await settle();
 
     expect(sent.seq).toBe(1);
-    expect(await cache.read("orders:1")).toHaveLength(2);
     expect((await cache.load("orders:1"))?.seq).toBe(1);
+    await ekman.close();
+  });
+
+  it("takes a key its cache dropped for room as a miss, not as a failing cache", async () => {
+    const cache = memoryStore({ name: "cache", maxKeys: 1 });
+    const truth = memoryStore({ name: "truth", authority: true });
+    const failed: TelemetryEvent[] = [];
+    const ekman = new Ekman({
+      entities: [orders],
+      store: [cache, truth],
+      telemetry: { "store.cacheFailed": (event) => failed.push(event) },
+    });
+    await ekman.entities.orders.send("1", { type: "touch" });
+    await ekman.entities.orders.send("2", { type: "touch" });
+    await settle();
+    expect(cache.keys).toEqual(["orders:2"]);
+
+    // Still resident, so this commit is sent to a cache that no longer holds the key.
+    await ekman.entities.orders.send("1", { type: "touch" });
+    await settle();
+
+    expect(failed).toEqual([]);
+    expect(await cache.load("orders:1")).toBeUndefined();
+    expect((await truth.load("orders:1"))?.seq).toBe(2);
     await ekman.close();
   });
 
@@ -1465,8 +1488,9 @@ describe("store helpers", () => {
 
   it("mirrors a non-commit event into a cache at the sequence it followed", async () => {
     // A violation or a rejection does not advance the sequence, so a cache append for one
-    // is conditional on the current sequence rather than on the one before it.
-    const cache = memoryStore({ name: "cache" });
+    // is conditional on the current sequence rather than on the one before it. The cache
+    // keeps its stream here so the event can be seen to have landed.
+    const cache = memoryStore({ name: "cache", keep: "stream" });
     const truth = memoryStore({ name: "truth", authority: true });
 
     const strict = defineEntity("strict", {

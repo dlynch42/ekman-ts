@@ -66,6 +66,15 @@ export interface StoreCapabilities {
    * honestly offer either, both, or neither.
    */
   readonly compact: boolean;
+  /**
+   * Whether this store drops keys by itself to stay inside a bound of its own.
+   *
+   * Optional, and absent means it does not. Only a cache layer may: a key it dropped is a
+   * miss, and the commit authority still holds it. Declared so that the write the store
+   * then refuses, for a key it no longer holds, is taken as the miss it is and not
+   * reported as a failing cache.
+   */
+  readonly evicts?: boolean;
 }
 
 /**
@@ -321,6 +330,30 @@ export function lastCommitOf(known: {
   return known.lastCommittedAt === undefined
     ? {}
     : { lastCommittedAt: known.lastCommittedAt };
+}
+
+/**
+ * A snapshot of a replayed state, taken at `at`.
+ *
+ * Carries everything the state does, the time of the last commit and what its bounds have
+ * said included, so a load answered from the snapshot alone loses none of it.
+ */
+export function snapshotOf(
+  key: string,
+  current: ReplayedState,
+  at: number
+): StoreSnapshot {
+  return Object.freeze({
+    key,
+    entity: entityOf(key),
+    state: current.state,
+    values: current.values,
+    seq: current.seq,
+    enteredAt: current.enteredAt,
+    at,
+    ...lastCommitOf(current),
+    ...(current.temporal === undefined ? {} : { temporal: current.temporal }),
+  });
 }
 
 export function replay<S extends string, V extends Values>(

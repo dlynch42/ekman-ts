@@ -1,13 +1,7 @@
 import { EkmanError } from "./errors";
 import type { EkmanEvent } from "./events";
-import type { LoadResult, ReplayedState, Store, StoreSnapshot } from "./store";
-import {
-  EMPTY_SEQ,
-  entityOf,
-  lastCommitOf,
-  previousSeq,
-  replay,
-} from "./store";
+import type { LoadResult, ReplayedState, Store } from "./store";
+import { EMPTY_SEQ, previousSeq, replay, snapshotOf } from "./store";
 
 /** A cache layer that could not be read, written or cleared, for the runtime to report. */
 export interface CacheFailure {
@@ -348,17 +342,7 @@ export class Caches {
       return;
     }
 
-    const snapshot: StoreSnapshot = Object.freeze({
-      key,
-      entity: entityOf(key),
-      state: current.state,
-      values: current.values,
-      seq: current.seq,
-      enteredAt: current.enteredAt,
-      at: this.#now(),
-      ...lastCommitOf(current),
-      ...(current.temporal === undefined ? {} : { temporal: current.temporal }),
-    });
+    const snapshot = snapshotOf(key, current, this.#now());
 
     this.#enqueue(key, () =>
       this.#each(layers, (layer) => {
@@ -387,6 +371,9 @@ export class Caches {
    * sent now, and leave the layer holding something nobody is tracking. So the layer is
    * left out for the key, and the delete is sent once the write has settled either way.
    * If it never does, the layer stays left out.
+   *
+   * A layer that drops keys to stay inside its own bound refuses a write for a key it
+   * dropped. That is a miss and not a failure, so it is cleared without being reported.
    */
   #clear(
     layer: Store,
@@ -397,7 +384,9 @@ export class Caches {
     if (this.#lifetime.closed) {
       return;
     }
-    this.#report(layer, key, seq, error);
+    if (!(layer.capabilities.evicts === true && isConflict(error))) {
+      this.#report(layer, key, seq, error);
+    }
     if (!(error instanceof Unanswered)) {
       return this.#delete(layer, key, seq);
     }
@@ -589,6 +578,10 @@ function calling<T>(call: () => Promise<T>): Promise<T> {
   } catch (error) {
     return Promise.reject(error);
   }
+}
+
+function isConflict(error: unknown): boolean {
+  return error instanceof EkmanError && error.code === "STORE_CONFLICT";
 }
 
 /** Delete a key from a layer. Every cache layer declares `forget`, or it was refused. */
