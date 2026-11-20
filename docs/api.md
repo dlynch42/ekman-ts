@@ -44,6 +44,7 @@ the longest delay a timer can hold.
 | `storage` | `{ sweepMs? }` | no automatic sweep | [Durability](./durability.md#retention) |
 | `audit` | `AuditSink[]` | none | [Telemetry](./telemetry.md#audit-sinks) |
 | `telemetry` | map of event name to handler | none | [Telemetry](./telemetry.md) |
+| `cache` | `{ timeoutMs? }` | 5 seconds per call | [Durability](./durability.md#a-cache-that-does-not-answer) |
 | `coordination` | `"single"` \| `"multi"` | `"single"` | below |
 | `now` | `() => number` | `Date.now` | below |
 | `onUnhandled` | `(error, { source, key? }) => void` | logs to stderr, naming the source | [Telemetry](./telemetry.md#unhandled-errors) |
@@ -166,12 +167,15 @@ process.on("SIGTERM", async () => {
    time-in-state sweep that had already begun. A time-in-state sweep loads nothing more from
    this point. `forget()` called after this point rejects with `RUNTIME_CLOSED`. A retry that is waiting out its backoff is not
    started: its sender receives `RUNTIME_CLOSED`.
-3. It closes the store layers.
+3. It waits for writes still on their way to a [cache layer](./durability.md#layering) that
+   outlives the process. A cache held in memory is not waited for.
+4. It closes the store layers.
 
-The wait in step 2 is bounded by `close({ timeoutMs })`, 30 seconds by default. A handler that
-never settles cannot hold shutdown open: at the deadline the layers are closed anyway, and the
-`runtime.closed` [telemetry](./telemetry.md) event reports `drained: false` and how many keys
-were still busy. Calling `close()` again, or from two places at once, joins the same shutdown.
+The waits in steps 2 and 3 share one deadline, `close({ timeoutMs })`, 30 seconds by default. A
+handler that never settles, or a cache that never answers, cannot hold shutdown open: at the
+deadline the layers are closed anyway, and the `runtime.closed` [telemetry](./telemetry.md)
+event reports `drained: false`, how many keys were still busy, and how many still had cache
+writes queued. Calling `close()` again, or from two places at once, joins the same shutdown.
 
 Call it on `SIGTERM`. The sweep timers do not keep a process alive on their own, but without
 `close()` a commit in flight when the process exits has no chance to land.

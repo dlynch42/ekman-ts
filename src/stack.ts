@@ -2,7 +2,8 @@ import { EkmanError } from "./errors";
 import type { Store } from "./store";
 import type { FileStoreOptions } from "./stores/file";
 import { fileStore } from "./stores/file";
-import { memoryStore } from "./stores/memory";
+import type { MemoryKeep } from "./stores/memory";
+import { MemoryStore, memoryStore } from "./stores/memory";
 
 /**
  * A store described rather than constructed.
@@ -18,6 +19,17 @@ export type StoreSpec =
       readonly kind: "memory";
       readonly name?: string;
       readonly authority?: boolean;
+      /**
+       * What to keep for a key: `stream`, every event, or `state`, one snapshot. Defaults
+       * to `state` for a cache layer and `stream` otherwise. `state` is refused on the
+       * commit authority.
+       */
+      readonly keep?: MemoryKeep;
+      /**
+       * The most keys to hold, dropping the least recently used. For a cache layer only,
+       * and refused on the commit authority.
+       */
+      readonly maxKeys?: number;
     }
   | ({ readonly kind: "file"; readonly dir?: string } & FileStoreOptions);
 
@@ -289,6 +301,11 @@ export function resolveStack(
         "durable layer is configured behind it. The authority owns the truth, so this " +
         "would discard committed state on restart. Mark the durable layer as the authority."
     );
+  }
+
+  MemoryStore.placed(authority, "authority");
+  for (const cache of caches) {
+    MemoryStore.placed(cache, "cache");
   }
 
   return Object.freeze({

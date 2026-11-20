@@ -33,8 +33,9 @@ telemetry: {
 },
 ```
 
-Every event carries `key`, `entity` and `at`. `storage.swept` and `runtime.closed` are the
-exceptions: they happen to a store and to the runtime rather than to an instance.
+Every event carries `key`, `entity` and `at`. `storage.swept`, `store.cacheSuspended` and
+`runtime.closed` are the exceptions: they happen to a store and to the runtime rather than to
+an instance.
 
 A handler may be `async`. It is never awaited, so it cannot slow the runtime down, and if it
 rejects the error goes to `onUnhandled` rather than becoming an unhandled rejection.
@@ -59,10 +60,11 @@ rejects the error goes to `onUnhandled` rather than becoming an unhandled reject
 | `instance.forgotten` | An instance was deleted outright, from memory and every store layer. |
 | `memory.accounted` | Resident accounting after a commit. |
 | `memory.refused` | The budget is full and the policy refuses rather than evicting. |
-| `store.cacheFailed` | A cache layer could not be read, written or cleared. The commit was unaffected, and the layer is not read for that key until it is whole again. |
+| `store.cacheFailed` | A cache layer could not be read, written or cleared, or did not answer inside `cache.timeoutMs`. The commit was unaffected, and the layer is not read for that key until it is whole again. |
+| `store.cacheSuspended` | A cache layer's reads, or its writes, went unanswered three times in a row, and the runtime will not use it again. Carries `store` and `timeouts`, and no key. |
 | `audit.failed` | An audit sink could not be delivered to, after its retries. |
 | `storage.swept` | A store's retention pass ran. |
-| `runtime.closed` | `close()` finished waiting for in-flight work. Carries `drained` and `pending`. |
+| `runtime.closed` | `close()` finished waiting for in-flight work. Carries `drained`, `pending` and `cachePending`. |
 
 Three of these are worth understanding rather than just counting.
 

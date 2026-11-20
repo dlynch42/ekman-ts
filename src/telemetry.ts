@@ -279,7 +279,22 @@ export interface StoreCacheFailedEvent extends TelemetryBase {
 }
 
 /**
- * A storage sweep ran. The one event here that carries no key.
+ * A cache layer went unanswered too many times in a row, and is not used again by this
+ * runtime. Commits and loads are unaffected: the commit authority answers them.
+ *
+ * It happens to a layer and not to an instance, so it carries no key.
+ */
+export interface StoreCacheSuspendedEvent {
+  readonly type: "store.cacheSuspended";
+  readonly at: number;
+  /** The layer that was given up on. */
+  readonly store: string;
+  /** How many reads in a row, or writes in a row, went unanswered. */
+  readonly timeouts: number;
+}
+
+/**
+ * A storage sweep ran. One of the events here that carry no key.
  *
  * Everything else in this stream happens to an instance. This happens to a store, and
  * inventing a key to satisfy the shape would put a fiction in the field an operator
@@ -315,10 +330,18 @@ export interface StorageSweptEvent {
 export interface RuntimeClosedEvent {
   readonly type: "runtime.closed";
   readonly at: number;
-  /** Whether every key went idle before the deadline. */
+  /**
+   * Whether every key went idle before the deadline, and every write owed to a cache
+   * layer that outlives the process reached it.
+   */
   readonly drained: boolean;
   /** How many keys still had a handler running or a trigger waiting when it gave up. */
   readonly pending: number;
+  /**
+   * How many keys still had writes queued for the cache layers, when one of them outlives
+   * the process. Those writes were dropped. Always 0 when no cache layer does.
+   */
+  readonly cachePending: number;
 }
 
 export type TelemetryEvent =
@@ -340,6 +363,7 @@ export type TelemetryEvent =
   | MemoryRefusedEvent
   | AuditFailedEvent
   | StoreCacheFailedEvent
+  | StoreCacheSuspendedEvent
   | StorageSweptEvent
   | RuntimeClosedEvent;
 
@@ -371,6 +395,7 @@ const EVENT_TYPES: Readonly<Record<TelemetryEventType, true>> = {
   "memory.refused": true,
   "audit.failed": true,
   "store.cacheFailed": true,
+  "store.cacheSuspended": true,
   "storage.swept": true,
   "runtime.closed": true,
 };

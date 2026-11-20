@@ -1411,6 +1411,59 @@ describe("forgetting an instance", () => {
     await ekman.close();
   });
 
+  it("answers from the authority when a cache layer never does, and gives up on it", async () => {
+    const cache = memoryStore({ name: "cache" });
+    const silent: Store = {
+      name: cache.name,
+      capabilities: cache.capabilities,
+      append: cache.append.bind(cache),
+      load: () => new Promise(() => undefined),
+      read: cache.read.bind(cache),
+      snapshot: cache.snapshot.bind(cache),
+      scan: cache.scan.bind(cache),
+      forget: cache.forget.bind(cache),
+    };
+    const telemetry: TelemetryEvent[] = [];
+    const ekman = new Ekman({
+      entities: [tickets],
+      store: [silent, memoryStore({ name: "truth" })],
+      cache: { timeoutMs: 5 },
+      telemetry: { "*": (event) => telemetry.push(event) },
+    });
+
+    const send = (id: string) =>
+      ekman.entities.tickets.send(id, { type: "poke" });
+    // One at a time: each load has to run out before the next is counted.
+    expect(await send("t1")).toMatchObject({ seq: 1 });
+    expect(await send("t2")).toMatchObject({ seq: 1 });
+    expect(await send("t3")).toMatchObject({ seq: 1 });
+    expect(await send("t4")).toMatchObject({ seq: 1 });
+
+    expect(
+      telemetry.filter((event) => event.type === "store.cacheFailed")
+    ).toHaveLength(3);
+    expect(
+      telemetry.filter((event) => event.type === "store.cacheSuspended")
+    ).toEqual([
+      {
+        type: "store.cacheSuspended",
+        store: "cache",
+        timeouts: 3,
+        at: expect.any(Number),
+      },
+    ]);
+    await ekman.close();
+  });
+
+  it.each([0, -1, Number.NaN, 2 ** 31])(
+    "refuses a cache time bound of %s",
+    (timeoutMs) => {
+      expect(() => new Ekman({ cache: { timeoutMs } })).toThrow(
+        expect.objectContaining({ code: "INVALID_CONFIG" })
+      );
+    }
+  );
+
   it("holds a send back until every layer has finished deleting, even when one fails", async () => {
     const cache = memoryStore({ name: "cache" });
     const truth = memoryStore({ name: "truth", authority: true });
@@ -2027,6 +2080,7 @@ describe("refusing configuration at construction", () => {
     ["execution", { execution: { maxAttempt: 2 } }, '"maxAttempt"'],
     ["temporal", { temporal: { sweepMS: 5 } }, '"sweepMS"'],
     ["storage", { storage: { sweepMS: 5 } }, '"sweepMS"'],
+    ["cache", { cache: { timeoutMS: 5 } }, '"timeoutMS"'],
     [
       "telemetry",
       { telemetry: { "handler.setled": () => undefined } },
@@ -2410,6 +2464,136 @@ describe("closing the runtime", () => {
     expect(closed).toEqual([
       expect.objectContaining({ drained: false, pending: 1 }),
     ]);
+  });
+
+  describe("with a cache layer", () => {
+    /** A layer that says it outlives the process, whose appends go through `append`. */
+    const outlasting = (
+      name: string,
+      append?: (write: () => Promise<void>) => Promise<void>
+    ): { layer: Store; inner: Store } => {
+      const inner = memoryStore({ name });
+      const layer: Store = {
+        name,
+        capabilities: { ...inner.capabilities, durability: "durable" },
+        append: (key, event, expectedSeq) => {
+          const write = () => inner.append(key, event, expectedSeq);
+          return append === undefined ? write() : append(write);
+        },
+        load: inner.load.bind(inner),
+        read: inner.read.bind(inner),
+        snapshot: inner.snapshot.bind(inner),
+        scan: inner.scan.bind(inner),
+        forget: inner.forget.bind(inner),
+      };
+      return { layer, inner };
+    };
+    const later = (write: () => Promise<void>): Promise<void> =>
+      new Promise((done) => {
+        setTimeout(done, 20);
+      }).then(write);
+    const never = (): Promise<void> => new Promise(() => undefined);
+    const tickets = defineEntity("tickets", {
+      initial: "open",
+      values: { note: "" },
+      states: { open: (ticket) => stay(ticket.values) },
+    });
+
+    it("waits for a write to one that outlives the process", async () => {
+      const closed: TelemetryEvent[] = [];
+      const cache = outlasting("cache", later);
+      const ekman = new Ekman({
+        entities: [tickets],
+        store: [cache.layer, outlasting("truth").layer],
+        telemetry: { "runtime.closed": (event) => closed.push(event) },
+      });
+      await ekman.entities.tickets.send("t1", { type: "poke" });
+      expect((await cache.inner.load("tickets:t1"))?.seq).not.toBe(1);
+
+      await ekman.close();
+
+      expect((await cache.inner.load("tickets:t1"))?.seq).toBe(1);
+      expect(closed).toEqual([
+        expect.objectContaining({ drained: true, pending: 0, cachePending: 0 }),
+      ]);
+    });
+
+    it("gives up on one that never answers at its deadline, and says so", async () => {
+      const closed: TelemetryEvent[] = [];
+      const ekman = new Ekman({
+        entities: [tickets],
+        store: [outlasting("cache", never).layer, outlasting("truth").layer],
+        telemetry: { "runtime.closed": (event) => closed.push(event) },
+      });
+      await ekman.entities.tickets.send("t1", { type: "poke" });
+
+      const started = performance.now();
+      await ekman.close({ timeoutMs: 20 });
+
+      expect(performance.now() - started).toBeLessThan(500);
+      expect(closed).toEqual([
+        expect.objectContaining({
+          drained: false,
+          pending: 0,
+          cachePending: 1,
+        }),
+      ]);
+    });
+
+    it("does not wait for one held in memory", async () => {
+      const closed: TelemetryEvent[] = [];
+      const inner = memoryStore({ name: "cache" });
+      const cache: Store = {
+        name: inner.name,
+        capabilities: inner.capabilities,
+        append: never,
+        load: inner.load.bind(inner),
+        read: inner.read.bind(inner),
+        snapshot: inner.snapshot.bind(inner),
+        scan: inner.scan.bind(inner),
+        forget: inner.forget.bind(inner),
+      };
+      const ekman = new Ekman({
+        entities: [tickets],
+        store: [cache, memoryStore({ name: "truth" })],
+        telemetry: { "runtime.closed": (event) => closed.push(event) },
+      });
+      await ekman.entities.tickets.send("t1", { type: "poke" });
+
+      const started = performance.now();
+      await ekman.close();
+
+      expect(performance.now() - started).toBeLessThan(500);
+      expect(closed).toEqual([
+        expect.objectContaining({ drained: true, pending: 0, cachePending: 0 }),
+      ]);
+    });
+
+    it("has no time left for one when a handler used the whole deadline", async () => {
+      const closed: TelemetryEvent[] = [];
+      const stuck = defineEntity("stuck", {
+        initial: "open",
+        states: { open: () => new Promise<never>(() => undefined) },
+      });
+      const ekman = new Ekman({
+        entities: [tickets, stuck],
+        store: [outlasting("cache", never).layer, outlasting("truth").layer],
+        telemetry: { "runtime.closed": (event) => closed.push(event) },
+      });
+      await ekman.entities.tickets.send("t1", { type: "poke" });
+      ekman.entities.stuck.send("a", { type: "go" }).catch(() => undefined);
+
+      await ekman.close({ timeoutMs: 20 });
+
+      expect(closed).toEqual([
+        expect.objectContaining({
+          drained: false,
+          pending: 1,
+          // Both keys: the stuck one was created, and that commit is owed to the cache too.
+          cachePending: 2,
+        }),
+      ]);
+    });
   });
 
   it("shares one shutdown between callers that overlap", async () => {

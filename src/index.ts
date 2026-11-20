@@ -119,6 +119,7 @@ export type {
   RetentionPolicy,
 } from "./stores/file";
 export { defaultLogDir, RETENTION_POLICIES } from "./stores/file";
+export type { MemoryKeep } from "./stores/memory";
 export type {
   AuditFailedEvent,
   CommitFencedEvent,
@@ -140,6 +141,7 @@ export type {
   RuntimeClosedEvent,
   StorageSweptEvent,
   StoreCacheFailedEvent,
+  StoreCacheSuspendedEvent,
   TelemetryEvent,
   TelemetryEventType,
   TelemetrySink,
@@ -149,6 +151,7 @@ export { TELEMETRY_FALLBACK } from "./telemetry";
 export type { TemporalLatch } from "./temporal";
 export type {
   AnyEntityDefinition,
+  CacheConfig,
   CloseOptions,
   CommitResult,
   EkmanConfig,
