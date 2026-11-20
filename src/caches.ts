@@ -93,6 +93,8 @@ export class Caches {
   readonly #unanswered = new Map<Store, Record<Call, number>>();
   /** Layers given up on. Never read, written or cleared again. */
   readonly #abandoned = new Set<Store>();
+  /** Keys with a write that ran out of time and has not settled yet, per layer. */
+  readonly #landing = new Map<Store, Set<string>>();
   /** Tail of each key's chain, kept only while something is queued on it. */
   readonly #chains = new Map<string, Promise<void>>();
   readonly #standing = new Map<Store, Map<string, Standing>>();
@@ -116,6 +118,7 @@ export class Caches {
     this.#suspended = options.suspended ?? ignore;
     for (const layer of layers) {
       this.#standing.set(layer, new Map());
+      this.#landing.set(layer, new Set());
     }
   }
 
@@ -249,6 +252,10 @@ export class Caches {
    * then on, and the first failure is the caller's to hear. A layer that has been given
    * up on is not asked, and that is a failure too: it may still hold the key. A deletion
    * still waiting when the layers close is refused, and never run against a closed layer.
+   *
+   * A write that ran out of time is not behind this in the queue, and may land after it.
+   * So a layer with one outstanding stays left out for the key even when its delete
+   * succeeds, until that write settles and the key is deleted once more.
    */
   forget(key: string): Promise<void> {
     return this.#enqueue(key, async () => {
@@ -273,7 +280,9 @@ export class Caches {
               );
             }
             await this.#bounded(layer, "write", () => forgetting(layer, key));
-            this.#standing.get(layer)?.delete(key);
+            if (!this.#landing.get(layer)?.has(key)) {
+              this.#standing.get(layer)?.delete(key);
+            }
           } catch (error) {
             this.#standing.get(layer)?.set(key, "distrusted");
             throw error;
@@ -358,7 +367,9 @@ export class Caches {
     }
 
     this.#standing.get(layer)?.set(key, "distrusted");
+    this.#landing.get(layer)?.add(key);
     error.settled.then(() => {
+      this.#landing.get(layer)?.delete(key);
       this.#enqueue(key, () => this.#delete(layer, key, seq, true));
     });
   }

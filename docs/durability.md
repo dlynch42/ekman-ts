@@ -100,6 +100,9 @@ cache: { timeoutMs: 5_000 },   // the default
 - A cache whose reads, or whose writes, run out three times in a row is not used again by
   this runtime. Nothing queued for it is sent. This is reported once, as
   `store.cacheSuspended`, and a restart is what brings the layer back.
+- `forget()` still deletes the key from the authority and from every cache that answers, and
+  then rejects with `STORE_UNAVAILABLE` for a cache that was given up on, which may still
+  hold the key. Call `forget()` again once that cache is back.
 
 The bound cannot be turned off, only raised. It applies to cache layers alone: a commit waits
 for the authority for as long as the authority takes, and the handler's own `timeoutMs` is what

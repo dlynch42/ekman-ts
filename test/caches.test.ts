@@ -439,6 +439,31 @@ describe("a cache layer that does not answer", () => {
     expect((await inner.load("orders:1"))?.seq).toBe(0);
   });
 
+  it("stays left out after a deletion the caller asked for, until its late write lands", async () => {
+    const { layer, inner, calls, answer: land } = silent("append");
+    const { caches } = watched(layer);
+    caches.mirror(committed(0));
+    await caches.settled("orders:1");
+
+    await caches.forget("orders:1");
+    // The write is still out there, so the layer is not filled or read for the key.
+    await caches.read("orders:1", () => Promise.resolve(answer));
+    await caches.settled("orders:1");
+    expect(calls.load).toBe(0);
+    expect(calls.snapshot).toBe(0);
+
+    // It lands after the deletion, and is deleted again.
+    land();
+    await started();
+    await caches.settled("orders:1");
+    expect(calls.forget).toBe(2);
+    expect(await inner.load("orders:1")).toBeUndefined();
+
+    await caches.read("orders:1", () => Promise.resolve(answer));
+    await caches.settled("orders:1");
+    expect((await inner.load("orders:1"))?.seq).toBe(0);
+  });
+
   it("is left out for a key whose delete ran out of time", async () => {
     const { layer, calls } = silent("forget");
     const { caches, failures } = watched(layer);
