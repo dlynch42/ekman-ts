@@ -128,19 +128,86 @@ export interface StatePolicyConfig<
   readonly handler: Handler<S, V, T>;
 }
 
+/**
+ * A state that names the trigger types it handles, one handler per type, with the same
+ * optional execution policy as the `handler` form.
+ *
+ * ```ts
+ * states: {
+ *   pending: {
+ *     on: {
+ *       pay: (order, trigger) => transitionTo("paid", { total: trigger.amount }),
+ *       cancel: () => transitionTo("cancelled"),
+ *     },
+ *   },
+ *   paid: () => stay(),
+ * }
+ * ```
+ *
+ * Each handler receives the member of the entity's trigger union its key names, so a
+ * payload field needs no narrowing and no cast. A trigger whose type has no entry here is
+ * refused with `UNHANDLED_TRIGGER` and the refusal is recorded: there is no fallback entry,
+ * because a fallback is the silent discard the unknown policy exists to prevent. A state
+ * that should accept any type is written as a plain handler.
+ *
+ * Triggers the runtime delivers are no exception. A state under a time bound, a freshness
+ * bound or a rule lists that trigger's type too.
+ */
+export interface StateOnConfig<
+  S extends string = string,
+  V extends Values = Values,
+  T extends TriggerLike = Trigger,
+> extends ExecutionPolicy {
+  readonly on: {
+    readonly [K in NoInfer<T>["type"]]?: Handler<
+      S,
+      V,
+      NoInfer<HandledBy<T, K>>
+    >;
+  };
+}
+
+/**
+ * The members of a trigger union a given `on` key receives.
+ *
+ * A union whose types are plain strings cannot be told apart by key, so every entry takes
+ * the whole of it. That is the entity with no declared union, whose handlers have always
+ * seen an untyped payload.
+ *
+ * Otherwise a member is chosen when its `type` includes the key, not only when it is the
+ * key. One member may stand for several types, as `{ type: "opened" | "closed" }` does,
+ * and its entry receives it with `type` narrowed to the one the key names.
+ */
+type HandledBy<T extends TriggerLike, K> = string extends T["type"]
+  ? T
+  : T extends unknown
+    ? K extends T["type"]
+      ? T["type"] extends K
+        ? T
+        : T & { readonly type: K }
+      : never
+    : never;
+
 export type StateConfig<
   S extends string = string,
   V extends Values = Values,
   T extends TriggerLike = Trigger,
-> = Handler<S, V, T> | StatePolicyConfig<S, V, T>;
+> = Handler<S, V, T> | StatePolicyConfig<S, V, T> | StateOnConfig<S, V, T>;
 
-/** One state's handler with its policy already layered and resolved. */
+/**
+ * What one state does with a trigger, with its policy already layered.
+ *
+ * Exactly one of `handler` and `on` is set: `handler` for a state that takes every trigger
+ * type, `on` for one that names the types it handles.
+ */
 export interface StateEntry<
   S extends string = string,
   V extends Values = Values,
   T extends TriggerLike = Trigger,
 > {
-  readonly handler: Handler<S, V, T>;
+  readonly handler?: Handler<S, V, T>;
+  /** Handlers by trigger type. A type with no entry is refused. */
+  readonly on?: ReadonlyMap<string, Handler<S, V, T>>;
   /** The entity-level policy with this state's override applied. Still unresolved. */
   readonly policy: ExecutionPolicy | undefined;
 }
@@ -169,14 +236,16 @@ export interface EntityConfig<
   readonly unknown?: UnknownPolicy;
   /**
    * Trigger types this entity recognizes. Omitted means every type is recognized and
-   * only a state with no handler reaches the unknown policy.
+   * only a state with no handler reaches the unknown policy, unless every state names its
+   * trigger types with `on`: then the recognized types are the ones those maps name.
    *
    * Checked against the trigger union when the entity has one, so a typo here is a compile
    * error. With no union declared this is any list of strings.
    */
   readonly triggers?: readonly NoInfer<T>["type"][];
   /**
-   * Exactly one handler per state. Exhaustive over `S`.
+   * What each state does with a trigger: one handler, or one per trigger type under `on`.
+   * Exhaustive over `S`.
    *
    * Every type parameter is wrapped in `NoInfer`, and each one earns it:
    *
@@ -189,9 +258,15 @@ export interface EntityConfig<
    * - `T`: an unannotated handler parameter offers the bare constraint, which has no
    *   index signature, so `trigger.actor` would not compile. Blocking it lets the
    *   default apply instead.
+   *
+   * The `on` form is handed `T` bare because it does the wrapping itself: it has to pick
+   * one member of the union per key, and a wrapped union cannot be picked from.
    */
   readonly states: {
-    readonly [K in S]: StateConfig<NoInfer<S>, NoInfer<V>, NoInfer<T>>;
+    readonly [K in S]:
+      | Handler<NoInfer<S>, NoInfer<V>, NoInfer<T>>
+      | StatePolicyConfig<NoInfer<S>, NoInfer<V>, NoInfer<T>>
+      | StateOnConfig<NoInfer<S>, NoInfer<V>, T>;
   };
   /**
    * Execution policy for every state of this entity, layered over the runtime's own

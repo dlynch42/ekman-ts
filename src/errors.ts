@@ -16,6 +16,8 @@ export const ERROR_CODES = [
   "UNKNOWN_STATE",
   /** The trigger's type is not in the entity's declared trigger list. */
   "UNKNOWN_TRIGGER",
+  /** The entity recognizes the trigger's type, and the current state has no handler for it. */
+  "UNHANDLED_TRIGGER",
   /** The handler produced `fail`, or threw. */
   "HANDLER_FAILED",
   /** The inbox was full and the overflow policy is `reject`. */

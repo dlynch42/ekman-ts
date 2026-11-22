@@ -74,8 +74,8 @@ export interface HandlerStartedEvent extends TelemetryBase {
 /**
  * A trigger finished being processed.
  *
- * `refused` means it never reached a handler: an unrecognized trigger type, or a state
- * with no handler.
+ * `refused` means it never reached a handler: an unrecognized trigger type, a state with
+ * no handler, or a state with no handler for that type.
  */
 export interface HandlerSettledEvent extends TelemetryBase {
   readonly type: "handler.settled";

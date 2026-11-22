@@ -262,6 +262,29 @@ Note the difference from the unknown policy: a state with **no entry in `states`
 the unknown policy. A state that has an entry but whose cases do not match a trigger is
 ordinary handler logic, and returns whatever `else` says.
 
+A state can instead declare one behaviour per trigger type, under `on`:
+
+```json
+{
+  "state": "open",
+  "on": {
+    "sale": { "else": { "result": "stay", "values": { "sales": 1 } } },
+    "close": { "else": { "result": "transitionTo", "to": "closed" } }
+  }
+}
+```
+
+Each entry takes `cases` and `else` exactly as a state does, and runs only for triggers of its
+type. This is the unknown policy's business again: a trigger whose type the entity recognizes
+and the state has no entry for is refused with `UNHANDLED_TRIGGER`, recorded in the stream, and
+reaches no behaviour. When an entity declares no `triggers` and every one of its states uses
+`on`, the types those maps name are the ones it recognizes, and any other is `UNKNOWN_TRIGGER`.
+
+A state that declares `on` together with `cases` or `else` is refused at definition with
+`INVALID_CONFIG`, as is an empty `on`. So is a temporal constraint, a stale constraint or a rule
+whose `in` names a state that uses `on` and leaves the constraint's trigger type out, unless its
+policy is `warn`.
+
 ### The `do` object
 
 Exactly one of `result` or `throw`.
@@ -946,7 +969,8 @@ Stable across implementations. A runner asserts on these strings, never on messa
 | `INVALID_KEY` | Key is malformed. |
 | `UNKNOWN_ENTITY` | The key's first segment names no registered entity. |
 | `UNKNOWN_STATE` | The current state has no handler and the unknown policy is `reject`. |
-| `UNKNOWN_TRIGGER` | The trigger type is not in the declared `triggers`. |
+| `UNKNOWN_TRIGGER` | The trigger type is not one the entity recognizes: not in the declared `triggers`, or in no state's `on` when none are declared. |
+| `UNHANDLED_TRIGGER` | The entity recognizes the trigger type and the current state's `on` has no entry for it. |
 | `HANDLER_FAILED` | The handler produced `fail`, or threw. |
 | `INBOX_OVERFLOW` | The inbox was full and the overflow policy is `reject`. |
 | `TRIGGER_DROPPED` | The inbox was full and a drop policy discarded this trigger. |

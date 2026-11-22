@@ -45,6 +45,7 @@ describe("EkmanError", () => {
       "UNKNOWN_ENTITY",
       "UNKNOWN_STATE",
       "UNKNOWN_TRIGGER",
+      "UNHANDLED_TRIGGER",
       "HANDLER_FAILED",
       "INBOX_OVERFLOW",
       "TRIGGER_DROPPED",

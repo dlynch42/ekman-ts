@@ -1,6 +1,9 @@
+import type { RuntimeDeps } from "./config";
 import { assertKnownKeys } from "./config";
 import { EkmanError } from "./errors";
 import type { TransitionEvent } from "./events";
+import { parseKey } from "./key";
+import { telemetryNow } from "./telemetry";
 
 /**
  * Audit sinks: copies of committed events, delivered out of band.
@@ -95,4 +98,48 @@ export async function deliverTo(
   }
 
   return last;
+}
+
+/**
+ * Hand a committed event to every audit sink.
+ *
+ * Never awaited and never able to fail anything: an audit outage must not become a write
+ * outage. A sink that exhausts its attempts is reported and the commit stands.
+ *
+ * Each delivery starts on a later turn of the event loop, never inside the commit. A
+ * sink's `deliver` runs synchronously up to its first await, so started here it would
+ * make every commit wait for however long that takes.
+ */
+export function fanOut(
+  sinks: readonly AuditSink[],
+  event: TransitionEvent,
+  deps: Pick<RuntimeDeps, "emit" | "onUnhandled">
+): void {
+  for (const sink of sinks) {
+    setImmediate(() => deliver(sink, event, deps));
+  }
+}
+
+function deliver(
+  sink: AuditSink,
+  event: TransitionEvent,
+  deps: Pick<RuntimeDeps, "emit" | "onUnhandled">
+): void {
+  deliverTo(sink, event)
+    .then((failure) => {
+      if (failure !== undefined) {
+        deps.emit({
+          type: "audit.failed",
+          key: event.key,
+          entity: parseKey(event.key).entity,
+          sink: sink.name,
+          error: failure.message,
+          seq: event.seq,
+          at: telemetryNow(),
+        });
+      }
+    })
+    .catch((error: unknown) =>
+      deps.onUnhandled(error, { source: "audit", key: event.key })
+    );
 }

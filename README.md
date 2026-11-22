@@ -264,8 +264,11 @@ const orders = defineEntity.withTriggers<OrderTrigger>()("orders", {
   values: { total: 0 },
   triggers: ["pay", "refund"],          // anything else is refused and recorded
   states: {
-    pending: (order, trigger) =>
-      trigger.type === "pay" ? transitionTo("paid", { total: trigger.amount }) : stay(order.values),
+    // One handler per trigger type. A refund while pending is refused and recorded.
+    pending: {
+      on: { pay: (_order, trigger) => transitionTo("paid", { total: trigger.amount }) },
+    },
+    // Or one handler for every type.
     paid: (order) => stay(order.values),
   },
 });
@@ -273,6 +276,7 @@ const orders = defineEntity.withTriggers<OrderTrigger>()("orders", {
 
 A handler receives the instance, the trigger and a context, and returns one of four results:
 `transitionTo`, `stay`, `patch`, or `fail`. Nothing else commits, and throwing is equivalent to `fail`.
+A state names the trigger types it handles under `on`, or takes them all with one function.
 [More](./docs/entities.md)
 
 ### Constraints

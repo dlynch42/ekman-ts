@@ -7,6 +7,7 @@ import { resolveMemoryConfig } from "../src/memory";
 import { resolveStack } from "../src/stack";
 import type { Store } from "../src/store";
 import type { TelemetrySink } from "../src/telemetry";
+import { emit } from "../src/telemetry";
 import type { InboxConfig } from "../src/types";
 
 /**
@@ -32,10 +33,15 @@ export function testDeps(
   const stack = resolveStack(options.store);
   const now = options.now ?? (() => 1000);
 
+  const onUnhandled = options.onUnhandled ?? (() => undefined);
+
   return {
     now,
-    telemetry: options.telemetry,
-    onUnhandled: options.onUnhandled ?? (() => undefined),
+    emit: (event) => emit(options.telemetry, event, onUnhandled),
+    onUnhandled,
+    policy: undefined,
+    reconcile: (instance) => instance.ready(),
+    closing: new AbortController().signal,
     audit: options.audit ?? (() => undefined),
     committed: options.committed ?? (() => undefined),
     inbox: resolveInboxConfig(options.inbox),
