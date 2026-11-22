@@ -170,6 +170,7 @@ export type {
   StateConfig,
   StateEntry,
   StateGraph,
+  StateOnConfig,
   StatePolicyConfig,
   StorageConfig,
   TemporalConfig,

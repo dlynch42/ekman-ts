@@ -18,6 +18,13 @@ const UNDECLARED_ESCALATION = /"constraint\.temporal".*declared triggers/s;
 
 const INITIAL_VALUES = /initial values of entity "orders"/;
 const UNKNOWN_POLICY = /unknown policy "ignore"/;
+const BOTH_FORMS = /both/;
+const NO_HANDLER = /declares no handler/;
+const EMPTY_MAP = /empty `on` map/;
+const MAP_NOT_OBJECT = /must be an object/;
+const ENTRY_NOT_FUNCTION = /"pay" must be a handler function/;
+const NOT_A_STATE = /must be a handler function, or an object/;
+const UNDECLARED_ENTRY = /"cancel".*not in the declared triggers list/s;
 
 const noop = () => stay();
 
@@ -656,5 +663,241 @@ describe("initial values a store would bring back unchanged", () => {
     });
 
     expect(definition.initialValues.receipt).toBeUndefined();
+  });
+});
+
+describe("per-state trigger maps", () => {
+  type OrderTrigger =
+    | { type: "pay"; amount: number }
+    | { type: "cancel"; reason: string };
+
+  it("hands each entry the member of the union its key names", () => {
+    const orders = defineEntity.withTriggers<OrderTrigger>()("orders", {
+      initial: "pending",
+      values: { total: 0 },
+      states: {
+        pending: {
+          on: {
+            pay: (order, trigger) => {
+              expectTypeOf(trigger).toEqualTypeOf<{
+                type: "pay";
+                amount: number;
+              }>();
+              expectTypeOf(order.values.total).toEqualTypeOf<number>();
+              return transitionTo("paid", { total: trigger.amount });
+            },
+            cancel: (_order, trigger) => {
+              expectTypeOf(trigger.reason).toEqualTypeOf<string>();
+              return transitionTo("cancelled");
+            },
+          },
+        },
+        paid: () => stay(),
+        cancelled: () => stay(),
+      },
+    });
+
+    expectTypeOf(orders.initial).toEqualTypeOf<
+      "pending" | "paid" | "cancelled"
+    >();
+    expect([...(orders.handlers.get("pending")?.on?.keys() ?? [])]).toEqual([
+      "pay",
+      "cancel",
+    ]);
+    expect(orders.handlers.get("pending")?.handler).toBeUndefined();
+    expect(orders.handlers.get("paid")?.on).toBeUndefined();
+  });
+
+  it("refuses a key outside the union at compile time", () => {
+    const orders = defineEntity.withTriggers<OrderTrigger>()("orders", {
+      initial: "pending",
+      states: {
+        pending: {
+          on: {
+            pay: () => stay(),
+            // @ts-expect-error "typo" is not a type in the union
+            typo: () => stay(),
+          },
+        },
+      },
+    });
+
+    expect(orders.handlers.get("pending")?.on?.has("typo")).toBe(true);
+  });
+
+  it("takes any key and an untyped payload when no union is given", () => {
+    const orders = defineEntity("orders", {
+      initial: "pending",
+      states: {
+        pending: {
+          on: {
+            pay: (_order, trigger) => {
+              expectTypeOf(trigger.amount).toEqualTypeOf<unknown>();
+              return transitionTo("paid");
+            },
+          },
+        },
+        paid: noop,
+      },
+    });
+
+    expectTypeOf(orders.initial).toEqualTypeOf<"pending" | "paid">();
+  });
+
+  it("layers a policy declared beside the map over the entity's", () => {
+    const orders = defineEntity("orders", {
+      initial: "pending",
+      policy: { maxAttempts: 3 },
+      states: { pending: { on: { pay: noop }, timeoutMs: 50 } },
+    });
+
+    expect(orders.handlers.get("pending")?.policy).toEqual({
+      maxAttempts: 3,
+      timeoutMs: 50,
+    });
+  });
+
+  it("recognizes every type while one state takes any trigger", () => {
+    const orders = defineEntity("orders", {
+      initial: "pending",
+      states: { pending: { on: { pay: noop } }, paid: noop },
+    });
+
+    expect(orders.triggers).toBeNull();
+  });
+
+  it("recognizes only the named types once every state names its own", () => {
+    const orders = defineEntity("orders", {
+      initial: "pending",
+      states: {
+        pending: { on: { pay: noop, cancel: noop } },
+        paid: { on: { refund: noop } },
+      },
+    });
+
+    expect(orders.triggers).toEqual(new Set(["pay", "cancel", "refund"]));
+  });
+
+  it("keeps a declared triggers list over the names in the maps", () => {
+    const orders = defineEntity("orders", {
+      initial: "pending",
+      triggers: ["pay", "audit"],
+      states: { pending: { on: { pay: noop } } },
+    });
+
+    expect(orders.triggers).toEqual(new Set(["pay", "audit"]));
+  });
+
+  it.each([
+    [
+      "both a handler and a map",
+      { handler: noop, on: { pay: noop } },
+      BOTH_FORMS,
+    ],
+    ["neither a handler nor a map", { timeoutMs: 5 }, NO_HANDLER],
+    ["a handler that is not a function", { handler: "pay" }, NO_HANDLER],
+    ["an empty map", { on: {} }, EMPTY_MAP],
+    ["a map that is not an object", { on: ["pay"] }, MAP_NOT_OBJECT],
+    [
+      "an entry that is not a function",
+      { on: { pay: "paid" } },
+      ENTRY_NOT_FUNCTION,
+    ],
+    ["a state that is not a declaration at all", "paid", NOT_A_STATE],
+  ])("refuses %s", (_what, declared, message) => {
+    const define = () =>
+      defineEntity("orders", {
+        initial: "pending",
+        states: { pending: declared } as never,
+      });
+
+    expect(code(define)).toBe("INVALID_CONFIG");
+    expect(define).toThrow(message);
+  });
+
+  it("refuses an entry for a type the triggers list leaves out", () => {
+    const define = () =>
+      defineEntity("orders", {
+        initial: "pending",
+        triggers: ["pay"],
+        states: { pending: { on: { pay: noop, cancel: noop } } },
+      });
+
+    expect(code(define)).toBe("INVALID_CONFIG");
+    expect(define).toThrow(UNDECLARED_ENTRY);
+  });
+
+  describe("under a bound that delivers a trigger", () => {
+    const bounded = (
+      pending: Record<string, typeof noop>,
+      constraints: Record<string, unknown>
+    ) =>
+      defineEntity("orders", {
+        initial: "pending",
+        states: { pending: { on: pending }, overdue: noop },
+        constraints: constraints as never,
+      });
+
+    const temporal = {
+      temporal: [{ in: "pending", within: 10, escalateTo: "overdue" }],
+    };
+    const rule = {
+      rules: [{ name: "late", in: "pending", when: () => true }],
+    };
+    const stale = { stale: [{ in: "pending", after: 10 }] };
+
+    it.each([
+      ["a time bound", temporal, DEFAULT_TEMPORAL_TRIGGER],
+      ["a rule", rule, "rule.matched"],
+      ["a freshness bound", stale, "constraint.stale"],
+    ])(
+      "refuses %s on a state with no entry for its trigger",
+      (_what, constraints, type) => {
+        const define = () => bounded({ pay: noop }, constraints);
+
+        expect(code(define)).toBe("INVALID_CONFIG");
+        expect(define).toThrow(type);
+        expect(() =>
+          bounded({ pay: noop, [type]: noop }, constraints)
+        ).not.toThrow();
+      }
+    );
+
+    it("leaves a bound that only warns alone", () => {
+      expect(() =>
+        bounded(
+          { pay: noop },
+          { temporal: [{ in: "pending", within: 10, policy: "warn" }] }
+        )
+      ).not.toThrow();
+    });
+
+    it("leaves a rule that names no state to the refusal at delivery", () => {
+      expect(() =>
+        bounded({ pay: noop }, { rules: [{ name: "late", when: () => true }] })
+      ).not.toThrow();
+    });
+
+    it("does not hold the state a rule proposes to the rule's trigger", () => {
+      expect(() =>
+        defineEntity("orders", {
+          initial: "pending",
+          states: {
+            pending: { on: { pay: noop, "rule.matched": noop } },
+            overdue: { on: { pay: noop } },
+          },
+          constraints: {
+            rules: [
+              {
+                name: "late",
+                in: ["pending", "overdue"],
+                when: () => true,
+                propose: "overdue",
+              },
+            ],
+          },
+        })
+      ).not.toThrow();
+    });
   });
 });

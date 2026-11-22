@@ -665,6 +665,65 @@ describe("a record another writer has overtaken", () => {
   });
 });
 
+describe("a retry that reloads into a state with no entry for the trigger", () => {
+  const door = defineEntity("door", {
+    initial: "shut",
+    triggers: ["knock", "lock"],
+    states: {
+      shut: { on: { knock: () => transitionTo("open") } },
+      locked: { on: { lock: () => stay() } },
+      open: () => stay(),
+    },
+  });
+
+  it("ends the dispatch with the refusal, recorded, and never runs the old state's handler again", async () => {
+    const truth = memoryStore({ name: "truth" });
+    const ekman = new Ekman({
+      entities: [door],
+      store: truth,
+      execution: { maxAttempts: 3, backoff: { kind: "fixed", delayMs: 0 } },
+    });
+    // Resident and shut, as far as this runtime knows.
+    expect(
+      await ekman
+        .send("door:1", { type: "lock" })
+        .catch((e: EkmanError) => e.code)
+    ).toBe("UNHANDLED_TRIGGER");
+
+    await truth.append(
+      "door:1",
+      {
+        type: "transition",
+        key: "door:1",
+        from: "shut",
+        to: "locked",
+        seq: 1,
+        at: 0,
+        cause: { type: "lock", id: "x1" },
+        values: {},
+      },
+      0
+    );
+
+    const refusal = await ekman
+      .send("door:1", { type: "knock" })
+      .catch((error: EkmanError) => error);
+
+    expect(refusal).toMatchObject({ code: "UNHANDLED_TRIGGER" });
+    expect(ekman.inspect("door:1")).toMatchObject({ state: "locked", seq: 1 });
+    const { events } = await ekman.history("door:1");
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "rejected",
+        code: "UNHANDLED_TRIGGER",
+        seq: 1,
+        cause: expect.objectContaining({ type: "knock" }),
+      })
+    );
+    await ekman.close();
+  });
+});
+
 describe("a refusal the store could not record", () => {
   const strict = defineEntity("strict", {
     initial: "shut",

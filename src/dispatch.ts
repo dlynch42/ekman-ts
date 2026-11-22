@@ -23,6 +23,7 @@ import type {
   EntityDefinition,
   Handler,
   HandlerContext,
+  StateEntry,
   Trigger,
   Values,
 } from "./types";
@@ -114,6 +115,15 @@ export async function dispatch<S extends string, V extends Values>(
     );
   }
 
+  const handler = handlerFor(entry, trigger.type);
+
+  if (handler === undefined) {
+    settle("refused", 1);
+    return refuse(instance, deps, cause, "UNHANDLED_TRIGGER", () =>
+      unhandledReason(definition.name, instance.state, trigger.type, entry)
+    );
+  }
+
   const policy = resolvePolicy(
     deps.policy,
     entry.policy,
@@ -123,7 +133,7 @@ export async function dispatch<S extends string, V extends Values>(
   return await attemptLoop(instance, definition, trigger, deps, {
     cause,
     policy,
-    handler: entry.handler,
+    handler,
     depth,
     settle,
   });
@@ -247,9 +257,10 @@ async function attemptLoop<S extends string, V extends Values>(
  * for the state the other writer left. The policy stays the one the trigger was dispatched
  * under: a reload does not change which state's policy governs this trigger's attempts.
  *
- * A state with no handler ends the dispatch, whatever the retry predicate says. The record
- * has been reloaded by then, so a further attempt would skip the reload and run the old
- * state's handler against a state it was never written for.
+ * A state with no handler, or none for this trigger's type, ends the dispatch, whatever
+ * the retry predicate says. The record has been reloaded by then, so a further attempt
+ * would skip the reload and run the old state's handler against a state it was never
+ * written for.
  *
  * Only awaited for a record that needs it. An attempt that has nothing to reload must
  * reach its handler in the same turn, or telemetry interleaves differently with the sends
@@ -279,7 +290,50 @@ async function reconciled<S extends string, V extends Values>(
     });
     throw new AttemptFailure(refusal, refusal, true);
   }
-  return entry.handler;
+
+  const handler = handlerFor(entry, ctx.cause.type);
+  if (handler === undefined) {
+    const reason = unhandledReason(
+      definition.name,
+      instance.state,
+      ctx.cause.type,
+      entry
+    );
+    instance.reject({
+      code: "UNHANDLED_TRIGGER",
+      reason,
+      at: deps.now(),
+      cause: ctx.cause,
+    });
+    const refusal = new EkmanError("UNHANDLED_TRIGGER", reason, {
+      key: instance.key,
+    });
+    throw new AttemptFailure(refusal, refusal, true);
+  }
+  return handler;
+}
+
+/**
+ * The handler a state has for a trigger type, or undefined when the state names its
+ * trigger types and this is not one of them.
+ */
+function handlerFor<S extends string, V extends Values>(
+  entry: StateEntry<S, V, Trigger>,
+  type: string
+): Handler<S, V, Trigger> | undefined {
+  return entry.on === undefined ? entry.handler : entry.on.get(type);
+}
+
+function unhandledReason(
+  entity: string,
+  state: string,
+  type: string,
+  entry: { readonly on?: ReadonlyMap<string, unknown> }
+): string {
+  return (
+    `entity "${entity}" state "${state}" has no handler for trigger type "${type}". ` +
+    `Handled in this state: ${[...(entry.on?.keys() ?? [])].join(", ")}`
+  );
 }
 
 /**
@@ -779,7 +833,7 @@ function refuse<S extends string, V extends Values>(
   instance: InstanceRecord<S, V>,
   deps: DispatchDeps,
   cause: EventCause,
-  code: "UNKNOWN_STATE" | "UNKNOWN_TRIGGER",
+  code: "UNKNOWN_STATE" | "UNKNOWN_TRIGGER" | "UNHANDLED_TRIGGER",
   reason: () => string
 ): never {
   const message = reason();
