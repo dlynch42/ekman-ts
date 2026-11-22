@@ -448,6 +448,33 @@
         }
       }
     },
+    "cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["do"],
+        "additionalProperties": false,
+        "properties": {
+          "when": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "trigger": {
+                "type": "string"
+              },
+              "attempt": {
+                "description": "Matches the 1-based attempt number, so a case can fail once then commit.",
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          },
+          "do": {
+            "$ref": "#/$defs/do"
+          }
+        }
+      }
+    },
     "stateSpec": {
       "type": "object",
       "required": ["state"],
@@ -458,34 +485,27 @@
           "minLength": 1
         },
         "cases": {
-          "type": "array",
-          "items": {
+          "$ref": "#/$defs/cases"
+        },
+        "else": {
+          "$ref": "#/$defs/do"
+        },
+        "on": {
+          "description": "One behaviour per trigger type, in place of cases and else. A type with no entry is refused with UNHANDLED_TRIGGER. Declaring this together with cases or else is refused at definition.",
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
             "type": "object",
-            "required": ["do"],
             "additionalProperties": false,
             "properties": {
-              "when": {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                  "trigger": {
-                    "type": "string"
-                  },
-                  "attempt": {
-                    "description": "Matches the 1-based attempt number, so a case can fail once then commit.",
-                    "type": "integer",
-                    "minimum": 1
-                  }
-                }
+              "cases": {
+                "$ref": "#/$defs/cases"
               },
-              "do": {
+              "else": {
                 "$ref": "#/$defs/do"
               }
             }
           }
-        },
-        "else": {
-          "$ref": "#/$defs/do"
         },
         "policy": {
           "description": "Policy for this state alone, over the entity's and the runtime's.",
@@ -943,6 +963,7 @@
         "UNKNOWN_ENTITY",
         "UNKNOWN_STATE",
         "UNKNOWN_TRIGGER",
+        "UNHANDLED_TRIGGER",
         "HANDLER_FAILED",
         "INBOX_OVERFLOW",
         "TRIGGER_DROPPED",

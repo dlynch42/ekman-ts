@@ -194,10 +194,19 @@ export interface CheckSpec {
   readonly throw?: string;
 }
 
-export interface StateSpec {
-  readonly state: string;
+/** What a handler does: the first matching case, otherwise `else`, otherwise `stay`. */
+export interface BehaviourSpec {
   readonly cases?: readonly CaseSpec[];
   readonly else?: DoSpec;
+}
+
+export interface StateSpec extends BehaviourSpec {
+  readonly state: string;
+  /**
+   * One behaviour per trigger type, in place of `cases` and `else`. A type with no entry
+   * is refused by the runtime and never reaches a behaviour.
+   */
+  readonly on?: Readonly<Record<string, BehaviourSpec>>;
   /** Execution policy for this state alone, over the entity's and the runtime's. */
   readonly policy?: PolicySpec;
 }

@@ -1,0 +1,34 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/078-a-state-takes-one-handler-or-a-map-of-them",
+  "name": "a state that declares both a behaviour of its own and one per trigger type is refused at definition",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "tills",
+        "initial": "open",
+        "states": [
+          {
+            "state": "open",
+            "on": {
+              "sale": {
+                "else": {
+                  "result": "stay"
+                }
+              }
+            },
+            "else": {
+              "result": "stay"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "then": {
+    "buildError": {
+      "code": "INVALID_CONFIG"
+    }
+  }
+}

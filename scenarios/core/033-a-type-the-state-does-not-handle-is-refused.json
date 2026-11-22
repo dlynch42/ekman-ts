@@ -1,0 +1,107 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/033-a-type-the-state-does-not-handle-is-refused",
+  "name": "a recognized trigger type the current state has no entry for is refused and recorded, and an undeclared one is still unknown",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "tills",
+        "initial": "open",
+        "triggers": ["sale", "close", "audit"],
+        "values": {
+          "sales": 0
+        },
+        "states": [
+          {
+            "state": "open",
+            "on": {
+              "sale": {
+                "else": {
+                  "result": "stay",
+                  "values": {
+                    "sales": 1
+                  }
+                }
+              },
+              "close": {
+                "else": {
+                  "result": "transitionTo",
+                  "to": "closed"
+                }
+              }
+            }
+          },
+          {
+            "state": "closed",
+            "else": {
+              "result": "stay"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "tills:1",
+        "trigger": {
+          "type": "audit"
+        }
+      }
+    },
+    {
+      "send": {
+        "key": "tills:1",
+        "trigger": {
+          "type": "sneak"
+        }
+      }
+    }
+  ],
+  "then": {
+    "sends": [
+      {
+        "outcome": "rejected",
+        "code": "UNHANDLED_TRIGGER"
+      },
+      {
+        "outcome": "rejected",
+        "code": "UNKNOWN_TRIGGER"
+      }
+    ],
+    "events": {
+      "tills:1": [
+        {
+          "type": "transition",
+          "from": null,
+          "to": "open",
+          "seq": 0
+        },
+        {
+          "type": "rejected",
+          "seq": 0,
+          "code": "UNHANDLED_TRIGGER",
+          "cause": {
+            "type": "audit"
+          }
+        },
+        {
+          "type": "rejected",
+          "seq": 0,
+          "code": "UNKNOWN_TRIGGER",
+          "cause": {
+            "type": "sneak"
+          }
+        }
+      ]
+    },
+    "state": {
+      "tills:1": {
+        "state": "open",
+        "seq": 0
+      }
+    }
+  }
+}
