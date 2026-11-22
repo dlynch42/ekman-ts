@@ -1,4 +1,5 @@
 import { constraintsOf } from "./compiled";
+import type { RuntimeDeps } from "./config";
 import type { ProposedCommit } from "./constraints";
 import { checkConstraints, rejection, violationError } from "./constraints";
 import { resolveErrorHandler } from "./entity";
@@ -7,7 +8,7 @@ import type { EventCause } from "./events";
 import type { CommitToken } from "./fence";
 import { fenceReason } from "./fence";
 import type { InstanceRecord } from "./instance";
-import type { ExecutionPolicy, ResolvedPolicy } from "./policy";
+import type { ResolvedPolicy } from "./policy";
 import { backoffDelay, defaultRetryable, resolvePolicy } from "./policy";
 import type {
   HandlerResult,
@@ -16,7 +17,6 @@ import type {
   TransitionToResult,
 } from "./results";
 import { isHandlerResult, toError } from "./results";
-import type { TelemetryEvent } from "./telemetry";
 import { telemetryNow, triggerRef } from "./telemetry";
 import type {
   CommitResult,
@@ -29,21 +29,6 @@ import type {
 } from "./types";
 import { sealValues } from "./values";
 
-/** Everything a dispatch needs that is owned by the runtime rather than the instance. */
-export interface DispatchDeps {
-  now: () => number;
-  /** The runtime-wide execution policy, under every entity and state override. */
-  policy: ExecutionPolicy | undefined;
-  emit: (event: TelemetryEvent) => void;
-  /**
-   * Bring a record another writer has overtaken back in step with the store, through the
-   * runtime, so its indexes and the restore telemetry follow.
-   */
-  reconcile: (instance: InstanceRecord) => Promise<void>;
-  /** Aborted when the runtime begins closing, which ends any wait between attempts. */
-  closing: AbortSignal;
-}
-
 /**
  * Run one trigger against one instance, to completion.
  *
@@ -55,7 +40,7 @@ export async function dispatch<S extends string, V extends Values>(
   instance: InstanceRecord<S, V>,
   definition: EntityDefinition<string, S, V, Trigger>,
   trigger: Trigger,
-  deps: DispatchDeps,
+  deps: RuntimeDeps,
   depth: number
 ): Promise<CommitResult<S, V>> {
   const cause: EventCause = { type: trigger.type, id: trigger.id as string };
@@ -170,7 +155,7 @@ async function attemptLoop<S extends string, V extends Values>(
   instance: InstanceRecord<S, V>,
   definition: EntityDefinition<string, S, V, Trigger>,
   trigger: Trigger,
-  deps: DispatchDeps,
+  deps: RuntimeDeps,
   ctx: AttemptContext<S, V>
 ): Promise<CommitResult<S, V>> {
   const { policy } = ctx;
@@ -269,7 +254,7 @@ async function attemptLoop<S extends string, V extends Values>(
 async function reconciled<S extends string, V extends Values>(
   instance: InstanceRecord<S, V>,
   definition: EntityDefinition<string, S, V, Trigger>,
-  deps: DispatchDeps,
+  deps: RuntimeDeps,
   ctx: AttemptContext<S, V>
 ): Promise<Handler<S, V, Trigger>> {
   await deps.reconcile(instance as unknown as InstanceRecord);
@@ -403,7 +388,7 @@ async function runAttempt<S extends string, V extends Values>(
   instance: InstanceRecord<S, V>,
   definition: EntityDefinition<string, S, V, Trigger>,
   trigger: Trigger,
-  deps: DispatchDeps,
+  deps: RuntimeDeps,
   ctx: AttemptContext<S, V>,
   token: CommitToken
 ): Promise<CommitResult<S, V>> {
@@ -499,7 +484,7 @@ function underTimeout<S extends string, V extends Values>(
   settled: Promise<CommitResult<S, V>>,
   instance: InstanceRecord<S, V>,
   trigger: Trigger,
-  deps: DispatchDeps,
+  deps: RuntimeDeps,
   timeoutMs: number,
   token: CommitToken,
   controller: AbortController
@@ -589,7 +574,7 @@ async function handleFailure<S extends string, V extends Values>(
   definition: EntityDefinition<string, S, V, Trigger>,
   error: Error,
   ctx: HandlerContext,
-  deps: DispatchDeps,
+  deps: RuntimeDeps,
   cause: EventCause,
   token: CommitToken,
   trigger: Trigger
@@ -670,7 +655,7 @@ function failed(
 function applyConstraints<S extends string, V extends Values>(
   instance: InstanceRecord<S, V>,
   definition: EntityDefinition<string, S, V, Trigger>,
-  deps: DispatchDeps,
+  deps: RuntimeDeps,
   args: {
     next: ProposedCommit<S, V>;
     trigger: Trigger;
@@ -765,7 +750,7 @@ async function commit<S extends string, V extends Values>(
   definition: EntityDefinition<string, S, V, Trigger>,
   result: TransitionToResult<S, V> | StayResult<V> | PatchResult<V>,
   trigger: Trigger,
-  deps: DispatchDeps,
+  deps: RuntimeDeps,
   cause: EventCause,
   token: CommitToken
 ): Promise<CommitResult<S, V>> {
@@ -831,7 +816,7 @@ async function commit<S extends string, V extends Values>(
 /** Record a refusal in the key's stream and reject the sender. */
 function refuse<S extends string, V extends Values>(
   instance: InstanceRecord<S, V>,
-  deps: DispatchDeps,
+  deps: RuntimeDeps,
   cause: EventCause,
   code: "UNKNOWN_STATE" | "UNKNOWN_TRIGGER" | "UNHANDLED_TRIGGER",
   reason: () => string

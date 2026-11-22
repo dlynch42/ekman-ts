@@ -3,7 +3,7 @@ import type { ErrorCode } from "./errors";
 import { EkmanError } from "./errors";
 import type { EventCause } from "./events";
 import type { TelemetryEvent } from "./telemetry";
-import { emit, telemetryNow, triggerRef } from "./telemetry";
+import { telemetryNow, triggerRef } from "./telemetry";
 import type { CommitResult, Trigger } from "./types";
 
 /**
@@ -128,7 +128,7 @@ export class Inbox {
       this.#queue.push({ trigger, run, resolve, reject });
     });
 
-    this.#emit({
+    this.#deps.emit({
       type: "inbox.enqueued",
       key: this.#key,
       entity: this.#entity,
@@ -221,7 +221,7 @@ export class Inbox {
     code: "INBOX_OVERFLOW" | "TRIGGER_DROPPED",
     event: TelemetryEvent
   ): EkmanError {
-    this.#emit(event);
+    this.#deps.emit(event);
 
     const { capacity, overflow } = this.#config;
     const full = `the inbox for ${this.#key} is full at its capacity of ${capacity} waiting triggers`;
@@ -240,10 +240,6 @@ export class Inbox {
     }
 
     return new EkmanError(code, reason, { key: this.#key });
-  }
-
-  #emit(event: TelemetryEvent): void {
-    emit(this.#deps.telemetry, event, this.#deps.onUnhandled);
   }
 
   /**

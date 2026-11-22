@@ -12,7 +12,6 @@ import type {
   TemporalTrigger,
 } from "./constraints";
 import { limitOf, thrownMessage } from "./constraints";
-import type { DispatchDeps } from "./dispatch";
 import { dispatch } from "./dispatch";
 import { EkmanError } from "./errors";
 import type { EkmanEvent, EventCause, TransitionEvent } from "./events";
@@ -42,7 +41,7 @@ import type {
   Store,
 } from "./store";
 import { EMPTY_SEQ, lastCommitOf, replay } from "./store";
-import type { TelemetryEvent } from "./telemetry";
+import type { TelemetryEvent, TelemetrySink } from "./telemetry";
 import {
   emit,
   TELEMETRY_EVENT_TYPES,
@@ -117,8 +116,8 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   readonly #instances = new Map<string, AnyInstance>();
   readonly #now: () => number;
   readonly #onUnhandled: OnUnhandled;
+  readonly #telemetry: TelemetrySink | undefined;
   readonly #runtime: RuntimeDeps;
-  readonly #deps: DispatchDeps;
   /** Where every resident instance sits. Read by temporal constraints and by queries. */
   readonly #temporal = new TemporalIndex();
   readonly #stack: ResolvedStack;
@@ -168,6 +167,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     assertRuntimeConfig(config);
     this.#now = config.now ?? Date.now;
     this.#onUnhandled = config.onUnhandled ?? defaultOnUnhandled;
+    this.#telemetry = config.telemetry;
     this.#sweeping = false;
     this.#sweepingStorage = false;
 
@@ -208,22 +208,17 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
 
     this.#runtime = {
       now: () => this.#now(),
-      telemetry: config.telemetry,
+      emit: (event) => this.#emit(event),
       onUnhandled: (error, context) => this.#onUnhandled(error, context),
+      policy: config.execution,
+      reconcile: (instance) => this.#hydrate(instance as AnyInstance),
+      closing: this.#closing.signal,
       inbox: resolveInboxConfig(config.inbox),
       stack: this.#stack,
       caches: this.#caches,
       memory: this.#memory,
       audit: (event) => this.#fanOut(event),
       committed: (record, moved) => this.#committed(record, moved),
-    };
-
-    this.#deps = {
-      now: () => this.#now(),
-      policy: config.execution,
-      emit: (event) => this.#emit(event),
-      reconcile: (instance) => this.#hydrate(instance as AnyInstance),
-      closing: this.#closing.signal,
     };
 
     const handles: Record<string, EntityHandle> = {};
@@ -881,7 +876,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
 
     for (const [state, entry] of definition.handlers) {
       resolvePolicy(
-        this.#deps.policy,
+        this.#runtime.policy,
         entry.policy,
         `entity "${definition.name}" state "${state}"`
       );
@@ -1077,7 +1072,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       instance,
       definition,
       trigger,
-      this.#deps,
+      this.#runtime,
       depth
     );
 
@@ -2265,7 +2260,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   }
 
   #emit(event: TelemetryEvent): void {
-    emit(this.#runtime.telemetry, event, this.#onUnhandled);
+    emit(this.#telemetry, event, this.#onUnhandled);
   }
 
   /** A rejection handler that reports to `onUnhandled` with where the failure came from. */
