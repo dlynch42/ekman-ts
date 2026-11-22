@@ -1,14 +1,11 @@
 import type { AuditSink } from "./audit";
-import { assertAuditSink, deliverTo } from "./audit";
+import { assertAuditSink, fanOut } from "./audit";
 import { Caches, DEFAULT_CACHE_TIMEOUT_MS } from "./caches";
-import { assertBuilt, constraintsOf } from "./compiled";
+import { assertBuilt } from "./compiled";
 import type { CommittedRecord, RuntimeDeps } from "./config";
 import { assertKnownKeys, resolveInboxConfig } from "./config";
-import type { CompiledRule, RuleTrigger } from "./constraints";
-import { thrownMessage } from "./constraints";
 import { dispatch } from "./dispatch";
 import { EkmanError } from "./errors";
-import type { TransitionEvent } from "./events";
 import { parseKey } from "./key";
 import { resolveMemoryConfig } from "./memory";
 import { assertPolicyKeys, MAX_TIMER_MS, resolvePolicy } from "./policy";
@@ -28,6 +25,7 @@ import {
 } from "./query";
 import type { AnyDefinition, AnyInstance } from "./residency";
 import { Residency } from "./residency";
+import { Rules } from "./rules";
 import type { ResolvedStack } from "./stack";
 import { assertCoordination, resolveStack } from "./stack";
 import type { StorageSweep } from "./store";
@@ -46,8 +44,6 @@ import {
   TELEMETRY_FALLBACK,
   telemetryNow,
 } from "./telemetry";
-import type { EscalationOutcome } from "./temporal";
-import { freshCause, refusalOutcome } from "./temporal";
 import type {
   AnyEntityDefinition,
   CacheConfig,
@@ -85,14 +81,8 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   readonly entities: EntityHandles<D>;
 
   readonly #definitions = new Map<string, AnyDefinition>();
-  /**
-   * The rules of each entity that declares any, by watched state. Kept apart from the
-   * definitions so a commit of an entity with no rules pays one lookup to learn that.
-   */
-  readonly #rules = new Map<
-    string,
-    ReadonlyMap<string, readonly CompiledRule[]>
-  >();
+  /** The rules entities declared, asked after every commit of an instance they watch. */
+  readonly #rules: Rules;
   readonly #now: () => number;
   readonly #onUnhandled: OnUnhandled;
   readonly #telemetry: TelemetrySink | undefined;
@@ -168,7 +158,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       stack: this.#stack,
       caches: this.#caches,
       memory,
-      audit: (event) => this.#fanOut(event),
+      audit: (event) => fanOut(this.#audit, event, this.#runtime),
       committed: (record, moved) => this.#committed(record, moved),
     };
     this.#residency = new Residency(this.#runtime);
@@ -181,12 +171,11 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       },
     };
 
-    const handles: Record<string, EntityHandle> = {};
-    for (const definition of config.entities ?? []) {
-      handles[definition.name] = this.#register(definition);
-    }
-    this.entities = Object.freeze(handles) as EntityHandles<D>;
-
+    this.#rules = new Rules({
+      deps: this.#runtime,
+      send: (key, trigger) => this.send(key, trigger),
+      nextTriggerId: () => this.#nextTriggerId(),
+    });
     this.#sweeper = new TemporalSweeper({
       deps: this.#runtime,
       definitions: this.#definitions,
@@ -206,6 +195,12 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       EMPTY_SWEEP,
       closing
     );
+
+    const handles: Record<string, EntityHandle> = {};
+    for (const definition of config.entities ?? []) {
+      handles[definition.name] = this.#register(definition);
+    }
+    this.entities = Object.freeze(handles) as EntityHandles<D>;
 
     this.#startSweeping(config.temporal?.sweepMs);
     this.#startStorageSweeping(config.storage?.sweepMs);
@@ -694,10 +689,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     }
 
     this.#definitions.set(definition.name, definition);
-    const rules = constraintsOf(definition)?.rulesByState;
-    if (rules !== undefined && rules.size > 0) {
-      this.#rules.set(definition.name, rules);
-    }
+    this.#rules.register(definition);
     return this.#makeHandle(definition);
   }
 
@@ -837,144 +829,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   #committed(record: CommittedRecord, moved: boolean): void {
     this.#residency.committed(record, moved);
 
-    const rules = this.#rules.get(record.entity)?.get(record.state);
-    if (rules !== undefined) {
-      this.#evaluateRules(
-        this.#residency.get(record.key) as AnyInstance,
-        rules
-      );
-    }
-  }
-
-  /**
-   * Ask each rule watching an instance's state whether its condition holds on what was
-   * just committed, and propose for the ones that have come to hold.
-   *
-   * A rule that holds and has already said so is passed over, which is what makes a
-   * value that stays over a threshold one proposal. One that does not hold is armed
-   * again. Run from the commit hook, inside the committing turn, so nothing here waits.
-   */
-  #evaluateRules(instance: AnyInstance, rules: readonly CompiledRule[]): void {
-    const snapshot = instance.snapshot();
-
-    for (const rule of rules) {
-      const reason = heldBy(rule, snapshot);
-      if (reason === undefined) {
-        instance.rearm(rule.name);
-      } else if (
-        !(instance.hasFired(rule.name) || instance.isProposing(rule.name))
-      ) {
-        this.#propose(instance, rule, reason);
-      }
-    }
-  }
-
-  /**
-   * Arm again every rule whose condition does not hold on an instance just loaded.
-   *
-   * A stream records a rule matching and never records it ceasing to, so the latch a
-   * load rebuilds can name a rule as done whose condition stopped holding long ago.
-   * Left alone, the commit that next made it hold would be passed over.
-   */
-  #rearmRules(instance: AnyInstance): void {
-    const rules = this.#rules.get(instance.entity)?.get(instance.state);
-    if (rules === undefined) {
-      return;
-    }
-
-    const snapshot = instance.snapshot();
-    for (const rule of rules) {
-      if (heldBy(rule, snapshot) === undefined) {
-        instance.rearm(rule.name);
-      }
-    }
-  }
-
-  /**
-   * Record that a rule's condition came to hold and, unless it only warns, send its
-   * proposal.
-   *
-   * The proposal goes through `send()` and is not awaited: this runs inside the turn of
-   * the commit that made the condition hold, and the proposal queues behind it. The
-   * runtime never writes state on its own. `propose` rides on the trigger, and the
-   * handler decides.
-   *
-   * A proposal that was turned away for a reason that passes stays owed. The match is
-   * already in the stream, so the next commit sends the trigger again under the id that
-   * match named and records nothing twice.
-   */
-  #propose(instance: AnyInstance, rule: CompiledRule, reason: string): void {
-    const owed = instance.undelivered(rule.name);
-    const cause =
-      owed === undefined
-        ? freshCause(instance, rule.trigger, () => this.#nextTriggerId())
-        : { type: rule.trigger, id: owed };
-    const { key, entity, state } = instance;
-
-    if (owed === undefined) {
-      instance.violation({
-        violation: {
-          kind: "rule",
-          name: rule.name,
-          policy: rule.policy,
-          reason,
-        },
-        at: this.#now(),
-        cause,
-      });
-      this.#emit({
-        type: "constraint.violated",
-        key,
-        entity,
-        state,
-        kind: "rule",
-        constraint: rule.name,
-        policy: rule.policy,
-        reason,
-        trigger: cause,
-        at: telemetryNow(),
-      });
-    }
-
-    if (rule.policy === "warn") {
-      return;
-    }
-
-    const trigger: RuleTrigger<string, string> = {
-      ...cause,
-      rule: rule.name,
-      state,
-      ...(rule.propose === undefined ? {} : { propose: rule.propose }),
-      reason,
-    };
-    instance.proposing(rule.name, cause.id);
-
-    this.send(key, trigger)
-      .then(
-        (): EscalationOutcome => "delivered",
-        (error: unknown): EscalationOutcome => {
-          this.#onUnhandled(error, { source: "escalation", key });
-          return refusalOutcome(error);
-        }
-      )
-      .then((outcome) => {
-        instance.proposed(rule.name, cause.id);
-        if (outcome === "refused") {
-          instance.refused(rule.name, cause.id);
-        }
-        this.#emit({
-          type: "constraint.escalated",
-          key,
-          entity,
-          kind: "rule",
-          constraint: rule.name,
-          state,
-          escalateTo: rule.propose,
-          trigger: cause,
-          delivered: outcome === "delivered",
-          at: telemetryNow(),
-        });
-      });
+    this.#rules.committed(record, this.#residency);
   }
 
   /** Reconcile an instance with the store, reporting a reload when one happened. */
@@ -989,7 +844,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     }
 
     this.#residency.loaded(instance);
-    this.#rearmRules(instance);
+    this.#rules.rearm(instance);
 
     const restored = instance.lastRestored;
     if (restored !== undefined && restored !== before) {
@@ -1004,40 +859,6 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
         at: telemetryNow(),
       });
     }
-  }
-
-  /**
-   * Hand a committed event to every audit sink.
-   *
-   * Never awaited and never able to fail anything: an audit outage must not become a write
-   * outage. A sink that exhausts its attempts is reported and the commit stands.
-   *
-   * Each delivery starts on a later turn of the event loop, never inside the commit. A
-   * sink's `deliver` runs synchronously up to its first await, so started here it would
-   * make every commit wait for however long that takes.
-   */
-  #fanOut(event: TransitionEvent): void {
-    for (const sink of this.#audit) {
-      setImmediate(() => this.#deliver(sink, event));
-    }
-  }
-
-  #deliver(sink: AuditSink, event: TransitionEvent): void {
-    deliverTo(sink, event)
-      .then((failure) => {
-        if (failure !== undefined) {
-          this.#emit({
-            type: "audit.failed",
-            key: event.key,
-            entity: parseKey(event.key).entity,
-            sink: sink.name,
-            error: failure.message,
-            seq: event.seq,
-            at: telemetryNow(),
-          });
-        }
-      })
-      .catch(this.#unhandled("audit", event.key));
   }
 
   #startSweeping(sweepMs: number | undefined): void {
@@ -1095,27 +916,6 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     const context = key === undefined ? { source } : { source, key };
     return (error) => this.#onUnhandled(error, context);
   }
-}
-
-/**
- * What a rule's condition says about an instance: why it holds, or undefined when it
- * does not. A condition that throws holds, with what it threw as the reason, because a
- * broken condition read as "does not hold" would be a rule that silently never fires.
- */
-function heldBy(
-  rule: CompiledRule,
-  snapshot: InstanceSnapshot
-): string | undefined {
-  let outcome: boolean | string;
-  try {
-    outcome = rule.when(snapshot);
-  } catch (thrown) {
-    return `the condition threw: ${thrownMessage(thrown)}`;
-  }
-  if (outcome === false) {
-    return;
-  }
-  return typeof outcome === "string" ? outcome : "the condition held";
 }
 
 /**
