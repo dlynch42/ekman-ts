@@ -27,6 +27,7 @@ it, what moves it, and where everything is.
 | [Telemetry and audit](./telemetry.md) | The runtime's own event stream, kept separate from per-key history, and audit sinks. |
 | [Error codes](./errors.md) | Every code Ekman raises, what it means, and a suggested HTTP mapping. |
 | [Questions people ask first](./faq.md) | How this differs from a state machine library, from a platform, and from a mutex, and when not to use it. |
+| [Architecture](./architecture.md) | For contributors and ports: which module owns what, the unit that holds what is in memory, and what running across threads would change. |
 
 ## Related
 

@@ -115,6 +115,9 @@ CI runs the same set. They must pass.
 | `benchmarks/` | Performance suites and their recorded baselines. |
 | `examples/` | A worked service built on Ekman. |
 
+Inside `src/`, [docs/architecture.md](./docs/architecture.md) says which module owns what and
+what each must not know about. Read it before moving code between modules.
+
 ## What Ekman is (and isn't)
 
 Ekman is an **embedded runtime for addressable stateful instances**. Each instance is identified by a human-readable key, holds its own state and values, and processes its triggers one at a time. Around that it owns the operational layer: transition history, constraints, retries and timeouts, queries, and a memory budget. It is constructed in your process. A runtime you embed, not a platform you operate.
