@@ -204,5 +204,32 @@ describe("Residency", () => {
       await pending;
       expect(residency.snapshotting("orders:1")).toBeUndefined();
     });
+
+    it("reports a snapshot the store would not take, and releases the record anyway", async () => {
+      const store = memoryStore({ name: "truth" });
+      store.snapshot = () => Promise.reject(new Error("disk is full"));
+      const unhandled: unknown[] = [];
+      const residency = new Residency(
+        testDeps({
+          store,
+          memory: { maxBytes: 1 },
+          onUnhandled: (error, context) => unhandled.push([error, context]),
+        })
+      );
+      const record = residency.materialize("orders:1", orders, CAUSE);
+      await record.ready();
+      residency.loaded(record);
+
+      residency.evict(record);
+      await residency.snapshotting("orders:1");
+
+      expect(residency.get("orders:1")).toBeUndefined();
+      expect(unhandled).toEqual([
+        [
+          expect.objectContaining({ message: "disk is full" }),
+          { source: "snapshot", key: "orders:1" },
+        ],
+      ]);
+    });
   });
 });
