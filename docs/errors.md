@@ -22,7 +22,7 @@ written to be read by a person and will change.
 
 ## The codes
 
-There are 22, and they fall into four groups.
+There are 23, and they fall into four groups.
 
 The **Retry?** column is the contract: whether sending the same trigger again can come out
 differently. The **HTTP** column is a suggested mapping, and it does not carry that answer on its
@@ -37,7 +37,8 @@ Nothing committed, and the condition that refused it is still true.
 | `INVALID_KEY` | The key is malformed, or is too long for the store to name a file after. | no | 400 |
 | `UNKNOWN_ENTITY` | The key's first segment, or a query's `entity`, names no registered entity. | no | 404 |
 | `UNKNOWN_STATE` | The current state has no handler and the unknown policy is `reject`. | no | 409 |
-| `UNKNOWN_TRIGGER` | The trigger's type is not in the entity's declared trigger list. | no | 422 |
+| `UNKNOWN_TRIGGER` | The trigger's type is not one the entity recognizes: it is missing from the declared trigger list, or from every state's `on` map when no list is declared. | no | 422 |
+| `UNHANDLED_TRIGGER` | The entity recognizes the trigger's type, and the current state's `on` map has no entry for it. | no, unless the instance has since moved | 409 |
 | `CONSTRAINT_VIOLATED` | A result did not satisfy a constraint whose policy is `reject`. | no, unless the instance has since moved | 409 |
 | `COMMIT_FENCED` | A commit was refused because its attempt had been superseded. | only if the handler's work is safe to repeat | 409 |
 
@@ -90,6 +91,7 @@ const STATUS: Record<string, number> = {
   UNKNOWN_ENTITY: 404,
   UNKNOWN_STATE: 409,
   UNKNOWN_TRIGGER: 422,
+  UNHANDLED_TRIGGER: 409,
   CONSTRAINT_VIOLATED: 409,
   INBOX_OVERFLOW: 503,
   TRIGGER_DROPPED: 503,
