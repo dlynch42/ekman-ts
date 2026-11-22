@@ -408,15 +408,20 @@ export async function queryInstances<
   }) as QueryResult<S, V>;
 }
 
-/** Where every instance of an entity is: a count and the keys for each state. */
+/**
+ * Where every instance of an entity is: a count and the keys for each state.
+ *
+ * @param query the runtime's own `query`, so a map is whatever a query over the entity
+ *   answers, including for a runtime whose `query` has been wrapped or overridden
+ */
 export async function mapStates<S extends string = string>(
-  ctx: ReadContext,
+  query: (criteria: QueryCriteria) => Promise<QueryResult>,
   entity: string,
   options: StateMapOptions = {}
 ): Promise<StateMap<S>> {
   const { limitPerState } = options;
   assertLimit(limitPerState, "a map's limitPerState", "every key");
-  const found = await queryInstances(ctx, { entity });
+  const found = await query({ entity });
   return stateMap<S>(
     entity,
     found.instances,

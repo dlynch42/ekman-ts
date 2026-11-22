@@ -458,7 +458,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     entity: string,
     options: StateMapOptions = {}
   ): Promise<StateMap<S>> {
-    return mapStates<S>(this.#reads, entity, options);
+    return mapStates<S>((criteria) => this.query(criteria), entity, options);
   }
 
   /**
