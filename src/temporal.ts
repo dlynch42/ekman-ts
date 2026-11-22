@@ -351,3 +351,24 @@ export class LatchFold {
     }
   }
 }
+
+/**
+ * A cause for an escalation raised for the first time.
+ *
+ * Never one this instance still owes to another bound. Trigger ids start over with each
+ * process, so a fresh id can repeat one a previous process left owed, and the commit
+ * that answered either escalation would then settle both.
+ *
+ * @param nextId draws the next id from the runtime's counter
+ */
+export function freshCause(
+  instance: { owes: (cause: EventCause) => boolean },
+  type: string,
+  nextId: () => string
+): EventCause {
+  let cause = { type, id: nextId() };
+  while (instance.owes(cause)) {
+    cause = { type, id: nextId() };
+  }
+  return cause;
+}

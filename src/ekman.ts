@@ -4,17 +4,11 @@ import { Caches, DEFAULT_CACHE_TIMEOUT_MS } from "./caches";
 import { assertBuilt, constraintsOf } from "./compiled";
 import type { CommittedRecord, RuntimeDeps } from "./config";
 import { assertKnownKeys, resolveInboxConfig } from "./config";
-import type {
-  CompiledBound,
-  CompiledRule,
-  RuleTrigger,
-  StaleTrigger,
-  TemporalTrigger,
-} from "./constraints";
-import { limitOf, thrownMessage } from "./constraints";
+import type { CompiledRule, RuleTrigger } from "./constraints";
+import { thrownMessage } from "./constraints";
 import { dispatch } from "./dispatch";
 import { EkmanError } from "./errors";
-import type { EventCause, TransitionEvent } from "./events";
+import type { TransitionEvent } from "./events";
 import { parseKey } from "./key";
 import { resolveMemoryConfig } from "./memory";
 import { assertPolicyKeys, MAX_TIMER_MS, resolvePolicy } from "./policy";
@@ -27,19 +21,24 @@ import type {
   StateMapOptions,
 } from "./query";
 import {
-  isQuiet,
   mapStates,
   queryInstances,
   readHistory,
   residentStateMap,
-  scanStore,
 } from "./query";
 import type { AnyDefinition, AnyInstance } from "./residency";
 import { Residency } from "./residency";
 import type { ResolvedStack } from "./stack";
 import { assertCoordination, resolveStack } from "./stack";
-import type { ScanMatch, StorageSweep, Store } from "./store";
+import type { StorageSweep } from "./store";
 import { EMPTY_SEQ } from "./store";
+import {
+  assertSweepInterval,
+  EMPTY_SWEEP,
+  PeriodicPass,
+  sweepStorageOnce,
+  TemporalSweeper,
+} from "./sweep";
 import type { TelemetryEvent, TelemetrySink } from "./telemetry";
 import {
   emit,
@@ -48,7 +47,7 @@ import {
   telemetryNow,
 } from "./telemetry";
 import type { EscalationOutcome } from "./temporal";
-import { refusalOutcome } from "./temporal";
+import { freshCause, refusalOutcome } from "./temporal";
 import type {
   AnyEntityDefinition,
   CacheConfig,
@@ -65,16 +64,6 @@ import type {
   UnhandledContext,
   Values,
 } from "./types";
-
-/** What a sweep learned about a stored instance it loaded, kept so it need not load it again. */
-interface SettledNote {
-  /** The sequence the instance was at. Any commit since makes the note out of date. */
-  readonly seq: number;
-  /** When it entered its state, which a different instance under the same key would not share. */
-  readonly enteredAt: number;
-  /** The earliest moment one of its bounds could have something new to say. */
-  readonly dueAt: number;
-}
 
 /**
  * An embedded Ekman runtime.
@@ -117,37 +106,14 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   readonly #audit: readonly AuditSink[];
   /** Deletions still in progress, by key. A new record for the key waits on its entry before loading. */
   readonly #forgetting = new Map<string, Promise<void>>();
-  /**
-   * Stored instances the last sweep loaded and found nothing to raise for, by key.
-   *
-   * Without it every pass would load each instance that has sat past its bound and
-   * already been told so. A pass drops every note it did not see the key for, so this
-   * never holds more than the stored instances currently past a bound, and deleting an
-   * instance drops its note, so a key created again is not mistaken for the one before.
-   */
-  readonly #settled = new Map<string, SettledNote>();
-  #sweepTimer: ReturnType<typeof setInterval> | undefined;
-  #storageSweepTimer: ReturnType<typeof setInterval> | undefined;
-  /**
-   * Declared here and assigned in the constructor rather than initialized inline. An
-   * inline `= false` narrows the field to the literal `false`, after which the re-entry
-   * guard that reads it looks statically dead. The inbox's `#running` carries the same
-   * note for the same reason.
-   */
-  #sweeping: boolean;
-  /** Same reasoning as `#sweeping`, for the storage pass. */
-  #sweepingStorage: boolean;
   /** Aborted when `close()` begins. From then on no trigger is accepted and no retry starts. */
   readonly #closing = new AbortController();
   /** The one shutdown every `close()` call shares. */
   #closed: Promise<void> | undefined;
-  /** A storage sweep in progress, settled either way, for a shutdown to wait on. */
-  #storageSweep: Promise<void> | undefined;
-  /**
-   * The time-in-state pass under way, if one is. Waited for at shutdown, because a pass
-   * loads instances and records violations, and neither should meet a closed store.
-   */
-  #temporalSweep: Promise<void> | undefined;
+  readonly #sweeper: TemporalSweeper;
+  /** The time-in-state pass. Waited for at shutdown, because it loads and records. */
+  readonly #temporalPass: PeriodicPass<number>;
+  readonly #storagePass: PeriodicPass<StorageSweep>;
   #triggerSeq = 0;
 
   constructor(config: EkmanConfig<D> = {}) {
@@ -155,8 +121,6 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     this.#now = config.now ?? Date.now;
     this.#onUnhandled = config.onUnhandled ?? defaultOnUnhandled;
     this.#telemetry = config.telemetry;
-    this.#sweeping = false;
-    this.#sweepingStorage = false;
 
     // Everything is resolved here, at construction, so a configuration the stores cannot
     // satisfy fails at startup rather than being discovered under load. A runtime that
@@ -222,6 +186,26 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       handles[definition.name] = this.#register(definition);
     }
     this.entities = Object.freeze(handles) as EntityHandles<D>;
+
+    this.#sweeper = new TemporalSweeper({
+      deps: this.#runtime,
+      definitions: this.#definitions,
+      residency: this.#residency,
+      forgetting: this.#forgetting,
+      send: (key, trigger) => this.send(key, trigger),
+      nextTriggerId: () => this.#nextTriggerId(),
+    });
+    const closing = this.#closing.signal;
+    this.#temporalPass = new PeriodicPass(
+      () => this.#sweeper.once(),
+      0,
+      closing
+    );
+    this.#storagePass = new PeriodicPass(
+      () => sweepStorageOnce(this.#runtime),
+      EMPTY_SWEEP,
+      closing
+    );
 
     this.#startSweeping(config.temporal?.sweepMs);
     this.#startStorageSweeping(config.storage?.sweepMs);
@@ -401,7 +385,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
 
     const bytes =
       instance === undefined ? 0 : this.#residency.release(instance);
-    this.#settled.delete(parsed);
+    this.#sweeper.forget(parsed);
 
     const deleting = (this.#forgetting.get(parsed) ?? Promise.resolve()).then(
       async () => {
@@ -515,20 +499,8 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * Overlapping passes are not useful, so a call made while one is running returns 0
    * immediately rather than queueing behind it.
    */
-  async sweep(): Promise<number> {
-    if (this.#sweeping || this.#closing.signal.aborted) {
-      return 0;
-    }
-
-    this.#sweeping = true;
-    const sweeping = this.#sweepOnce();
-    this.#temporalSweep = sweeping.then(noop, noop);
-    try {
-      return await sweeping;
-    } finally {
-      this.#sweeping = false;
-      this.#temporalSweep = undefined;
-    }
+  sweep(): Promise<number> {
+    return this.#temporalPass.run();
   }
 
   /**
@@ -549,20 +521,8 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * Overlapping passes are not useful, so a call made while one is running returns an empty
    * result immediately rather than queueing behind it, exactly as `sweep()` does.
    */
-  async sweepStorage(): Promise<StorageSweep> {
-    if (this.#sweepingStorage || this.#closing.signal.aborted) {
-      return EMPTY_SWEEP;
-    }
-
-    this.#sweepingStorage = true;
-    const sweeping = this.#sweepStorageOnce();
-    this.#storageSweep = sweeping.then(noop, noop);
-    try {
-      return await sweeping;
-    } finally {
-      this.#sweepingStorage = false;
-      this.#storageSweep = undefined;
-    }
+  sweepStorage(): Promise<StorageSweep> {
+    return this.#storagePass.run();
   }
 
   /**
@@ -616,8 +576,8 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   async #shutDown(timeoutMs: number): Promise<void> {
     const deadline = performance.now() + timeoutMs;
     this.#closing.abort();
-    clearInterval(this.#sweepTimer);
-    clearInterval(this.#storageSweepTimer);
+    this.#temporalPass.stop();
+    this.#storagePass.stop();
 
     const instances = [...this.#residency.instances()];
     const drained = await settledWithin(
@@ -626,8 +586,8 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
           instance.inbox.whenIdle().then(() => instance.flushed())
         ),
         ...this.#forgetting.values(),
-        this.#storageSweep,
-        this.#temporalSweep,
+        this.#storagePass.settled,
+        this.#temporalPass.settled,
       ]),
       timeoutMs
     );
@@ -947,7 +907,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     const owed = instance.undelivered(rule.name);
     const cause =
       owed === undefined
-        ? this.#freshCause(instance, rule.trigger)
+        ? freshCause(instance, rule.trigger, () => this.#nextTriggerId())
         : { type: rule.trigger, id: owed };
     const { key, entity, state } = instance;
 
@@ -1085,21 +1045,14 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       return;
     }
 
-    if (!(sweepMs > 0 && sweepMs <= MAX_TIMER_MS)) {
-      throw new EkmanError(
-        "INVALID_CONFIG",
-        `temporal sweepMs must be a positive number of milliseconds, at most ${MAX_TIMER_MS}, received ${JSON.stringify(sweepMs)}. ` +
-          "Omit it to sweep only when sweep() is called."
-      );
-    }
-
-    this.#sweepTimer = setInterval(() => {
+    assertSweepInterval(
+      sweepMs,
+      "temporal",
+      "sweep only when sweep() is called"
+    );
+    this.#temporalPass.every(sweepMs, () => {
       this.sweep().catch(this.#unhandled("sweep"));
-    }, sweepMs);
-
-    // Sweeping is background work. A runtime that is otherwise finished should be allowed
-    // to exit rather than being held open by its own housekeeping.
-    this.#sweepTimer.unref?.();
+    });
   }
 
   #startStorageSweeping(sweepMs: number | undefined): void {
@@ -1107,13 +1060,11 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       return;
     }
 
-    if (!(sweepMs > 0 && sweepMs <= MAX_TIMER_MS)) {
-      throw new EkmanError(
-        "INVALID_CONFIG",
-        `storage sweepMs must be a positive number of milliseconds, at most ${MAX_TIMER_MS}, received ${JSON.stringify(sweepMs)}. ` +
-          "Omit it to reclaim only when sweepStorage() is called."
-      );
-    }
+    assertSweepInterval(
+      sweepMs,
+      "storage",
+      "reclaim only when sweepStorage() is called"
+    );
 
     // An interval over layers that cannot compact would wake up forever and reclaim
     // nothing, which is a setting that looks configured and does nothing. Refused at
@@ -1127,509 +1078,8 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       );
     }
 
-    this.#storageSweepTimer = setInterval(() => {
+    this.#storagePass.every(sweepMs, () => {
       this.sweepStorage().catch(this.#unhandled("storage-sweep"));
-    }, sweepMs);
-
-    // Housekeeping, exactly as the temporal sweep is: a runtime that is otherwise finished
-    // should be free to exit rather than being held open by its own reclaiming.
-    this.#storageSweepTimer.unref?.();
-  }
-
-  async #sweepStorageOnce(): Promise<StorageSweep> {
-    let logs = 0;
-    let reclaimed = 0;
-    const overBudget: string[] = [];
-
-    for (const layer of this.#stack.layers) {
-      if (!(layer.capabilities.compact && layer.compact)) {
-        continue;
-      }
-
-      // biome-ignore lint/performance/noAwaitInLoops: layers are swept in stack order so the telemetry reads in that order, and so two layers never rewrite their logs at the same moment
-      const swept = await layer.compact();
-      logs += swept.logs;
-      reclaimed += swept.reclaimed;
-      if (!swept.withinBudget) {
-        overBudget.push(layer.name);
-      }
-
-      // Read after the pass, so this is what the layer holds now rather than what it held
-      // when the pass started.
-      const usage = layer.usage?.();
-      this.#emit({
-        type: "storage.swept",
-        at: telemetryNow(),
-        store: layer.name,
-        logs: swept.logs,
-        reclaimed: swept.reclaimed,
-        bytes: usage?.bytes ?? 0,
-        maxBytes: usage?.maxBytes ?? null,
-        withinBudget: swept.withinBudget,
-      });
-    }
-
-    return Object.freeze({
-      logs,
-      reclaimed,
-      overBudget: Object.freeze(overBudget),
-    });
-  }
-
-  async #sweepOnce(): Promise<number> {
-    const at = this.#now();
-    const noted = new Set<string>();
-    let fired = 0;
-
-    for (const definition of this.#definitions.values()) {
-      const byState = constraintsOf(definition)?.boundsByState;
-      // An entity with guards or a transition graph and no bound of either kind has an
-      // empty map here, and nothing to sweep. Asking its store anyway would read every
-      // instance.
-      if (byState === undefined || byState.size === 0) {
-        continue;
-      }
-
-      for (const [state, constraints] of byState) {
-        for (const key of this.#residency.keysIn(definition.name, state)) {
-          // biome-ignore lint/performance/noAwaitInLoops: an escalation dispatches like any other trigger, and a pass that fired several should report every one of them as processed
-          fired += await this.#sweepInstance(key, state, constraints, at);
-        }
-      }
-
-      fired += await this.#sweepStore(definition, byState, at, noted);
-    }
-
-    for (const key of this.#settled.keys()) {
-      if (!noted.has(key)) {
-        this.#settled.delete(key);
-      }
-    }
-    return fired;
-  }
-
-  /**
-   * Evaluate the instances of an entity that a store holds and this runtime does not.
-   *
-   * The instances most likely to be stuck are the idle ones, which are the first a memory
-   * budget releases, and after a restart nothing is resident at all. So the store is asked
-   * the same questions a query asks: who has been in a state for longer than this, and
-   * who has not committed for longer than that.
-   *
-   * One scan per entity for each kind of bound it declares, bounded by the shortest bound
-   * of that kind on any of its states, and told which keys are resident so it does not
-   * load them. A store that cannot be scanned is reported and the pass moves on, because
-   * a sweep on an interval has no caller.
-   */
-  async #sweepStore(
-    definition: AnyDefinition,
-    byState: ReadonlyMap<string, readonly CompiledBound[]>,
-    at: number,
-    noted: Set<string>
-  ): Promise<number> {
-    const { authority } = this.#stack;
-    if (authority === undefined) {
-      return 0;
-    }
-
-    const skip = new Set<string>();
-    for (const state of byState.keys()) {
-      for (const key of this.#residency.keysIn(definition.name, state)) {
-        // Only a record that is current speaks for its key. One another writer has
-        // overtaken is passed over by the resident walk, so the store is asked about it.
-        if (this.#residency.get(key)?.needsHydration === false) {
-          skip.add(key);
-        }
-      }
-    }
-
-    const bounds = [...byState.values()].flat();
-    let due: readonly ScanMatch[];
-    try {
-      due = await this.#scanDue(authority, definition.name, bounds, at, skip);
-    } catch (error) {
-      this.#onUnhandled(error, { source: "sweep" });
-      return 0;
-    }
-
-    let fired = 0;
-    for (const [state, constraints] of byState) {
-      const waiting = due
-        .filter(
-          (match) =>
-            match.state === state &&
-            constraints.some((bound) => isPast(bound, match, at))
-        )
-        .sort(byKey);
-
-      for (const match of waiting) {
-        // biome-ignore lint/performance/noAwaitInLoops: stored instances are escalated one at a time, in key order, for the same reason resident ones are
-        fired += await this.#sweepStored(
-          match,
-          definition,
-          constraints,
-          at,
-          noted
-        );
-      }
-    }
-
-    return fired;
-  }
-
-  /**
-   * Ask a store which instances of an entity could be past one of these bounds.
-   *
-   * Time in state and time since the last commit are different criteria, and a scan
-   * applies every criterion it is given at once, so each kind of bound gets its own scan
-   * and the answers are joined by key.
-   */
-  async #scanDue(
-    authority: Store,
-    entity: string,
-    bounds: readonly CompiledBound[],
-    at: number,
-    skip: ReadonlySet<string>
-  ): Promise<readonly ScanMatch[]> {
-    const found = new Map<string, ScanMatch>();
-
-    for (const kind of ["temporal", "stale"] as const) {
-      const limits = bounds.filter((bound) => bound.kind === kind).map(limitOf);
-      if (limits.length === 0) {
-        continue;
-      }
-
-      const shortest = Math.min(...limits);
-      // biome-ignore lint/performance/noAwaitInLoops: at most two scans, and the second is only worth making once the first has not failed
-      const scanned = await scanStore(authority, {
-        entity,
-        now: at,
-        skip,
-        ...(kind === "temporal"
-          ? { olderThanMs: shortest }
-          : { staleForMs: shortest }),
-      });
-      for (const match of scanned.matches) {
-        found.set(match.key, match);
-      }
-
-      if (!scanned.complete) {
-        // Said out loud, because the instances the store left out are not swept and
-        // nothing else would ever mention them.
-        this.#onUnhandled(
-          new EkmanError(
-            "NOT_IMPLEMENTED",
-            `store "${authority.name}" answered a scan of ${JSON.stringify(entity)} ` +
-              "with part of the answer, and a sweep has no way to ask for the rest. " +
-              "Its bounds were evaluated for the instances it returned and " +
-              "for no others it holds."
-          ),
-          { source: "sweep" }
-        );
-      }
-    }
-
-    return [...found.values()];
-  }
-
-  /**
-   * Load one stored instance that is past a bound, and evaluate it like a resident one.
-   *
-   * Loading it is the same thing a trigger for an evicted instance does, and the budget
-   * sees it the same way: the instance comes back, is told what it is owed, and is
-   * released again once idle. The load never creates the key. A scan row can outlive the
-   * instance it describes, and a sweep that initialized whatever it could not find would
-   * bring a deleted instance back.
-   *
-   * A load that is refused, by a full budget or by the store, is reported and left for
-   * the next pass.
-   */
-  async #sweepStored(
-    match: ScanMatch,
-    definition: AnyDefinition,
-    constraints: readonly CompiledBound[],
-    at: number,
-    noted: Set<string>
-  ): Promise<number> {
-    if (this.#closing.signal.aborted) {
-      // Nothing is loaded on behalf of a runtime that is shutting down. Whatever this
-      // instance is owed, the next runtime's sweep finds it the same way.
-      return 0;
-    }
-
-    const { key, state } = match;
-    const note = this.#settled.get(key);
-    if (
-      note !== undefined &&
-      note.seq === match.seq &&
-      note.enteredAt === match.enteredAt &&
-      at < note.dueAt
-    ) {
-      noted.add(key);
-      return 0;
-    }
-
-    const forgetting = this.#forgetting.get(key);
-    if (forgetting !== undefined) {
-      await forgetting;
-    }
-    if (this.#closing.signal.aborted) {
-      return 0;
-    }
-    const resident = this.#residency.get(key);
-    if (resident !== undefined) {
-      if (!(resident.needsHydration && resident.idle)) {
-        // Current, in which case the next pass finds it there. Or busy, and the trigger
-        // it is handling reconciles it.
-        return 0;
-      }
-      // Behind the store with nothing to prompt a reload, so it would sit out every
-      // pass. Released, and read back below like any other instance the store holds.
-      this.#residency.evict(resident);
-    }
-
-    let instance: AnyInstance;
-    try {
-      const cause = { type: "sweep", id: this.#nextTriggerId() };
-      instance = this.#residency.materialize(key, definition, cause, true);
-    } catch (error) {
-      this.#onUnhandled(error, { source: "sweep", key });
-      return 0;
-    }
-
-    // Held from before the load until every bound has been read. Nothing is queued on
-    // the record, so without this it looks idle throughout: it could be evicted or
-    // deleted while it loads, and an escalation's own turn ending would release it with
-    // its other bounds still to evaluate.
-    const unpin = instance.pin();
-    try {
-      await this.#hydrate(instance);
-      if (this.#closing.signal.aborted || !this.#residency.holds(instance)) {
-        // Nothing stored after all, or the runtime began to close while it loaded, in
-        // which case nothing more is written on its behalf.
-        return 0;
-      }
-
-      const fired = await this.#sweepInstance(key, state, constraints, at);
-
-      if (instance.state === state && !instance.needsHydration) {
-        noted.add(key);
-        this.#settled.set(key, {
-          seq: instance.seq,
-          enteredAt: instance.enteredAt,
-          dueAt: nextDue(instance, constraints, at),
-        });
-      }
-      return fired;
-    } catch (error) {
-      this.#onUnhandled(error, { source: "sweep", key });
-      return 0;
-    } finally {
-      unpin();
-      this.#rest(instance);
-    }
-  }
-
-  /**
-   * Offer a record the sweep loaded to eviction, if nothing else has.
-   *
-   * A record is normally offered when its inbox drains. One the sweep loaded and sent
-   * nothing to never ran a turn, so nothing would offer it, and it would stay resident
-   * past the budget until some other key went idle.
-   */
-  #rest(instance: AnyInstance): void {
-    // Not while a trigger that arrived in the meantime is still being handled. Its own
-    // turn ending is what offers the record then.
-    if (instance.idle) {
-      this.#residency.offer(instance);
-    }
-  }
-
-  /**
-   * Evaluate one instance against the constraints watching the state it is in.
-   *
-   * Constraints run in declaration order. One is done once its escalation has been
-   * answered or refused for good, so an escalation turned away by a full inbox is raised
-   * again by the next sweep. The pass ends as soon as the instance has left the state: the
-   * remaining constraints watch somewhere it no longer is.
-   *
-   * @returns how many escalations were raised, delivered or not
-   */
-  async #sweepInstance(
-    key: string,
-    state: string,
-    constraints: readonly CompiledBound[],
-    at: number
-  ): Promise<number> {
-    let fired = 0;
-
-    for (const constraint of constraints) {
-      const aged = this.#residency.ageOf(key, state, at);
-      if (aged === undefined) {
-        return fired;
-      }
-
-      const { instance } = aged;
-      // Time in the state for one kind of bound, time since anything was committed for
-      // the other. Read again for each bound, since the one before may have committed.
-      const elapsedMs =
-        constraint.kind === "temporal"
-          ? aged.elapsedMs
-          : at - instance.lastCommittedAt;
-      if (
-        elapsedMs < limitOf(constraint) ||
-        instance.hasFired(constraint.name)
-      ) {
-        continue;
-      }
-
-      fired += 1;
-      // biome-ignore lint/performance/noAwaitInLoops: two constraints on one state fire in declaration order, and the second runs only if the first left the instance where it was
-      await this.#escalate(instance, constraint, elapsedMs, at);
-    }
-
-    return fired;
-  }
-
-  /**
-   * Record a bound's violation and, unless it is only a warning, deliver its escalation.
-   *
-   * The escalation goes through `send()`, so it queues behind whatever the instance is
-   * already doing and dispatches against the state it is in when its turn comes. The
-   * runtime never writes state on its own: the state asked for rides on the trigger, as
-   * `escalateTo` for a time-in-state bound and `propose` for a freshness bound, and the
-   * handler decides.
-   *
-   * A trigger id is allocated even for a warning, so the recorded violation always has a
-   * traceable cause and the counter advances identically under either policy. When an
-   * earlier sweep raised this escalation and it was turned away, the violation is already
-   * in the stream, so only the trigger is sent again, under the id that violation named.
-   *
-   * A send that rejects is reported through `onUnhandled` rather than thrown: the usual
-   * cause is that the state an instance is stuck in cannot handle the trigger, which is
-   * exactly the situation the constraint was watching for.
-   */
-  async #escalate(
-    instance: AnyInstance,
-    constraint: CompiledBound,
-    elapsedMs: number,
-    at: number
-  ): Promise<EscalationOutcome> {
-    const owed = instance.undelivered(constraint.name);
-    const cause =
-      owed === undefined
-        ? this.#freshCause(instance, constraint.trigger)
-        : { type: constraint.trigger, id: owed };
-    const { state } = instance;
-    const target =
-      constraint.kind === "temporal"
-        ? constraint.escalateTo
-        : constraint.propose;
-    const trigger:
-      | TemporalTrigger<string, string>
-      | StaleTrigger<string, string> = {
-      ...cause,
-      constraint: constraint.name,
-      state,
-      sinceMs: elapsedMs,
-      ...(target === undefined
-        ? {}
-        : {
-            [constraint.kind === "temporal" ? "escalateTo" : "propose"]: target,
-          }),
-    };
-
-    if (owed === undefined) {
-      this.#recordBoundViolation(instance, constraint, elapsedMs, at, cause);
-    }
-
-    if (constraint.policy === "warn") {
-      return "warned";
-    }
-
-    let outcome: EscalationOutcome = "delivered";
-    try {
-      await this.send(instance.key, trigger);
-    } catch (error) {
-      outcome = refusalOutcome(error);
-      this.#onUnhandled(error, { source: "escalation", key: instance.key });
-    }
-    if (outcome === "refused") {
-      // The one ending the stream does not show. A commit or a recorded refusal has
-      // settled the bound already, and one turned away for a reason that passes stays
-      // owed for the next sweep.
-      instance.refused(constraint.name, cause.id);
-    }
-
-    this.#emit({
-      type: "constraint.escalated",
-      key: instance.key,
-      entity: instance.entity,
-      kind: constraint.kind,
-      constraint: constraint.name,
-      state,
-      elapsedMs,
-      escalateTo: target,
-      trigger: cause,
-      delivered: outcome === "delivered",
-      at: telemetryNow(),
-    });
-
-    return outcome;
-  }
-
-  /**
-   * A cause for an escalation raised for the first time.
-   *
-   * Never one this instance still owes to another bound. Trigger ids start over with each
-   * process, so a fresh id can repeat one a previous process left owed, and the commit
-   * that answered either escalation would then settle both.
-   */
-  #freshCause(instance: AnyInstance, type: string): EventCause {
-    let cause = { type, id: this.#nextTriggerId() };
-    while (instance.owes(cause)) {
-      cause = { type, id: this.#nextTriggerId() };
-    }
-    return cause;
-  }
-
-  /** Write a bound's violation to the instance's stream and mirror it in telemetry. */
-  #recordBoundViolation(
-    instance: AnyInstance,
-    constraint: CompiledBound,
-    elapsedMs: number,
-    at: number,
-    cause: { type: string; id: string }
-  ): void {
-    const reason =
-      constraint.kind === "temporal"
-        ? `has been in "${constraint.in}" for ${elapsedMs}ms, over its bound of ` +
-          `${constraint.within}ms`
-        : `has committed nothing for ${elapsedMs}ms, over its bound of ` +
-          `${constraint.after}ms`;
-
-    instance.violation({
-      violation: {
-        kind: constraint.kind,
-        name: constraint.name,
-        policy: constraint.policy,
-        reason,
-      },
-      at,
-      cause,
-    });
-
-    this.#emit({
-      type: "constraint.violated",
-      key: instance.key,
-      entity: instance.entity,
-      state: instance.state,
-      kind: constraint.kind,
-      constraint: constraint.name,
-      policy: constraint.policy,
-      reason,
-      trigger: cause,
-      at: telemetryNow(),
     });
   }
 
@@ -1646,13 +1096,6 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     return (error) => this.#onUnhandled(error, context);
   }
 }
-
-/** What an overlapping storage sweep returns: a pass that did not run reclaimed nothing. */
-const EMPTY_SWEEP: StorageSweep = Object.freeze({
-  logs: 0,
-  reclaimed: 0,
-  overBudget: Object.freeze([]),
-});
 
 /**
  * What a rule's condition says about an instance: why it holds, or undefined when it
@@ -1673,50 +1116,6 @@ function heldBy(
     return;
   }
   return typeof outcome === "string" ? outcome : "the condition held";
-}
-
-/**
- * Order scan rows by key, as plain strings, so a pass walks them the same way every time.
- * A store holds a key once, so there is no equal case.
- */
-function byKey(a: ScanMatch, b: ScanMatch): number {
-  return a.key < b.key ? -1 : 1;
-}
-
-/**
- * When a bound on this instance could next have something to say.
- *
- * A bound that has fired has nothing more to say during this stay. One that is owed an
- * escalation is due now. One that has not fired is due when its time is up.
- */
-function nextDue(
-  instance: AnyInstance,
-  constraints: readonly CompiledBound[],
-  at: number
-): number {
-  let dueAt = Number.POSITIVE_INFINITY;
-  for (const constraint of constraints) {
-    if (instance.hasFired(constraint.name)) {
-      continue;
-    }
-    const since =
-      constraint.kind === "temporal"
-        ? instance.enteredAt
-        : instance.lastCommittedAt;
-    const due =
-      instance.undelivered(constraint.name) === undefined
-        ? since + limitOf(constraint)
-        : at;
-    dueAt = Math.min(dueAt, due);
-  }
-  return dueAt;
-}
-
-/** Whether a scan row is past a bound, on the clock that bound reads. */
-function isPast(bound: CompiledBound, match: ScanMatch, at: number): boolean {
-  return bound.kind === "temporal"
-    ? at - match.enteredAt >= bound.within
-    : isQuiet(match, bound.after, at);
 }
 
 /**
