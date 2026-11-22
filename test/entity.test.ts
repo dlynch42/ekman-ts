@@ -708,6 +708,45 @@ describe("per-state trigger maps", () => {
     expect(orders.handlers.get("paid")?.on).toBeUndefined();
   });
 
+  it("hands a member that stands for several types to each of their entries, narrowed", () => {
+    type DoorTrigger =
+      | { type: "opened" | "closed"; by: string }
+      | { type: "locked"; code: number };
+
+    const doors = defineEntity.withTriggers<DoorTrigger>()("doors", {
+      initial: "shut",
+      values: { by: "" },
+      states: {
+        shut: {
+          on: {
+            opened: (_door, trigger) => {
+              expectTypeOf(trigger.type).toEqualTypeOf<"opened">();
+              expectTypeOf(trigger.by).toEqualTypeOf<string>();
+              return transitionTo("open", { by: trigger.by });
+            },
+            locked: (_door, trigger) => {
+              expectTypeOf(trigger).toEqualTypeOf<{
+                type: "locked";
+                code: number;
+              }>();
+              return stay();
+            },
+          },
+        },
+        open: {
+          on: {
+            closed: (_door, trigger) => {
+              expectTypeOf(trigger.type).toEqualTypeOf<"closed">();
+              return transitionTo("shut", { by: trigger.by });
+            },
+          },
+        },
+      },
+    });
+
+    expect(doors.triggers).toEqual(new Set(["opened", "locked", "closed"]));
+  });
+
   it("refuses a key outside the union at compile time", () => {
     const orders = defineEntity.withTriggers<OrderTrigger>()("orders", {
       initial: "pending",

@@ -173,10 +173,20 @@ export interface StateOnConfig<
  * A union whose types are plain strings cannot be told apart by key, so every entry takes
  * the whole of it. That is the entity with no declared union, whose handlers have always
  * seen an untyped payload.
+ *
+ * Otherwise a member is chosen when its `type` includes the key, not only when it is the
+ * key. One member may stand for several types, as `{ type: "opened" | "closed" }` does,
+ * and its entry receives it with `type` narrowed to the one the key names.
  */
 type HandledBy<T extends TriggerLike, K> = string extends T["type"]
   ? T
-  : Extract<T, { readonly type: K }>;
+  : T extends unknown
+    ? K extends T["type"]
+      ? T["type"] extends K
+        ? T
+        : T & { readonly type: K }
+      : never
+    : never;
 
 export type StateConfig<
   S extends string = string,
