@@ -1,6 +1,6 @@
 {
   "name": "ekman",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Per-key memory and state for the things your service watches. Embedded, budgeted, queryable. A runtime you embed, not a platform you operate.",
   "license": "Apache-2.0",
   "type": "module",
