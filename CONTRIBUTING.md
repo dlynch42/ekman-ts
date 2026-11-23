@@ -89,7 +89,9 @@ npm run typecheck      # tsc --noEmit
 npm run lint           # ultracite / biome, no writes. `npm run format` autofixes
 npm test               # Vitest unit tests plus the conformance suite
 npm run conformance    # standalone report, pass/fail per scenario per level
-npm run test:coverage  # coverage gate. Floor is 90%; actual coverage is 100%
+npm run test:coverage  # coverage gate. Floor is 90%; actual coverage is about 99%
+npm run check:docs     # typechecks the samples tagged `ts check` in README.md and docs/
+npm run example:smoke && npm run example:health:smoke   # boots both example services
 ```
 
 If you changed anything about how the package is built or what it exports:
@@ -113,14 +115,14 @@ CI runs the same set. They must pass.
 | `docs/` | Public reference documentation. |
 | `demos/` | Runnable programs, one per behaviour. Each asserts. |
 | `benchmarks/` | Performance suites and their recorded baselines. |
-| `examples/` | A worked service built on Ekman. |
+| `examples/` | Two worked services built on Ekman: one shaped like memory, one like a workflow. |
 
 Inside `src/`, [docs/architecture.md](./docs/architecture.md) says which module owns what and
 what each must not know about. Read it before moving code between modules.
 
 ## What Ekman is (and isn't)
 
-Ekman is an **embedded runtime for addressable stateful instances**. Each instance is identified by a human-readable key, holds its own state and values, and processes its triggers one at a time. Around that it owns the operational layer: transition history, constraints, retries and timeouts, queries, and a memory budget. It is constructed in your process. A runtime you embed, not a platform you operate.
+Ekman is **per-key memory and state for the things a service watches**, as an embedded runtime. Each instance is identified by a human-readable key, holds its own state and values, and processes its triggers one at a time. Around that it owns the operational layer: transition history, constraints, retries and timeouts, queries, and a memory budget. It is constructed in your process. A runtime you embed, not a platform you operate.
 
 It is **not** an orchestration platform, a workflow DSL, transport-coupled, a distributed transaction coordinator, or durable by default.
 

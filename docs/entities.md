@@ -45,7 +45,7 @@ to bring instances of it to life.
 | `policy` | `ExecutionPolicy` | no | Retries, timeout and backoff for every state in this entity. Overrides the runtime's. See [Execution](./execution.md). |
 | `onError` | map of classification to handler | no | Handlers for failures, resolved specific-then-fallback. |
 | `classify` | `(error) => string` | no | Turns a thrown error into the key `onError` looks up. |
-| `constraints` | `ConstraintsConfig` | no | Transition graph, guards, invariants, time-in-state bounds. See [Constraints](./constraints.md). |
+| `constraints` | `ConstraintsConfig` | no | Rules, freshness bounds and time-in-state bounds, which propose a state, and a transition graph, guards and invariants, which refuse one. See [Constraints](./constraints.md). |
 
 ### Typing `values`
 
@@ -205,11 +205,20 @@ It carries `constraint` (the bound's name), `state`, `sinceMs` and, when the bou
 `escalateTo`. A bound that sets its own `trigger` name is written
 `TemporalTrigger<State, "invoice.stuck">`.
 
+The other two kinds that deliver a trigger have a type each, added to the union the same way:
+
+| Delivered by | Type | Default `type` | Carries |
+|---|---|---|---|
+| A [freshness bound](./constraints.md) | `StaleTrigger<State>` | `"constraint.stale"` (`DEFAULT_STALE_TRIGGER`) | `constraint`, `state`, `sinceMs`, and `propose` when the bound names a state |
+| A [rule](./constraints.md) | `RuleTrigger<State>` | `"rule.matched"` (`DEFAULT_RULE_TRIGGER`) | `rule`, `state`, `reason`, and `propose` when the rule names a state |
+
+Each takes the trigger's own name as a second type argument, as `TemporalTrigger` does.
+
 ## Handlers
 
 ```ts
 type Handler = (
-  instance: InstanceSnapshot,   // { key, entity, state, values, seq }
+  instance: InstanceSnapshot,   // { key, entity, state, values, seq, enteredAt, lastCommittedAt }
   trigger: Trigger,             // { type: string } plus arbitrary fields, all unknown
   ctx: HandlerContext,          // { key, entity, attempt, signal }
 ) => HandlerResult | Promise<HandlerResult>;

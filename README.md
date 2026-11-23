@@ -360,7 +360,7 @@ Full surface in [docs/api.md](./docs/api.md). The parts you need first:
 | `map(entity, options?)` | `Promise<StateMap>` | A count and the keys for each state an entity's instances are in. |
 | `residentMap(entity)` | `StateMap` | **Synchronous.** The same map from resident instances only. |
 | `forget(key)` | `Promise<void>` | Delete an instance from memory and every store layer. |
-| `sweep()` | `Promise<number>` | Evaluate time-in-state constraints now. |
+| `sweep()` | `Promise<number>` | Evaluate time-in-state and freshness bounds now. |
 | `sweepStorage()` | `Promise<StorageSweep>` | Run the store's retention pass. |
 | `close(options?)` | `Promise<void>` | Refuse new triggers, let in-flight work land up to `timeoutMs`, then close the stores. |
 | `entities.<name>` | `EntityHandle` | Typed handle: `send`, `post`, `inspect`, `history`, `query`, `map`, `forget`, `key`, all by id. |
@@ -390,8 +390,11 @@ rule and a freshness bound deliver, `UnhandledContext`, what
 states.
 
 Store adapters import from `ekman/store`, which carries the `Store` types, the helpers
-`replay`, `latestSeq`, `previousSeq`, `scanKeys` and `EMPTY_SEQ`, and `storeContract`, the
-test suite an adapter proves itself with. See
+`replay`, `latestSeq`, `previousSeq`, `isAfterSnapshot`, `scanKeys` and `EMPTY_SEQ`, and
+`storeContract`, the test suite an adapter proves itself with, along with the
+`ContractHarness` and `ContractMatchers` types it takes. The four helpers the main entry
+point also exports (`replay`, `latestSeq`, `scanKeys`, `EMPTY_SEQ`) are deprecated there and
+will be removed from it in the next minor version. See
 [Writing a store adapter](./docs/durability.md#writing-a-store-adapter).
 
 ### Handler context
@@ -545,6 +548,7 @@ Reports pass or fail per scenario per level, and exits non-zero if a claimed lev
 | [Telemetry and audit](./docs/telemetry.md) | The runtime's own event stream, and audit sinks |
 | [Error codes](./docs/errors.md) | Every code, and a suggested HTTP mapping |
 | [Questions people ask first](./docs/faq.md) | How this compares, and when not to use it |
+| [Architecture](./docs/architecture.md) | For contributors and ports: which module owns what |
 
 ## Scope
 

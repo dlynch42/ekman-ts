@@ -38,6 +38,16 @@ store: ["memory", "file"],
 Layers are listed fastest first. **Exactly one layer is the commit authority** and owns the
 truth: the last durable one. The rest are caches.
 
+To choose the authority yourself, mark one layer with `authority: true`:
+
+```ts
+store: [{ kind: "memory" }, { kind: "file", authority: true }],
+```
+
+Marking more than one is refused at startup. So is an authority that is held in memory while
+a durable layer sits in front of it, since a restart would then lose committed state with a
+durable store configured.
+
 A commit goes to the authority, and resolves there. The caches are written afterwards, in order
 per key, and no commit or `history()` ever waits for one.
 
@@ -201,11 +211,23 @@ the system flushes its cache: there is no fsync per commit.
 
 A log being written to is kept open, so a commit is one write. Up to 256 are open at once, and
 past that the one least recently written to is closed and opened again when it is next needed.
-Change the number for a process with a tight descriptor limit, and read how many are open now:
+Change the number for a process with a tight descriptor limit:
 
 ```ts
-const store = fileStore("/var/lib/app", { maxOpenLogs: 64 });
-store.openLogs; // never more than 64
+store: { kind: "file", dir: "/var/lib/app", maxOpenLogs: 64 }
+```
+
+A file store also reports how many are open now, as `openLogs`. It is on the store object
+and not on the `Store` type, which every adapter shares, so build the store yourself to read
+it:
+
+```ts
+import { createStore } from "ekman";
+
+const store = createStore({ kind: "file", dir: "/var/lib/app", maxOpenLogs: 64 });
+const ekman = new Ekman({ entities: [orders], store });
+
+(store as { openLogs?: number }).openLogs; // never more than 64
 ```
 
 `ekman.close()` closes them. The files belong to the store while it runs: removing one from
@@ -275,9 +297,11 @@ compaction run after the write, and a failure there does not fail the commit. It
 the store instead, until the next pass of the same kind succeeds:
 
 ```ts
-const store = fileStore("/var/lib/app");
-store.lastHousekeepingError; // EkmanError | undefined
+const store = createStore({ kind: "file", dir: "/var/lib/app" });
+(store as { lastHousekeepingError?: EkmanError }).lastHousekeepingError;
 ```
+
+Like `openLogs`, it belongs to the file store and is not on the `Store` type.
 
 A write that fails partway can leave a fragment at the end of a log. The store trims it
 before the next append to that key, so the fragment costs the one event that never landed.
@@ -344,7 +368,7 @@ The contract takes the `it` and `expect` your suite already uses, so it depends 
 framework of its own. An adapter that passes can be put in a stack without reading the
 runtime.
 
-Two things about `load` and `snapshot` are easy to get wrong:
+Three things about `load` and `snapshot` are easy to get wrong:
 
 - `load` returns the snapshot and every event the snapshot does not account for. That is each
   commit above the snapshot's sequence, and also any refusal or violation recorded *at* that
@@ -374,6 +398,9 @@ What the runtime holds you to:
   runtime then loads each key it needs values for and reports the revision it loaded, so
   supporting it is a matter of speed.
   What a store must not do is carry values other than the last committed ones.
+- A scan may carry `skip`, a set of keys the runtime already has an answer for. Leave them
+  out without loading them. Ignoring it is still correct, only slower: the runtime drops those
+  rows itself.
 - `usage` is optional, and a method: `usage(): StoreUsage`. Implement it when the store can
   say what it holds. `ekman.storageUsage` sums it across the stack.
 - `capabilities.evicts` says your store drops keys by itself to stay inside a bound of its own.

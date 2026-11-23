@@ -738,9 +738,11 @@ only a `type` asserts no event of that type was emitted at all.
 | `memory.refused` | A new instance was refused because the budget is full. | `residentBytes`, `maxBytes` |
 | `instance.evicted` | An instance was released to stay inside the budget. | `state`, `seq`, `bytes`, `snapshotted`, `residentBytes` |
 | `instance.restored` | An instance was rebuilt from the store. | `state`, `seq`, `from`, `replayed` |
+| `instance.forgotten` | An instance was deleted by `forget`. | `state`, `seq`, `bytes`, `resident`, `residentBytes` |
 | `audit.failed` | An audit sink could not be delivered to, after its retries. | `sink`, `error`, `seq` |
 | `store.cacheFailed` | A cache layer could not be read, written or cleared, or did not answer in time. The commit stands. | `store`, `error`, `seq` |
 | `store.cacheSuspended` | A cache layer went unanswered too many times in a row and is not used again. Carries no key. | `store`, `timeouts` |
+| `storage.swept` | A store layer finished a retention pass. Carries no key. | `store`, `logs`, `reclaimed`, `bytes`, `maxBytes`, `withinBudget` |
 | `runtime.closed` | The runtime finished closing. A `restart` step emits one. | `drained`, `pending`, `cachePending` |
 
 `memory.accounted.maxBytes` is `null` when the budget is unlimited.
@@ -987,9 +989,8 @@ Stable across implementations. A runner asserts on these strings, never on messa
 | `MISSING_INITIAL_STATE` | No initial state declared. |
 | `INITIAL_STATE_NOT_IN_STATES` | The initial state has no handler. |
 | `INVALID_CONFIG` | Configuration is recognized but cannot be satisfied, and is refused rather than adjusted. |
-| `NOT_IMPLEMENTED` | Configuration is recognized but unimplemented at this phase. |
-
-Later phases add codes for store conflicts and memory exhaustion.
+| `NOT_IMPLEMENTED` | Something recognized was asked for that a configured store layer cannot do. Never silently ignored. |
+| `RUNTIME_CLOSED` | The runtime has begun closing, so the trigger was not accepted, or a retry waiting out its backoff was abandoned. |
 
 ## Determinism
 
@@ -1014,7 +1015,7 @@ Anything that cannot be made deterministic must not be asserted.
    | `00x` | reserved |
    | `01x` | initialization and initial values |
    | `02x` | handler results: transitionTo, stay, fail, throw |
-   | `03x` | unknown policy: unrecognized state, unrecognized trigger |
+   | `03x` | unknown policy: unrecognized state, unrecognized trigger, a type the state does not handle |
    | `04x` | sequence numbering and the event stream |
    | `05x` | keys and addressing |
    | `06x` | ordering and per-key serialization |

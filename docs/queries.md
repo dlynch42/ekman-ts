@@ -230,7 +230,7 @@ ekman.inspect("orders:a-1");                 // synchronous, resident instances 
 ekman.entities.orders.inspect("a-1");        // same, typed, addressed by id
 ```
 
-`inspect` returns `{ key, entity, state, values, seq }`, or `undefined` if the instance is not
+`inspect` returns `{ key, entity, state, values, seq, enteredAt, lastCommittedAt }`, or `undefined` if the instance is not
 resident. It does not touch the store and it does not reload. Use `history` or `query` when you
 need an answer that covers instances this process has not loaded.
 

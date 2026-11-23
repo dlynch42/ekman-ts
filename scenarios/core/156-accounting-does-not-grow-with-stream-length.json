@@ -1,0 +1,59 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/156-accounting-does-not-grow-with-stream-length",
+  "name": "resident accounting measures the key, state and values only, so it does not grow as a key's event stream does",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "open",
+        "states": [
+          {
+            "state": "open",
+            "else": {
+              "result": "stay",
+              "values": { "note": "a fixed payload, identical on every commit" }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    { "send": { "key": "orders:1", "trigger": { "type": "touch" } } },
+    { "send": { "key": "orders:1", "trigger": { "type": "touch" } } },
+    { "send": { "key": "orders:1", "trigger": { "type": "touch" } } },
+    { "send": { "key": "orders:1", "trigger": { "type": "touch" } } },
+    { "send": { "key": "orders:1", "trigger": { "type": "touch" } } }
+  ],
+  "then": {
+    "telemetry": [
+      {
+        "type": "memory.accounted",
+        "key": "orders:1",
+        "residentCount": 1,
+        "maxBytes": null,
+        "overBudget": false
+      },
+      {
+        "type": "memory.accounted",
+        "key": "orders:1",
+        "residentCount": 1,
+        "overBudget": false
+      }
+    ],
+    "events": {
+      "orders:1": [
+        { "type": "transition", "from": null, "to": "open", "seq": 0 },
+        { "type": "transition", "from": "open", "to": "open", "seq": 1 },
+        { "type": "transition", "from": "open", "to": "open", "seq": 2 },
+        { "type": "transition", "from": "open", "to": "open", "seq": 3 },
+        { "type": "transition", "from": "open", "to": "open", "seq": 4 },
+        { "type": "transition", "from": "open", "to": "open", "seq": 5 }
+      ]
+    },
+    "resident": ["orders:1"],
+    "memory": { "instances": 1 }
+  }
+}

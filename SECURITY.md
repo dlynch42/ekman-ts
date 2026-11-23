@@ -4,7 +4,8 @@
 
 | Version | Supported |
 |---|---|
-| 0.1.x | Yes |
+| 0.2.x | Yes |
+| 0.1.x | No |
 
 Ekman is pre-1.0. Fixes land on the latest minor version; older minors are not patched.
 

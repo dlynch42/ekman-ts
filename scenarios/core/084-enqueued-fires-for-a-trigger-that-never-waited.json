@@ -1,0 +1,42 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/084-enqueued-fires-for-a-trigger-that-never-waited",
+  "name": "inbox.enqueued is emitted for every accepted trigger, and its depth counts the arriving trigger, so depth 1 is one that never waited",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "open",
+        "states": [{ "state": "open", "else": { "result": "stay" } }]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": { "key": "orders:1", "trigger": { "type": "touch", "id": "t1" } }
+    },
+    {
+      "send": { "key": "orders:1", "trigger": { "type": "touch", "id": "t2" } }
+    }
+  ],
+  "then": {
+    "telemetry": [
+      {
+        "type": "inbox.enqueued",
+        "key": "orders:1",
+        "depth": 1,
+        "trigger": { "type": "touch", "id": "t1" }
+      },
+      { "type": "handler.started", "key": "orders:1", "depth": 0 },
+      { "type": "handler.settled", "key": "orders:1", "outcome": "committed" },
+      {
+        "type": "inbox.enqueued",
+        "key": "orders:1",
+        "depth": 1,
+        "trigger": { "type": "touch", "id": "t2" }
+      },
+      { "type": "handler.settled", "key": "orders:1", "outcome": "committed" }
+    ]
+  }
+}
