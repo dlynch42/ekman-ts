@@ -138,36 +138,75 @@ export interface ConstraintsSpec {
     readonly trigger?: string;
     readonly policy?: ViolationPolicySpec;
   }[];
+  readonly stale?: readonly {
+    readonly name?: string;
+    /** The states the bound watches. Omitted means every state. */
+    readonly in?: readonly string[];
+    /** Milliseconds an instance may go without a commit. */
+    readonly after: number;
+    readonly propose?: string;
+    readonly trigger?: string;
+    readonly policy?: ViolationPolicySpec;
+  }[];
+  readonly rules?: readonly {
+    readonly name?: string;
+    /** The states the rule watches. Omitted means every state. */
+    readonly in?: readonly string[];
+    /**
+     * The condition, in the grammar guards and invariants use, read against what was
+     * just committed. The rule's condition holds when the check does, and the check's
+     * `reason` becomes the reason of the match.
+     */
+    readonly when: CheckSpec;
+    readonly propose?: string;
+    readonly trigger?: string;
+    readonly policy?: ViolationPolicySpec;
+  }[];
 }
 
 /**
- * A guard or invariant condition, expressed as data.
+ * A guard or invariant condition, or the condition of a rule, expressed as data.
  *
  * One source (`values`, `trigger`, or `state`) and one predicate (`exists`, `equals`,
  * `gte`, or `lte`), which is enough to express every condition the suite needs without a
  * expression language every port would then have to implement identically.
  */
 export interface CheckSpec {
-  /** Dot path into the values being proposed. Empty string is the whole map. */
+  /**
+   * Dot path into the values being proposed, or for a rule the values just committed.
+   * Empty string is the whole map.
+   */
   readonly values?: string;
-  /** Dot path into the trigger. */
+  /** Dot path into the trigger. A rule is not evaluated against one, so it reads nothing. */
   readonly trigger?: string;
-  /** Read the proposed state name. */
+  /** Read the proposed state name, or for a rule the committed one. */
   readonly state?: true;
   readonly exists?: boolean;
   readonly equals?: unknown;
   readonly gte?: number;
   readonly lte?: number;
-  /** Reported as the violation's reason when the check does not hold. */
+  /**
+   * Reported as the violation's reason when the check does not hold. For a rule, the
+   * reason of the match when it does.
+   */
   readonly reason?: string;
   /** Throw instead of answering, exercising the broken-check path. */
   readonly throw?: string;
 }
 
-export interface StateSpec {
-  readonly state: string;
+/** What a handler does: the first matching case, otherwise `else`, otherwise `stay`. */
+export interface BehaviourSpec {
   readonly cases?: readonly CaseSpec[];
   readonly else?: DoSpec;
+}
+
+export interface StateSpec extends BehaviourSpec {
+  readonly state: string;
+  /**
+   * One behaviour per trigger type, in place of `cases` and `else`. A type with no entry
+   * is refused by the runtime and never reaches a behaviour.
+   */
+  readonly on?: Readonly<Record<string, BehaviourSpec>>;
   /** Execution policy for this state alone, over the entity's and the runtime's. */
   readonly policy?: PolicySpec;
 }
@@ -182,7 +221,7 @@ export interface CaseSpec {
 }
 
 export interface DoSpec {
-  readonly result?: "transitionTo" | "stay" | "fail";
+  readonly result?: "transitionTo" | "stay" | "patch" | "fail";
   /** A state name, or a value expression resolving to one. */
   readonly to?: unknown;
   readonly values?: unknown;
@@ -245,6 +284,13 @@ export interface Then {
    * asserted, so "started before settled" is provable.
    */
   readonly telemetry?: readonly Record<string, unknown>[];
+  /**
+   * Telemetry matchers that must match nothing that was emitted.
+   *
+   * The subsequence above can only say an event happened. This is how a scenario says one
+   * did not, which is the whole claim when the behaviour under test is a refusal to act.
+   */
+  readonly telemetryAbsent?: readonly Record<string, unknown>[];
   readonly state?: Readonly<Record<string, StateExpectation | null>>;
   readonly buildError?: { readonly code: string };
   /**
@@ -265,6 +311,8 @@ export interface Then {
   readonly audit?: Readonly<Record<string, readonly string[]>>;
   /** Queries to run after everything has settled, each with the answer it must give. */
   readonly queries?: readonly QueryExpectation[];
+  /** State maps to read after everything has settled, each with the answer it must give. */
+  readonly maps?: readonly MapExpectation[];
   /** Per-key history reads, for what `then.events` cannot say. */
   readonly history?: Readonly<Record<string, HistoryExpectation>>;
 }
@@ -273,9 +321,27 @@ export interface QueryExpectation {
   readonly entity: string;
   readonly state?: string;
   readonly olderThan?: number | string;
+  /** Minimum time since the last commit, as milliseconds or a duration. */
+  readonly staleFor?: number | string;
   readonly limit?: number;
+  /** Ask for each match's values. Without it, a match carrying values is a failure. */
+  readonly includeValues?: boolean;
   /** Matching keys, oldest in state first. */
   readonly keys: readonly string[];
+  /** Values a match must carry, by key, each asserted as a subset. */
+  readonly values?: Readonly<Record<string, Record<string, unknown>>>;
+  readonly complete?: boolean;
+  /** Asserted as a set when present. */
+  readonly reasons?: readonly string[];
+}
+
+export interface MapExpectation {
+  readonly entity: string;
+  readonly limitPerState?: number;
+  /** Every state holding an instance, each with its keys, oldest in state first. */
+  readonly byState: Readonly<Record<string, readonly string[]>>;
+  /** How many instances the map counted, which a per-state limit does not reduce. */
+  readonly total?: number;
   readonly complete?: boolean;
   /** Asserted as a set when present. */
   readonly reasons?: readonly string[];
@@ -314,6 +380,12 @@ export function isSendStep(
   return "send" in step;
 }
 
+export function isDrainStep(
+  step: Step
+): step is Extract<Step, { drain: true }> {
+  return "drain" in step && step.drain === true;
+}
+
 export function isWaitStep(
   step: Step
 ): step is Extract<Step, { wait: number }> {
@@ -344,10 +416,87 @@ export function isForgetStep(
   return "forget" in step;
 }
 
+/**
+ * Whether a step is exactly one of the kinds the runner knows, written the way that kind
+ * is written.
+ *
+ * The predicates above only ask which key is present, which is all the runner needs to
+ * dispatch a step it already trusts. This is the check that earns the trust: without it
+ * `{ "sweep": false }` would sweep, and a step naming two kinds would silently run one.
+ */
+export function isWellFormedStep(step: unknown): step is Step {
+  if (typeof step !== "object" || step === null) {
+    return false;
+  }
+
+  const { await: awaited, ...rest } = step as Record<string, unknown>;
+  const [kind, ...others] = Object.keys(rest);
+  if (kind === undefined || others.length > 0) {
+    return false;
+  }
+
+  const value = rest[kind];
+  if (kind === "send") {
+    return (
+      (awaited === undefined || typeof awaited === "boolean") &&
+      hasStringKey(value) &&
+      hasTypedTrigger(value)
+    );
+  }
+  if (awaited !== undefined) {
+    return false;
+  }
+  if (kind === "forget") {
+    return hasStringKey(value);
+  }
+  if (kind === "wait" || kind === "advance") {
+    return typeof value === "number" && value >= 0;
+  }
+  return FLAG_STEPS.has(kind) && value === true;
+}
+
+const FLAG_STEPS: ReadonlySet<string> = new Set(["drain", "sweep", "restart"]);
+
+function hasStringKey(value: unknown): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { key?: unknown }).key === "string"
+  );
+}
+
+/** A trigger is an object naming its type. Anything less would reach the runtime as one. */
+function hasTypedTrigger(value: unknown): boolean {
+  const { trigger } = value as { trigger?: unknown };
+  return (
+    typeof trigger === "object" &&
+    trigger !== null &&
+    typeof (trigger as { type?: unknown }).type === "string"
+  );
+}
+
 /** The scenarios directory, resolved relative to this file so the cwd does not matter. */
 export const SCENARIOS_DIR = fileURLToPath(
   new URL("../scenarios", import.meta.url)
 );
+
+/**
+ * Every telemetry event name a matcher may ask for, read from the scenario schema.
+ *
+ * Read rather than repeated, so the schema stays the one list. A matcher is checked
+ * against it before a scenario runs, because a misspelled type in `telemetryAbsent`
+ * matches nothing and would pass for exactly the reason it should fail.
+ */
+export function telemetryTypes(
+  dir: string = SCENARIOS_DIR
+): ReadonlySet<string> {
+  const schema = JSON.parse(
+    readFileSync(join(dir, "schema", "scenario.schema.json"), "utf8")
+  ) as {
+    $defs: { telemetryMatcher: { properties: { type: { enum: string[] } } } };
+  };
+  return new Set(schema.$defs.telemetryMatcher.properties.type.enum);
+}
 
 const JSON_EXTENSION = /\.json$/;
 

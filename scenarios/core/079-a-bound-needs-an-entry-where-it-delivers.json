@@ -1,0 +1,53 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/079-a-bound-needs-an-entry-where-it-delivers",
+  "name": "a temporal constraint on a state that names its trigger types and leaves the escalation out is refused at definition",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "deployments",
+        "initial": "deploying",
+        "states": [
+          {
+            "state": "deploying",
+            "on": {
+              "finish": {
+                "else": {
+                  "result": "transitionTo",
+                  "to": "live"
+                }
+              }
+            }
+          },
+          {
+            "state": "live",
+            "else": {
+              "result": "stay"
+            }
+          },
+          {
+            "state": "stalled",
+            "else": {
+              "result": "stay"
+            }
+          }
+        ],
+        "constraints": {
+          "temporal": [
+            {
+              "in": "deploying",
+              "within": 1000,
+              "escalateTo": "stalled"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "then": {
+    "buildError": {
+      "code": "INVALID_CONFIG"
+    }
+  }
+}

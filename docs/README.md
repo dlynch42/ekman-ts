@@ -7,26 +7,32 @@ These pages are the depth behind it.
 
 ## Reading order
 
-If you are working out whether Ekman fits, read the first two. If you are building something,
-read the first four and come back for the rest.
+If you are working out whether Ekman fits, read the first two and the
+[questions people ask first](./faq.md). If you are building something, read the first five and
+come back for the rest. The order follows what Ekman is for: the key, what is remembered about
+it, what moves it, and where everything is.
 
 | Page | What it covers |
 |---|---|
-| [Concepts](./concepts.md) | The execution model: keys, instances, per-key ordering, and what a commit is. |
-| [Entities](./entities.md) | `defineEntity`, handler signatures, `transitionTo` / `stay` / `fail`, error handlers, unknown policy. |
+| [Concepts](./concepts.md) | The key as the identity of one thing, instances, per-key ordering, and what a commit is. |
+| [Memory and eviction](./memory.md) | The byte budget on what is remembered, how instances are accounted, and the three eviction policies. |
+| [Constraints](./constraints.md) | Rules and time bounds that propose a state, then transition graphs, guards and invariants that refuse one, and discovering a graph from real traffic. |
+| [Queries and history](./queries.md) | The state map, `query`, `history`, and the partiality contract that keeps a partial answer from reading as a complete one. |
+| [Entities](./entities.md) | `defineEntity`, handler signatures, `transitionTo` / `stay` / `patch` / `fail`, error handlers, unknown policy. |
 | [Runtime and API](./api.md) | Every `new Ekman({...})` option and every method on the runtime. |
 | [Ordering and the inbox](./ordering.md) | The bounded per-key inbox, capacity, and the three overflow policies. |
 | [Execution policy](./execution.md) | Retries, timeouts, backoff, and the fencing token that makes a zombie handler harmless. |
-| [Constraints](./constraints.md) | Transition graphs, guards, invariants, time-in-state bounds, and discovering a graph from real traffic. |
+| [Handlers that own external resources](./external-resources.md) | What the runtime cannot do for a handler that creates things outside it: roll back, commit atomically with a side effect, or restore what a crash destroyed. |
 | [Durability and stores](./durability.md) | Store kinds, layering, capability declaration, log compaction, retention. |
-| [Memory and eviction](./memory.md) | The byte budget, how instances are accounted, and the three eviction policies. |
-| [Queries and history](./queries.md) | `query`, `history`, and the partiality contract that keeps a partial answer from reading as a complete one. |
 | [Telemetry and audit](./telemetry.md) | The runtime's own event stream, kept separate from per-key history, and audit sinks. |
 | [Error codes](./errors.md) | Every code Ekman raises, what it means, and a suggested HTTP mapping. |
+| [Questions people ask first](./faq.md) | How this differs from a state machine library, from a platform, and from a mutex, and when not to use it. |
+| [Architecture](./architecture.md) | For contributors and ports: which module owns what, the unit that holds what is in memory, and what running across threads would change. |
 
 ## Related
 
-- [`examples/deploy-service`](../examples/deploy-service) is a working service built on Ekman.
+- [`examples/service-health`](../examples/service-health) is a working service shaped like memory: what is known about each dependency, and state that follows from it.
+- [`examples/deploy-service`](../examples/deploy-service) is a working service shaped like a workflow.
 - [`demos/`](../demos) has runnable programs, one per behaviour, each asserting rather than printing.
 - [`scenarios/`](../scenarios) is the language-agnostic conformance suite.
 - [`benchmarks/`](../benchmarks) is what the performance figures come from.

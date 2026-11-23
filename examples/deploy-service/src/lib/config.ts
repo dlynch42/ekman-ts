@@ -41,6 +41,24 @@ export const config = Object.freeze({
   port: num("PORT", 3000),
 
   /**
+   * The interface to listen on. Loopback unless told otherwise.
+   *
+   * An example that binds every interface teaches the wrong default: the first thing a
+   * copied service does is answer the whole network. Set `HOST=0.0.0.0` when something in
+   * front of it is doing the authenticating.
+   */
+  host: str("HOST", "127.0.0.1"),
+
+  /** The largest request body that is read. Anything bigger is a 413 and is not buffered. */
+  maxBodyBytes: num("MAX_BODY_BYTES", KB * KB),
+
+  /**
+   * The bearer token for the operator routes that change things, `/ops/prune` and
+   * `/ops/sweep`. Empty means those routes are switched off, not open.
+   */
+  opsToken: str("OPS_TOKEN", ""),
+
+  /**
    * Where the transition log lives. Gitignored; delete it to start clean.
    *
    * Resolved from the nearest `package.json` above the working directory rather than from

@@ -1,0 +1,126 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/025-patch-is-checked-by-invariants",
+  "name": "an invariant is checked against the values a patch would commit, the merged whole, so a patch that breaks one is refused and one that names a single field cannot lose another",
+  "level": "core",
+  "given": {
+    "runtime": {
+      "clock": {
+        "start": 0,
+        "stepMs": 0
+      }
+    },
+    "entities": [
+      {
+        "name": "accounts",
+        "initial": "open",
+        "values": {
+          "owner": "amy",
+          "balance": 0
+        },
+        "states": [
+          {
+            "state": "open",
+            "cases": [
+              {
+                "when": {
+                  "trigger": "deposit"
+                },
+                "do": {
+                  "result": "patch",
+                  "values": {
+                    "balance": {
+                      "$trigger": "amount"
+                    }
+                  }
+                }
+              },
+              {
+                "when": {
+                  "trigger": "rename"
+                },
+                "do": {
+                  "result": "patch",
+                  "values": {
+                    "owner": {
+                      "$trigger": "to"
+                    }
+                  }
+                }
+              }
+            ],
+            "else": {
+              "result": "stay"
+            }
+          }
+        ],
+        "constraints": {
+          "invariants": [
+            {
+              "name": "balance-within-limit",
+              "check": {
+                "values": "balance",
+                "lte": 100,
+                "reason": "over the limit"
+              }
+            },
+            {
+              "name": "owner-kept",
+              "check": {
+                "values": "owner",
+                "exists": true,
+                "reason": "an account needs an owner"
+              }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "accounts:1",
+        "trigger": {
+          "type": "deposit",
+          "amount": 40
+        }
+      }
+    },
+    {
+      "send": {
+        "key": "accounts:1",
+        "trigger": {
+          "type": "deposit",
+          "amount": 500
+        }
+      }
+    }
+  ],
+  "then": {
+    "sends": [
+      {
+        "outcome": "committed",
+        "seq": 1,
+        "values": {
+          "owner": "amy",
+          "balance": 40
+        }
+      },
+      {
+        "outcome": "rejected",
+        "code": "CONSTRAINT_VIOLATED"
+      }
+    ],
+    "state": {
+      "accounts:1": {
+        "state": "open",
+        "seq": 1,
+        "values": {
+          "owner": "amy",
+          "balance": 40
+        }
+      }
+    }
+  }
+}

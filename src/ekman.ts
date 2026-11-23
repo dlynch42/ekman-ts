@@ -1,51 +1,65 @@
 import type { AuditSink } from "./audit";
-import { deliverTo } from "./audit";
-import type { RuntimeDeps } from "./config";
-import { resolveInboxConfig } from "./config";
-import type { CompiledTemporal } from "./constraints";
-import type { DispatchDeps } from "./dispatch";
+import { assertAuditSink, fanOut } from "./audit";
+import { Caches, DEFAULT_CACHE_TIMEOUT_MS } from "./caches";
+import { assertBuilt } from "./compiled";
+import type { CommittedRecord, RuntimeDeps } from "./config";
+import { assertKnownKeys, resolveInboxConfig } from "./config";
 import { dispatch } from "./dispatch";
 import { EkmanError } from "./errors";
-import type { EkmanEvent } from "./events";
-import { InstanceRecord } from "./instance";
 import { parseKey } from "./key";
-import type { ResolvedMemoryConfig } from "./memory";
-import { MemoryLedger, resolveMemoryConfig } from "./memory";
+import { resolveMemoryConfig } from "./memory";
+import { assertPolicyKeys, MAX_TIMER_MS, resolvePolicy } from "./policy";
 import type {
   HistoryResult,
-  Partiality,
   QueryCriteria,
-  QueryMatch,
   QueryResult,
+  ReadContext,
+  StateMap,
+  StateMapOptions,
 } from "./query";
-import { mergeRestores, parseDuration } from "./query";
+import {
+  mapStates,
+  queryInstances,
+  readHistory,
+  residentStateMap,
+} from "./query";
+import type { AnyDefinition, AnyInstance } from "./residency";
+import { Residency } from "./residency";
+import { Rules } from "./rules";
 import type { ResolvedStack } from "./stack";
 import { assertCoordination, resolveStack } from "./stack";
-import type { StorageSweep, Store } from "./store";
+import type { StorageSweep } from "./store";
 import { EMPTY_SEQ } from "./store";
-import type { TelemetryEvent } from "./telemetry";
-import { emit, telemetryNow } from "./telemetry";
-import { TemporalIndex } from "./temporal";
+import {
+  assertSweepInterval,
+  EMPTY_SWEEP,
+  PeriodicPass,
+  sweepStorageOnce,
+  TemporalSweeper,
+} from "./sweep";
+import type { TelemetryEvent, TelemetrySink } from "./telemetry";
+import {
+  emit,
+  TELEMETRY_EVENT_TYPES,
+  TELEMETRY_FALLBACK,
+  telemetryNow,
+} from "./telemetry";
 import type {
   AnyEntityDefinition,
+  CacheConfig,
+  CloseOptions,
   CommitResult,
   EkmanConfig,
   EntityDefinition,
   EntityHandle,
   EntityHandles,
   InstanceSnapshot,
+  OnUnhandled,
   Trigger,
   TriggerLike,
+  UnhandledContext,
   Values,
 } from "./types";
-
-// biome-ignore-start lint/suspicious/noExplicitAny: the runtime holds instances and
-// definitions of many entity shapes at once. `unknown` is not assignable across the
-// contravariant handler positions these feed, so `any` is the only escape that keeps
-// the heterogeneous registry typable. Every public surface re-narrows.
-type AnyInstance = InstanceRecord<any, any>;
-type AnyDefinition = EntityDefinition<string, any, any, any>;
-// biome-ignore-end lint/suspicious/noExplicitAny: see above
 
 /**
  * An embedded Ekman runtime.
@@ -67,62 +81,120 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   readonly entities: EntityHandles<D>;
 
   readonly #definitions = new Map<string, AnyDefinition>();
-  readonly #instances = new Map<string, AnyInstance>();
+  /** The rules entities declared, asked after every commit of an instance they watch. */
+  readonly #rules: Rules;
   readonly #now: () => number;
-  readonly #onUnhandled: (error: unknown) => void;
+  readonly #onUnhandled: OnUnhandled;
+  readonly #telemetry: TelemetrySink | undefined;
   readonly #runtime: RuntimeDeps;
-  readonly #deps: DispatchDeps;
-  /** Where every resident instance sits. Read by temporal constraints and by queries. */
-  readonly #temporal = new TemporalIndex();
+  /** What is in memory, what it costs, and where each instance sits. */
+  readonly #residency: Residency;
+  /** What a query, a map and a history read through. */
+  readonly #reads: ReadContext;
   readonly #stack: ResolvedStack;
-  readonly #memory: ResolvedMemoryConfig;
+  readonly #caches: Caches;
   readonly #audit: readonly AuditSink[];
-  /** What is resident and what it costs, in least-recently-used order. */
-  readonly #ledger = new MemoryLedger();
-  #sweepTimer: ReturnType<typeof setInterval> | undefined;
-  #storageSweepTimer: ReturnType<typeof setInterval> | undefined;
-  /**
-   * Declared here and assigned in the constructor rather than initialized inline. An
-   * inline `= false` narrows the field to the literal `false`, after which the re-entry
-   * guard that reads it looks statically dead. The inbox's `#running` carries the same
-   * note for the same reason.
-   */
-  #sweeping: boolean;
-  /** Same reasoning as `#sweeping`, for the storage pass. */
-  #sweepingStorage: boolean;
+  /** Deletions still in progress, by key. A new record for the key waits on its entry before loading. */
+  readonly #forgetting = new Map<string, Promise<void>>();
+  /** Aborted when `close()` begins. From then on no trigger is accepted and no retry starts. */
+  readonly #closing = new AbortController();
+  /** The one shutdown every `close()` call shares. */
+  #closed: Promise<void> | undefined;
+  readonly #sweeper: TemporalSweeper;
+  /** The time-in-state pass. Waited for at shutdown, because it loads and records. */
+  readonly #temporalPass: PeriodicPass<number>;
+  readonly #storagePass: PeriodicPass<StorageSweep>;
   #triggerSeq = 0;
 
   constructor(config: EkmanConfig<D> = {}) {
+    assertRuntimeConfig(config);
     this.#now = config.now ?? Date.now;
     this.#onUnhandled = config.onUnhandled ?? defaultOnUnhandled;
-    this.#sweeping = false;
-    this.#sweepingStorage = false;
+    this.#telemetry = config.telemetry;
 
     // Everything is resolved here, at construction, so a configuration the stores cannot
     // satisfy fails at startup rather than being discovered under load. A runtime that
     // cannot keep its promises should refuse to start rather than quietly keep fewer.
     this.#stack = resolveStack(config.store);
     assertCoordination(this.#stack, config.coordination);
-    this.#memory = resolveMemoryConfig(config.memory, {
+    const memory = resolveMemoryConfig(config.memory, {
       hasStore: this.#stack.authority !== undefined,
     });
     this.#audit = config.audit ?? [];
+    for (const sink of this.#audit) {
+      assertAuditSink(sink);
+    }
+
+    this.#caches = new Caches(this.#stack.caches, {
+      now: () => this.#now(),
+      failed: (failure) =>
+        this.#emit({
+          type: "store.cacheFailed",
+          key: failure.key,
+          entity: parseKey(failure.key).entity,
+          store: failure.store,
+          error: failure.error,
+          seq: failure.seq,
+          at: telemetryNow(),
+        }),
+      timeoutMs: resolveCacheTimeout(config.cache),
+      suspended: (suspension) =>
+        this.#emit({
+          type: "store.cacheSuspended",
+          store: suspension.store,
+          timeouts: suspension.timeouts,
+          at: telemetryNow(),
+        }),
+    });
 
     this.#runtime = {
       now: () => this.#now(),
-      telemetry: config.telemetry,
-      onUnhandled: (error) => this.#onUnhandled(error),
+      emit: (event) => this.#emit(event),
+      onUnhandled: (error, context) => this.#onUnhandled(error, context),
+      policy: config.execution,
+      reconcile: (instance) => this.#hydrate(instance as AnyInstance),
+      closing: this.#closing.signal,
       inbox: resolveInboxConfig(config.inbox),
       stack: this.#stack,
-      memory: this.#memory,
-      audit: (event) => this.#fanOut(event),
+      caches: this.#caches,
+      memory,
+      audit: (event) => fanOut(this.#audit, event, this.#runtime),
+      committed: (record, moved) => this.#committed(record, moved),
+    };
+    this.#residency = new Residency(this.#runtime);
+    this.#reads = {
+      now: () => this.#now(),
+      stack: this.#stack,
+      residency: this.#residency,
+      known: (entity, key) => {
+        this.#definitionFor(entity, key);
+      },
     };
 
-    this.#deps = {
-      now: () => this.#now(),
-      policy: config.execution,
-      emit: (event) => this.#emit(event),
-    };
+    this.#rules = new Rules({
+      deps: this.#runtime,
+      send: (key, trigger) => this.send(key, trigger),
+      nextTriggerId: () => this.#nextTriggerId(),
+    });
+    this.#sweeper = new TemporalSweeper({
+      deps: this.#runtime,
+      definitions: this.#definitions,
+      residency: this.#residency,
+      forgetting: this.#forgetting,
+      send: (key, trigger) => this.send(key, trigger),
+      nextTriggerId: () => this.#nextTriggerId(),
+    });
+    const closing = this.#closing.signal;
+    this.#temporalPass = new PeriodicPass(
+      () => this.#sweeper.once(),
+      0,
+      closing
+    );
+    this.#storagePass = new PeriodicPass(
+      () => sweepStorageOnce(this.#runtime),
+      EMPTY_SWEEP,
+      closing
+    );
 
     const handles: Record<string, EntityHandle> = {};
     for (const definition of config.entities ?? []) {
@@ -157,30 +229,56 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
   }
 
   /**
+   * The definition registered under an entity name, or an `UNKNOWN_ENTITY` refusal.
+   *
+   * Everything that takes a key or an entity name from a caller goes through this before
+   * it reaches a store, so a name nobody registered is never looked up, listed or deleted
+   * on disk.
+   *
+   * @param entity the name to resolve
+   * @param key the key that named it, when one did, for the error
+   */
+  #definitionFor(entity: string, key?: string): AnyDefinition {
+    const definition = this.#definitions.get(entity);
+    if (definition === undefined) {
+      const subject =
+        key === undefined ? "the query" : `key ${JSON.stringify(key)}`;
+      throw new EkmanError(
+        "UNKNOWN_ENTITY",
+        `${subject} names entity ${JSON.stringify(entity)}, which is not registered. ` +
+          `Registered: ${this.entityNames.join(", ") || "(none)"}`,
+        key === undefined ? {} : { key }
+      );
+    }
+    return definition;
+  }
+
+  /**
    * Deliver a trigger to the instance at `key`.
    *
    * Resolves at commit with the committed state, values and sequence. Rejects with an
    * `EkmanError` if the key is malformed, the entity is unregistered, the trigger is
-   * refused, or the handler fails.
+   * refused, the handler fails, or the runtime has been closed.
    */
   async send<S extends string = string, V extends Values = Values>(
     key: string,
     trigger: Trigger
   ): Promise<CommitResult<S, V>> {
-    const parsed = parseKey(key);
-    const definition = this.#definitions.get(parsed.entity);
-
-    if (definition === undefined) {
+    if (this.#closing.signal.aborted) {
       throw new EkmanError(
-        "UNKNOWN_ENTITY",
-        `key ${JSON.stringify(key)} names entity "${parsed.entity}", which is not registered. ` +
-          `Registered: ${this.entityNames.join(", ") || "(none)"}`,
+        "RUNTIME_CLOSED",
+        `the runtime is closed, so ${JSON.stringify(key)} cannot accept a trigger`,
         { key }
       );
     }
 
+    const definition = this.#definitionFor(parseKey(key).entity, key);
+
     const normalized = this.#normalizeTrigger(trigger, key);
-    const instance = this.#resolveInstance(key, definition, normalized);
+    const instance = this.#residency.materialize(key, definition, {
+      type: "init",
+      id: normalized.id as string,
+    });
 
     return (await this.#enqueue(
       instance,
@@ -196,24 +294,25 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * disappearing. Silence is the one thing this runtime should never do.
    */
   post(key: string, trigger: Trigger): void {
-    this.send(key, trigger).catch(this.#onUnhandled);
-  }
-
-  /** Current committed state, or undefined if nothing has addressed this key yet. */
-  inspect<S extends string = string, V extends Values = Values>(
-    key: string
-  ): InstanceSnapshot<S, V> | undefined {
-    const instance = this.#instances.get(parseKey(key).key);
-    return instance?.snapshot() as InstanceSnapshot<S, V> | undefined;
+    this.send(key, trigger).catch(this.#unhandled("post", key));
   }
 
   /**
-   * The per-key ordered event stream: transitions, refusals, violations and restores.
+   * Current committed state, read from memory without touching the store.
    *
-   * Reads through the commit authority when one is configured, so it covers the instance's
-   * whole life and not only what this process happened to see. With no store it answers
-   * from what is resident, and says so: `complete` is false and `reasons` explains why.
+   * Undefined when the instance is not resident: nothing has addressed the key yet, it was
+   * evicted, or it is still being loaded.
    */
+  inspect<S extends string = string, V extends Values = Values>(
+    key: string
+  ): InstanceSnapshot<S, V> | undefined {
+    const instance = this.#residency.get(parseKey(key).key);
+    if (instance === undefined || instance.needsHydration) {
+      return;
+    }
+    return instance.snapshot() as InstanceSnapshot<S, V>;
+  }
+
   /**
    * Delete an instance outright: its resident state and its stream in every layer.
    *
@@ -225,14 +324,36 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * Refused with `KEY_BUSY` while a handler is in flight. A commit landing into a key that
    * had just been deleted would resurrect it at a sequence nothing accounts for, and the
    * fence cannot help: an attempt already writing has sealed its token. Refusing is the
-   * honest answer, and a caller that wants to wait can retry.
+   * honest answer, and a caller that wants to wait can retry. Idle is enough to know: the
+   * inbox starts draining synchronously when it accepts, so an idle instance has nothing
+   * queued and nothing in flight.
    *
    * Forgetting a key that was never here is not an error, so a sweep that dies halfway
    * behaves the same way when it is run again.
+   *
+   * The record leaves the table before the delete is awaited, and a record created for the
+   * same key meanwhile waits for the delete before it loads. Otherwise it would restore the
+   * stream being removed and commit on top of it, and that commit would then be deleted.
+   * What that record waits on never rejects, since a failed delete is this caller's to hear.
+   *
+   * The delete itself waits for the record's queued writes, because a refusal written
+   * without being awaited would otherwise land afterwards and recreate the stream. It then
+   * clears every layer, not only the authority: a cache still holding the stream would
+   * serve it back on the next load. A cache that cannot be cleared fails the call, and is
+   * not read or written for the key again until a later forget of it succeeds.
    */
   async forget(key: string): Promise<void> {
-    const parsed = parseKey(key).key;
-    const instance = this.#instances.get(parsed);
+    if (this.#closing.signal.aborted) {
+      throw new EkmanError(
+        "RUNTIME_CLOSED",
+        `the runtime is closed, so ${JSON.stringify(key)} cannot be forgotten`,
+        { key }
+      );
+    }
+
+    const { key: parsed, entity } = parseKey(key);
+    this.#definitionFor(entity, key);
+    const instance = this.#residency.get(parsed);
 
     // Checked before anything is deleted, so a store that cannot delete leaves the runtime
     // exactly as it was rather than half-forgotten.
@@ -247,32 +368,41 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       }
     }
 
-    if (instance !== undefined) {
-      // A non-empty queue implies a running drain, because the inbox starts draining
-      // synchronously when it accepts. So an idle instance has nothing queued and nothing
-      // in flight, and there is no attempt left to fence.
-      if (!instance.idle) {
-        throw new EkmanError(
-          "KEY_BUSY",
-          `${JSON.stringify(parsed)} has a handler in flight, so it was not forgotten. ` +
-            "Deleting it now would leave that attempt committing into a key that no " +
-            "longer exists. Retry once it is idle.",
-          { key: parsed }
-        );
-      }
-
-      // Rejections and violations are written without being awaited. Deleting before they
-      // land would let one arrive afterwards and recreate the stream.
-      await instance.flushed();
+    if (instance !== undefined && !instance.idle) {
+      throw new EkmanError(
+        "KEY_BUSY",
+        `${JSON.stringify(parsed)} has a handler in flight or is being evaluated by a ` +
+          "sweep, so it was not forgotten. Deleting it now would leave that work " +
+          "committing into a key that no longer exists. Retry once it is idle.",
+        { key: parsed }
+      );
     }
 
-    const bytes = instance === undefined ? 0 : this.#release(instance);
+    const bytes =
+      instance === undefined ? 0 : this.#residency.release(instance);
+    this.#sweeper.forget(parsed);
 
-    // Every layer, not just the authority: a cache still holding the stream would serve it
-    // back on the next load, which is the opposite of forgotten.
-    await Promise.all(
-      this.#stack.layers.map((layer) => layer.forget?.(parsed))
+    const deleting = (this.#forgetting.get(parsed) ?? Promise.resolve()).then(
+      async () => {
+        await instance?.flushed();
+        await this.#residency.snapshotting(parsed);
+
+        await allSettledOrThrow([
+          this.#caches.forget(parsed),
+          this.#stack.authority?.forget?.(parsed),
+        ]);
+      }
     );
+
+    const settled = deleting.then(noop, noop);
+    this.#forgetting.set(parsed, settled);
+    try {
+      await deleting;
+    } finally {
+      if (this.#forgetting.get(parsed) === settled) {
+        this.#forgetting.delete(parsed);
+      }
+    }
 
     this.#emit({
       type: "instance.forgotten",
@@ -282,51 +412,22 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       seq: instance?.seq ?? EMPTY_SEQ,
       bytes,
       resident: instance !== undefined,
-      residentBytes: this.#ledger.total,
+      residentBytes: this.#residency.bytes,
       at: telemetryNow(),
     });
   }
 
-  async history<S extends string = string, V extends Values = Values>(
+  /**
+   * The per-key ordered event stream: transitions, refusals, violations and restores.
+   *
+   * Reads through the commit authority when one is configured, so it covers the instance's
+   * whole life and not only what this process happened to see. With no store it answers
+   * from what is resident, and says so: `complete` is false and `reasons` explains why.
+   */
+  history<S extends string = string, V extends Values = Values>(
     key: string
   ): Promise<HistoryResult<S, V>> {
-    const parsed = parseKey(key).key;
-    const instance = this.#instances.get(parsed);
-    const { authority } = this.#stack;
-
-    if (authority === undefined) {
-      return Object.freeze({
-        key: parsed,
-        events: (instance?.events ?? []) as readonly EkmanEvent<S, V>[],
-        complete: false,
-        reasons: NO_DURABLE_STORE,
-        sources: RESIDENT_ONLY,
-      });
-    }
-
-    // Refusals and violations are written without being awaited, so without this a read
-    // taken immediately after one could miss it and report a stream with a hole in it.
-    await instance?.flushed();
-
-    const stored = (await authority.read(parsed)) as readonly EkmanEvent<
-      S,
-      V
-    >[];
-
-    const compacted = await this.#wasCompacted(parsed, stored, authority);
-
-    return Object.freeze({
-      key: parsed,
-      // Restores are never persisted, so they are woven back in here. Without that, a
-      // stream read after a reload would give no sign that anything was reloaded.
-      events: mergeRestores(
-        stored,
-        (instance?.events ?? []) as readonly EkmanEvent<S, V>[]
-      ),
-      complete: this.#stack.durable && !compacted,
-      reasons: partiality(this.#stack.durable, compacted),
-      sources: Object.freeze([authority.name, "resident"]),
-    });
+    return readHistory<S, V>(this.#reads, key);
   }
 
   /**
@@ -340,60 +441,40 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * what it retains, and reporting that as if it were everything is the one thing a query
    * must never do.
    */
-  async query(criteria: QueryCriteria): Promise<QueryResult> {
-    const at = this.#now();
-    const olderThanMs =
-      criteria.olderThan === undefined
-        ? undefined
-        : parseDuration(criteria.olderThan);
+  query<S extends string = string, V extends Values = Values>(
+    criteria: QueryCriteria<S, V>
+  ): Promise<QueryResult<S, V>> {
+    return queryInstances<S, V>(this.#reads, criteria);
+  }
 
-    const reasons = new Set<Partiality>();
-    const sources = ["resident"];
-    const matches = new Map<string, QueryMatch>();
+  /**
+   * Where every instance of an entity is: a count and the keys for each state.
+   *
+   * The same union a query makes, grouped. Resident instances and stored ones are both
+   * counted, and the map reports itself incomplete for exactly the reasons a query over
+   * the entity would.
+   */
+  map<S extends string = string>(
+    entity: string,
+    options: StateMapOptions = {}
+  ): Promise<StateMap<S>> {
+    return mapStates<S>((criteria) => this.query(criteria), entity, options);
+  }
 
-    for (const match of this.#residentMatches(criteria, olderThanMs, at)) {
-      matches.set(match.key, match);
-    }
-
-    const { authority } = this.#stack;
-    if (authority === undefined) {
-      reasons.add("no-durable-store");
-    } else {
-      sources.push(authority.name);
-      await this.#scanInto(
-        matches,
-        authority,
-        criteria,
-        olderThanMs,
-        at,
-        reasons
-      );
-      if (!this.#stack.durable) {
-        reasons.add("no-durable-store");
-      }
-    }
-
-    // Applied after the union, so a limit cannot silently prefer resident instances over
-    // stored ones or the other way round.
-    const ordered = [...matches.values()].sort(byAgeThenKey);
-    const limited =
-      criteria.limit === undefined ? ordered : ordered.slice(0, criteria.limit);
-
-    if (limited.length < ordered.length) {
-      reasons.add("limit-reached");
-    }
-
-    return Object.freeze({
-      instances: Object.freeze(limited),
-      complete: reasons.size === 0,
-      reasons: Object.freeze([...reasons]),
-      sources: Object.freeze(sources),
-    });
+  /**
+   * The state map of what is in memory, without asking a store.
+   *
+   * Synchronous and cheap, for a view that refreshes often. Never complete by
+   * construction: an evicted instance, or one this runtime has not loaded, is not in it,
+   * and the result says so with `resident-only`.
+   */
+  residentMap<S extends string = string>(entity: string): StateMap<S> {
+    return residentStateMap<S>(this.#reads, entity);
   }
 
   /** Keys of every resident instance. */
   get residentKeys(): readonly string[] {
-    return [...this.#instances.keys()];
+    return [...this.#residency.keys()];
   }
 
   /**
@@ -406,20 +487,15 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * The clock is read once per pass. Every violation a pass records is true at that one
    * instant, rather than at whichever moment the walk happened to reach it.
    *
+   * With a store, instances it holds that are not resident are evaluated too. A store
+   * that cannot be scanned, or an instance that cannot be loaded, is reported through
+   * `onUnhandled` and does not reject the pass.
+   *
    * Overlapping passes are not useful, so a call made while one is running returns 0
    * immediately rather than queueing behind it.
    */
-  async sweep(): Promise<number> {
-    if (this.#sweeping) {
-      return 0;
-    }
-
-    this.#sweeping = true;
-    try {
-      return await this.#sweepOnce();
-    } finally {
-      this.#sweeping = false;
-    }
+  sweep(): Promise<number> {
+    return this.#temporalPass.run();
   }
 
   /**
@@ -440,37 +516,107 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
    * Overlapping passes are not useful, so a call made while one is running returns an empty
    * result immediately rather than queueing behind it, exactly as `sweep()` does.
    */
-  async sweepStorage(): Promise<StorageSweep> {
-    if (this.#sweepingStorage) {
-      return EMPTY_SWEEP;
-    }
-
-    this.#sweepingStorage = true;
-    try {
-      return await this.#sweepStorageOnce();
-    } finally {
-      this.#sweepingStorage = false;
-    }
+  sweepStorage(): Promise<StorageSweep> {
+    return this.#storagePass.run();
   }
 
   /**
-   * Release what the runtime is holding: currently the two sweep intervals.
+   * Shut the runtime down, letting work it has already accepted finish first.
    *
-   * Safe to call more than once. A runtime that was never given either interval still has
-   * this, so shutdown code does not have to know how it was configured.
+   * From the moment this is called no new trigger is accepted (`send()` rejects with
+   * `RUNTIME_CLOSED`), no sweep runs, and a retry waiting out its backoff is abandoned
+   * rather than started. A handler already running is left to finish and commit, and
+   * refusals and violations still on their way to the store are allowed to land. So are a
+   * `forget()`, a storage sweep and a time-in-state sweep that had already begun. The
+   * last loads nothing more once this is called and ends as soon as the escalation it is
+   * delivering settles. Only then are the store layers closed, so none of that work meets
+   * a closed connection.
+   *
+   * Writes to the cache layers are waited for next, when one of them outlives the process.
+   * A write it never received would leave it a commit behind the authority, for the next
+   * process to load and have its first commit refused. A stack whose caches are all held
+   * in memory is not waited for: what they are owed dies with them. Where the two are
+   * mixed, a key's writes go to its layers in one order, so they are waited for together.
+   *
+   * The snapshot an eviction leaves behind is not waited for either. It is an
+   * optimization whose loss costs replay time, never committed state. A cache write still
+   * queued when the layers are closed is dropped, and never run against a closed layer.
+   *
+   * The wait is bounded, and one deadline covers all of it. A handler that never settles,
+   * or a cache that never answers, would otherwise hold shutdown open forever, so after
+   * `timeoutMs` the layers are closed regardless and `runtime.closed` telemetry reports
+   * `drained: false`, with how many keys were still busy and how many still had cache
+   * writes queued.
+   *
+   * Safe to call more than once, and from several places at once: every call shares the
+   * same shutdown and the first call's deadline.
+   *
+   * @param options `timeoutMs` is how long to wait for in-flight work. Defaults to 30 seconds.
    */
-  async close(): Promise<void> {
-    if (this.#sweepTimer !== undefined) {
-      clearInterval(this.#sweepTimer);
-      this.#sweepTimer = undefined;
+  close(options: CloseOptions = {}): Promise<void> {
+    const timeoutMs = options.timeoutMs ?? DEFAULT_CLOSE_TIMEOUT_MS;
+    if (!(timeoutMs > 0 && timeoutMs <= MAX_TIMER_MS)) {
+      return Promise.reject(
+        new EkmanError(
+          "INVALID_CONFIG",
+          `close timeoutMs must be a positive number of milliseconds, at most ${MAX_TIMER_MS}, received ${String(timeoutMs)}`
+        )
+      );
     }
 
-    if (this.#storageSweepTimer !== undefined) {
-      clearInterval(this.#storageSweepTimer);
-      this.#storageSweepTimer = undefined;
-    }
+    this.#closed ??= this.#shutDown(timeoutMs);
+    return this.#closed;
+  }
 
+  async #shutDown(timeoutMs: number): Promise<void> {
+    const deadline = performance.now() + timeoutMs;
+    this.#closing.abort();
+    this.#temporalPass.stop();
+    this.#storagePass.stop();
+
+    const instances = [...this.#residency.instances()];
+    const drained = await settledWithin(
+      Promise.all([
+        ...instances.map((instance) =>
+          instance.inbox.whenIdle().then(() => instance.flushed())
+        ),
+        ...this.#forgetting.values(),
+        this.#storagePass.settled,
+        this.#temporalPass.settled,
+      ]),
+      timeoutMs
+    );
+
+    const cachePending = await this.#drainCaches(deadline);
+
+    this.#emit({
+      type: "runtime.closed",
+      drained: drained && cachePending === 0,
+      pending:
+        instances.filter((instance) => !instance.idle).length +
+        this.#forgetting.size,
+      cachePending,
+      at: telemetryNow(),
+    });
+
+    this.#caches.close();
     await Promise.all(this.#stack.layers.map((layer) => layer.close?.()));
+  }
+
+  /**
+   * Wait, until the shutdown's deadline, for writes owed to a cache layer that outlives
+   * the process. Answers how many keys still had some queued when the wait ended.
+   */
+  async #drainCaches(deadline: number): Promise<number> {
+    if (!this.#caches.outlasting) {
+      return 0;
+    }
+
+    const remaining = deadline - performance.now();
+    if (remaining > 0) {
+      await settledWithin(this.#caches.idle(), remaining);
+    }
+    return this.#caches.queued;
   }
 
   /** Resident bytes on the documented accounting basis, and what the budget allows. */
@@ -479,11 +625,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     readonly instances: number;
     readonly maxBytes: number | null;
   } {
-    return Object.freeze({
-      bytes: this.#ledger.total,
-      instances: this.#ledger.size,
-      maxBytes: this.#memory.bounded ? this.#memory.maxBytes : null,
-    });
+    return this.#residency.usage;
   }
 
   /**
@@ -504,7 +646,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     let maxBytes: number | null = null;
 
     for (const layer of this.#stack.layers) {
-      const { usage } = layer;
+      const usage = layer.usage?.();
       if (usage === undefined) {
         continue;
       }
@@ -518,17 +660,36 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     return Object.freeze({ bytes, logs, maxBytes });
   }
 
+  /**
+   * Add a definition to the registry.
+   *
+   * Every state's execution policy is resolved against the runtime's default here, and the
+   * result discarded, so a policy no attempt could satisfy fails at construction or at
+   * `define()` rather than on the first trigger. Dispatch resolves again from the same
+   * inputs.
+   */
   #register(definition: AnyDefinition): EntityHandle {
+    assertBuilt(definition);
     const existing = this.#definitions.get(definition.name);
 
     if (existing !== undefined) {
       throw new EkmanError(
         "DUPLICATE_ENTITY",
-        `entity "${definition.name}" is already registered with this runtime`
+        `entity "${definition.name}" is already registered with this runtime. It was ` +
+          "already passed in entities, or define() was called twice for it."
+      );
+    }
+
+    for (const [state, entry] of definition.handlers) {
+      resolvePolicy(
+        this.#runtime.policy,
+        entry.policy,
+        `entity "${definition.name}" state "${state}"`
       );
     }
 
     this.#definitions.set(definition.name, definition);
+    this.#rules.register(definition);
     return this.#makeHandle(definition);
   }
 
@@ -544,6 +705,7 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       history: (id: string) => this.history(definition.key(id)),
       query: (criteria: Omit<QueryCriteria, "entity"> = {}) =>
         this.query({ ...criteria, entity: definition.name }),
+      map: (options?: StateMapOptions) => this.map(definition.name, options),
       forget: (id: string) => this.forget(definition.key(id)),
     }) as EntityHandle;
   }
@@ -590,62 +752,6 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     return `t${this.#triggerSeq}`;
   }
 
-  /** Load or lazily initialize the instance. Initialization is a commit at sequence 0. */
-  #resolveInstance(
-    key: string,
-    definition: AnyDefinition,
-    trigger: Trigger
-  ): AnyInstance {
-    const existing = this.#instances.get(key);
-    if (existing !== undefined) {
-      return existing;
-    }
-
-    // Under `reject` the budget bounds how much a producer can materialize, which is what
-    // stops a stream of unknown keys from becoming unbounded resident state. Existing
-    // instances are untouched: shedding new work beats disturbing work in progress.
-    if (
-      this.#memory.policy === "reject" &&
-      this.#ledger.total >= this.#memory.maxBytes
-    ) {
-      this.#emit({
-        type: "memory.refused",
-        key,
-        entity: definition.name,
-        residentBytes: this.#ledger.total,
-        maxBytes: this.#memory.maxBytes,
-        at: telemetryNow(),
-      });
-
-      throw new EkmanError(
-        "MEMORY_EXHAUSTED",
-        `the resident memory budget of ${this.#memory.maxBytes} bytes is full ` +
-          `(${this.#ledger.total} bytes across ${this.#ledger.size} instances), and the ` +
-          'eviction policy is "reject", so no further instance can be materialized.',
-        { key }
-      );
-    }
-
-    const instance = new InstanceRecord({
-      key,
-      entity: definition.name,
-      initial: definition.initial,
-      initialValues: definition.initialValues,
-      states: definition.states,
-      at: this.#now(),
-      cause: { type: "init", id: trigger.id as string },
-      deps: this.#runtime,
-      onIdle: () => this.#onIdle(),
-    });
-
-    this.#instances.set(key, instance);
-    this.#ledger.record(key, instance.bytes);
-    // Initialization is an entry into the initial state, so the clock on time-in-state
-    // starts here rather than at the first transition.
-    this.#temporal.enter(key, definition.name, definition.initial);
-    return instance;
-  }
-
   /**
    * Hand the trigger to this key's inbox, along with the closure that will run it.
    *
@@ -662,13 +768,6 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     );
   }
 
-  /**
-   * Run one dequeued trigger.
-   *
-   * Thin on purpose. The attempt lifecycle telemetry is emitted by `dispatch`, which is
-   * the layer that owns the attempt loop and therefore the only one that knows which
-   * attempt started, retried, or settled the trigger.
-   */
   /**
    * Run one dequeued trigger.
    *
@@ -691,7 +790,13 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       return this.#dispatch(instance, definition, trigger, depth);
     }
 
-    return this.#hydrate(instance).then(() =>
+    const forgetting = this.#forgetting.get(instance.key);
+    const hydrated =
+      forgetting === undefined
+        ? this.#hydrate(instance)
+        : forgetting.then(() => this.#hydrate(instance));
+
+    return hydrated.then(() =>
       this.#dispatch(instance, definition, trigger, depth)
     );
   }
@@ -706,31 +811,43 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       instance,
       definition,
       trigger,
-      this.#deps,
+      this.#runtime,
       depth
     );
 
-    // Only a move re-indexes. A commit that changed values alone leaves the instance where
-    // it was, and its time in state keeps running.
-    if (result.event.from !== result.event.to) {
-      this.#temporal.enter(instance.key, instance.entity, result.state);
-    }
-
-    this.#account(instance);
+    this.#residency.account(instance);
     return result;
+  }
+
+  /**
+   * Keep the indexes in step with a commit a record has just applied, and ask its rules.
+   *
+   * The record is always the one in the table:
+   * a commit is applied inside its key's turn, a busy key is never evicted or forgotten,
+   * and an attempt that outlived its turn is fenced before it can apply anything.
+   */
+  #committed(record: CommittedRecord, moved: boolean): void {
+    this.#residency.committed(record, moved);
+
+    this.#rules.committed(record, this.#residency);
   }
 
   /** Reconcile an instance with the store, reporting a reload when one happened. */
   async #hydrate(instance: AnyInstance): Promise<void> {
-    const before = instance.events.length;
+    const before = instance.lastRestored;
     await instance.ready();
+    if (!this.#residency.holds(instance)) {
+      // Asked only to load, and the store holds nothing. Or the record was released while
+      // it loaded, which only one nothing is queued on can be. Indexing either would
+      // leave the ledger and the index holding a key the runtime does not.
+      return;
+    }
 
-    const restored = instance.events
-      .slice(before)
-      .find((event) => event.type === "restored");
+    this.#residency.loaded(instance);
+    this.#rules.rearm(instance);
 
-    if (restored !== undefined && restored.type === "restored") {
-      this.#temporal.enter(instance.key, instance.entity, instance.state);
+    const restored = instance.lastRestored;
+    if (restored !== undefined && restored !== before) {
       this.#emit({
         type: "instance.restored",
         key: instance.key,
@@ -744,182 +861,19 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
     }
   }
 
-  /**
-   * Record what an instance costs and act on the budget.
-   *
-   * Runs after every commit, which is where the number changes and where the serialized
-   * values needed to measure it already exist.
-   */
-  #account(instance: AnyInstance): void {
-    this.#ledger.record(instance.key, instance.bytes);
-    const overBudget = this.#ledger.total > this.#memory.maxBytes;
-
-    this.#emit({
-      type: "memory.accounted",
-      key: instance.key,
-      entity: instance.entity,
-      bytes: instance.bytes,
-      residentBytes: this.#ledger.total,
-      residentCount: this.#ledger.size,
-      maxBytes: this.#memory.bounded ? this.#memory.maxBytes : null,
-      overBudget,
-      at: telemetryNow(),
-    });
-  }
-
-  /**
-   * A key just went idle, which is the first moment eviction is allowed to consider it.
-   *
-   * Deliberately not at commit. A commit happens inside the key's turn, when the key is by
-   * definition busy, so an instance could never evict itself however cold and however far
-   * over budget the runtime was. `maxBytes: 0` would have quietly meant "keep everything".
-   */
-  #onIdle(): void {
-    if (
-      this.#memory.policy === "lru" &&
-      this.#ledger.total > this.#memory.maxBytes
-    ) {
-      this.#evictToFit();
-    }
-  }
-
-  /**
-   * Release least-recently-used idle instances until the budget is satisfied.
-   *
-   * Idle only, always. An instance with a handler running or a trigger waiting is holding
-   * work that would be lost, so it is skipped no matter how cold it is, and the budget goes
-   * over rather than a commit going missing.
-   */
-  #evictToFit(): void {
-    for (const key of this.#ledger.lru) {
-      if (this.#ledger.total <= this.#memory.maxBytes) {
-        return;
-      }
-
-      const instance = this.#instances.get(key);
-      if (instance === undefined || !instance.idle) {
-        continue;
-      }
-
-      this.#evict(instance);
-    }
-  }
-
-  /**
-   * Stop holding an instance in memory, and report what that freed.
-   *
-   * Only the memory side. Whether the truth is preserved first, or destroyed after, is the
-   * caller's business: eviction snapshots, forgetting deletes, and the three structures
-   * that have to stay in step are the same either way.
-   */
-  #release(instance: AnyInstance): number {
-    const bytes = this.#ledger.release(instance.key);
-    this.#instances.delete(instance.key);
-    this.#temporal.remove(instance.key);
-    return bytes;
-  }
-
-  #evict(instance: AnyInstance): void {
-    const { authority } = this.#stack;
-    // Gated on a store existing, not on it being durable. Snapshotting into an ephemeral
-    // store is worth doing: it is exactly what the next in-process reload reads.
-    const snapshotted = this.#memory.snapshotOnEvict && authority !== undefined;
-
-    if (snapshotted) {
-      // Not awaited: the snapshot is an optimization for the next load, and the events it
-      // summarizes are already in the store. A failed snapshot costs replay time, never
-      // state.
-      authority
-        .snapshot(instance.key, instance.storeSnapshot(this.#now()))
-        .catch(this.#onUnhandled);
-    }
-
-    const bytes = this.#release(instance);
-
-    this.#emit({
-      type: "instance.evicted",
-      key: instance.key,
-      entity: instance.entity,
-      state: instance.state,
-      seq: instance.seq,
-      bytes,
-      snapshotted,
-      residentBytes: this.#ledger.total,
-      at: telemetryNow(),
-    });
-  }
-
-  /**
-   * Hand a committed event to every audit sink.
-   *
-   * Never awaited and never able to fail anything: an audit outage must not become a write
-   * outage. A sink that exhausts its attempts is reported and the commit stands.
-   */
-  #fanOut(event: EkmanEvent): void {
-    for (const sink of this.#audit) {
-      deliverTo(sink, event)
-        .then((failure) => {
-          if (failure !== undefined) {
-            this.#emit({
-              type: "audit.failed",
-              key: event.key,
-              entity: parseKey(event.key).entity,
-              sink: sink.name,
-              error: failure.message,
-              seq: event.seq,
-              at: telemetryNow(),
-            });
-          }
-        })
-        .catch(this.#onUnhandled);
-    }
-
-    this.#writeCaches(event);
-  }
-
-  /**
-   * Mirror an event into the cache layers.
-   *
-   * After the authority, never awaited, and a failure is reported rather than raised. The
-   * commit is already durable by this point, so a stale cache is a performance problem.
-   * Treating it as a commit failure would turn it into a correctness one.
-   */
-  #writeCaches(event: EkmanEvent): void {
-    for (const cache of this.#stack.caches) {
-      cache.append(event.key, event, previousSeq(event)).catch((error) => {
-        this.#emit({
-          type: "store.cacheFailed",
-          key: event.key,
-          entity: parseKey(event.key).entity,
-          store: cache.name,
-          error: (error as Error).message,
-          seq: event.seq,
-          at: telemetryNow(),
-        });
-      });
-    }
-  }
-
   #startSweeping(sweepMs: number | undefined): void {
     if (sweepMs === undefined) {
       return;
     }
 
-    if (!(Number.isFinite(sweepMs) && sweepMs > 0)) {
-      throw new EkmanError(
-        "INVALID_CONFIG",
-        `temporal sweepMs must be a positive number of milliseconds, received ${JSON.stringify(sweepMs)}. ` +
-          "Omit it to sweep only when sweep() is called."
-      );
-    }
-
-    this.#sweepTimer = setInterval(() => {
-      this.sweep().catch(this.#onUnhandled);
-    }, sweepMs);
-
-    // Sweeping is background work. A runtime that is otherwise finished should be allowed
-    // to exit rather than being held open by its own housekeeping.
-    this.#sweepTimer.unref?.();
+    assertSweepInterval(
+      sweepMs,
+      "temporal",
+      "sweep only when sweep() is called"
+    );
+    this.#temporalPass.every(sweepMs, () => {
+      this.sweep().catch(this.#unhandled("sweep"));
+    });
   }
 
   #startStorageSweeping(sweepMs: number | undefined): void {
@@ -927,13 +881,11 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       return;
     }
 
-    if (!(Number.isFinite(sweepMs) && sweepMs > 0)) {
-      throw new EkmanError(
-        "INVALID_CONFIG",
-        `storage sweepMs must be a positive number of milliseconds, received ${JSON.stringify(sweepMs)}. ` +
-          "Omit it to reclaim only when sweepStorage() is called."
-      );
-    }
+    assertSweepInterval(
+      sweepMs,
+      "storage",
+      "reclaim only when sweepStorage() is called"
+    );
 
     // An interval over layers that cannot compact would wake up forever and reclaim
     // nothing, which is a setting that looks configured and does nothing. Refused at
@@ -947,372 +899,130 @@ export class Ekman<D extends readonly AnyEntityDefinition[] = []> {
       );
     }
 
-    this.#storageSweepTimer = setInterval(() => {
-      this.sweepStorage().catch(this.#onUnhandled);
-    }, sweepMs);
-
-    // Housekeeping, exactly as the temporal sweep is: a runtime that is otherwise finished
-    // should be free to exit rather than being held open by its own reclaiming.
-    this.#storageSweepTimer.unref?.();
-  }
-
-  /**
-   * Whether a snapshot has absorbed events this stream can no longer show.
-   *
-   * Asked of the events rather than of the store, so every adapter answers it the same way
-   * with no capability for it: a whole stream starts where the instance did, and one that
-   * starts later is missing its beginning.
-   *
-   * The empty stream is the case events alone cannot answer, because compaction can fold
-   * every event a key has and leave nothing behind to be later than anything. A key nobody
-   * addressed and a key wholly inside its snapshot look identical from here, and only the
-   * snapshot tells them apart.
-   */
-  async #wasCompacted(
-    key: string,
-    stored: readonly EkmanEvent[],
-    authority: Store
-  ): Promise<boolean> {
-    const [earliest] = stored;
-    if (earliest !== undefined) {
-      return earliest.seq > FIRST_SEQ;
-    }
-    return (await authority.load(key))?.snapshot !== undefined;
-  }
-
-  async #sweepStorageOnce(): Promise<StorageSweep> {
-    let logs = 0;
-    let reclaimed = 0;
-    const overBudget: string[] = [];
-
-    for (const layer of this.#stack.layers) {
-      if (!(layer.capabilities.compact && layer.compact)) {
-        continue;
-      }
-
-      // biome-ignore lint/performance/noAwaitInLoops: layers are swept in stack order so the telemetry reads in that order, and so two layers never rewrite their logs at the same moment
-      const swept = await layer.compact();
-      logs += swept.logs;
-      reclaimed += swept.reclaimed;
-      if (!swept.withinBudget) {
-        overBudget.push(layer.name);
-      }
-
-      this.#emit({
-        type: "storage.swept",
-        at: telemetryNow(),
-        store: layer.name,
-        logs: swept.logs,
-        reclaimed: swept.reclaimed,
-        // Read after the pass, so this is what the layer holds now rather than what it
-        // held when the pass started.
-        bytes: layer.usage?.bytes ?? 0,
-        maxBytes: layer.usage?.maxBytes ?? null,
-        withinBudget: swept.withinBudget,
-      });
-    }
-
-    return Object.freeze({
-      logs,
-      reclaimed,
-      overBudget: Object.freeze(overBudget),
-    });
-  }
-
-  async #sweepOnce(): Promise<number> {
-    const at = this.#now();
-    let fired = 0;
-
-    for (const definition of this.#definitions.values()) {
-      const byState = definition.constraints?.temporalByState;
-      if (byState === undefined) {
-        continue;
-      }
-
-      for (const [state, constraints] of byState) {
-        for (const key of this.#temporal.keys(definition.name, state)) {
-          // biome-ignore lint/performance/noAwaitInLoops: an escalation dispatches like any other trigger, and a pass that fired several should report every one of them as processed
-          fired += await this.#sweepInstance(key, state, constraints, at);
-        }
-      }
-    }
-
-    return fired;
-  }
-
-  /** Evaluate one instance against the constraints watching the state it is in. */
-  async #sweepInstance(
-    key: string,
-    state: string,
-    constraints: readonly CompiledTemporal[],
-    at: number
-  ): Promise<number> {
-    const aged = this.#ageOf(key, state, at);
-    if (aged === undefined) {
-      return 0;
-    }
-
-    const { instance, elapsedMs } = aged;
-    let fired = 0;
-
-    for (const constraint of constraints) {
-      if (elapsedMs < constraint.within || instance.hasFired(constraint.name)) {
-        continue;
-      }
-
-      instance.markFired(constraint.name);
-      fired += 1;
-      // biome-ignore lint/performance/noAwaitInLoops: two constraints on one state fire in declaration order, and the second observes what the first produced
-      await this.#escalate(instance, constraint, elapsedMs, at);
-    }
-
-    return fired;
-  }
-
-  /**
-   * How long a resident key has been in a state, or undefined if it is not there.
-   *
-   * The single place time-in-state is measured. A temporal constraint asks with a bound
-   * per constraint; a query asks with one bound for everything. Two implementations of the
-   * same question is how the two answers start disagreeing, so there is one.
-   *
-   * The state guard costs nothing and means a future indexing bug degrades into a missed
-   * escalation rather than one aimed at the wrong state.
-   */
-  #ageOf(
-    key: string,
-    state: string,
-    at: number
-  ): { instance: AnyInstance; elapsedMs: number } | undefined {
-    const instance = this.#instances.get(key);
-    if (instance === undefined || instance.state !== state) {
-      return;
-    }
-    return { instance, elapsedMs: at - instance.enteredAt };
-  }
-
-  /** Resident instances matching the criteria, read through the same index the sweep uses. */
-  *#residentMatches(
-    criteria: QueryCriteria,
-    olderThanMs: number | undefined,
-    at: number
-  ): Generator<QueryMatch> {
-    const states =
-      criteria.state === undefined
-        ? this.#temporal.states(criteria.entity)
-        : [criteria.state];
-
-    for (const state of states) {
-      for (const key of this.#temporal.keys(criteria.entity, state)) {
-        const aged = this.#ageOf(key, state, at);
-        if (aged === undefined || (olderThanMs ?? 0) > aged.elapsedMs) {
-          continue;
-        }
-
-        yield {
-          key,
-          entity: criteria.entity,
-          state,
-          seq: aged.instance.seq,
-          enteredAt: aged.instance.enteredAt,
-          ageMs: aged.elapsedMs,
-          resident: true,
-        };
-      }
-    }
-  }
-
-  /**
-   * Add the store's matches, leaving any key the resident view already answered.
-   *
-   * Resident wins because it is the more current of the two: the store lags by whatever is
-   * queued behind the last commit, and an instance in memory is by definition up to date.
-   */
-  async #scanInto(
-    matches: Map<string, QueryMatch>,
-    authority: Store,
-    criteria: QueryCriteria,
-    olderThanMs: number | undefined,
-    at: number,
-    reasons: Set<Partiality>
-  ): Promise<void> {
-    const result = await authority.scan({
-      entity: criteria.entity,
-      now: at,
-      ...(criteria.state === undefined ? {} : { state: criteria.state }),
-      ...(olderThanMs === undefined ? {} : { olderThanMs }),
-    });
-
-    if (!result.complete) {
-      reasons.add("limit-reached");
-    }
-
-    // A store that could not apply a filter says so, and the runtime applies it here
-    // rather than returning rows the caller did not ask for.
-    const unsupported = new Set(result.unsupported);
-    if (unsupported.size > 0) {
-      reasons.add("unsupported-criteria");
-    }
-
-    for (const match of result.matches) {
-      if (matches.has(match.key)) {
-        continue;
-      }
-
-      const ageMs = at - match.enteredAt;
-      const wrongState =
-        unsupported.has("state") &&
-        criteria.state !== undefined &&
-        match.state !== criteria.state;
-
-      if (
-        wrongState ||
-        (unsupported.has("olderThan") && (olderThanMs ?? 0) > ageMs)
-      ) {
-        continue;
-      }
-
-      matches.set(match.key, { ...match, ageMs, resident: false });
-    }
-  }
-
-  /**
-   * Record a temporal violation and, unless it is only a warning, deliver its escalation.
-   *
-   * The escalation goes through `send()`, so it queues behind whatever the instance is
-   * already doing and dispatches against the state it is in when its turn comes. The
-   * runtime never writes state on its own: `escalateTo` rides on the trigger, and the
-   * handler decides.
-   */
-  async #escalate(
-    instance: AnyInstance,
-    constraint: CompiledTemporal,
-    elapsedMs: number,
-    at: number
-  ): Promise<void> {
-    // Allocated even for a warning, so the recorded violation always has a cause that can
-    // be traced, and so the counter advances identically under either policy.
-    const id = this.#nextTriggerId();
-    const trigger = {
-      type: constraint.trigger,
-      id,
-      constraint: constraint.name,
-      state: constraint.in,
-      sinceMs: elapsedMs,
-      ...(constraint.escalateTo === undefined
-        ? {}
-        : { escalateTo: constraint.escalateTo }),
-    } as Trigger;
-
-    const reason =
-      `has been in "${constraint.in}" for ${elapsedMs}ms, over its bound of ` +
-      `${constraint.within}ms`;
-
-    instance.violation({
-      violation: {
-        kind: "temporal",
-        name: constraint.name,
-        policy: constraint.policy,
-        reason,
-      },
-      at,
-      cause: { type: constraint.trigger, id },
-    });
-
-    this.#emit({
-      type: "constraint.violated",
-      key: instance.key,
-      entity: instance.entity,
-      state: constraint.in,
-      kind: "temporal",
-      constraint: constraint.name,
-      policy: constraint.policy,
-      reason,
-      trigger: { type: constraint.trigger, id },
-      at: telemetryNow(),
-    });
-
-    if (constraint.policy === "warn") {
-      return;
-    }
-
-    let delivered = true;
-    try {
-      await this.send(instance.key, trigger);
-    } catch (error) {
-      // An escalation that cannot be delivered is itself worth knowing about: the usual
-      // cause is that the state an instance is stuck in has no handler, which is exactly
-      // the situation the constraint was watching for.
-      delivered = false;
-      this.#onUnhandled(error);
-    }
-
-    this.#emit({
-      type: "constraint.escalated",
-      key: instance.key,
-      entity: instance.entity,
-      constraint: constraint.name,
-      state: constraint.in,
-      elapsedMs,
-      escalateTo: constraint.escalateTo,
-      trigger: { type: constraint.trigger, id },
-      delivered,
-      at: telemetryNow(),
+    this.#storagePass.every(sweepMs, () => {
+      this.sweepStorage().catch(this.#unhandled("storage-sweep"));
     });
   }
 
   #emit(event: TelemetryEvent): void {
-    emit(this.#runtime.telemetry, event, this.#onUnhandled);
+    emit(this.#telemetry, event, this.#onUnhandled);
+  }
+
+  /** A rejection handler that reports to `onUnhandled` with where the failure came from. */
+  #unhandled(
+    source: UnhandledContext["source"],
+    key?: string
+  ): (error: unknown) => void {
+    const context = key === undefined ? { source } : { source, key };
+    return (error) => this.#onUnhandled(error, context);
   }
 }
 
-/** What an overlapping storage sweep returns: a pass that did not run reclaimed nothing. */
-const EMPTY_SWEEP: StorageSweep = Object.freeze({
-  logs: 0,
-  reclaimed: 0,
-  overBudget: Object.freeze([]),
-});
-
-const NONE: readonly Partiality[] = Object.freeze([]);
-const NO_DURABLE_STORE: readonly Partiality[] = Object.freeze([
-  "no-durable-store" as const,
-]);
-const RESIDENT_ONLY: readonly string[] = Object.freeze(["resident"]);
-const COMPACTED: readonly Partiality[] = Object.freeze(["compacted"]);
-
-/** The first sequence any instance holds, so a stream starting later has lost its head. */
-const FIRST_SEQ = 0;
-
-/** Why a history is not the whole story, if it is not. */
-function partiality(
-  durable: boolean,
-  compacted: boolean
-): readonly Partiality[] {
-  if (!durable) {
-    return NO_DURABLE_STORE;
-  }
-  return compacted ? COMPACTED : NONE;
-}
-
 /**
- * Oldest first, which is the order the question is asked in: "what has been stuck longest".
- * Ties break on the key so a limited answer is the same answer twice.
- */
-function byAgeThenKey(a: QueryMatch, b: QueryMatch): number {
-  return b.ageMs - a.ageMs || a.key.localeCompare(b.key);
-}
-
-function defaultOnUnhandled(error: unknown): void {
-  console.error("[ekman] unhandled failure from post()", error);
-}
-
-/**
- * What a cache append is conditional on.
+ * Wait for every one of these to finish, then fail with the first failure if there was one.
  *
- * A commit is conditional on the sequence before it, so a cache that has fallen behind
- * refuses the write rather than accepting a hole. Anything else carries the current
- * sequence, because it does not advance one.
+ * `Promise.all` rejects as soon as one does, while the others are still running. For a
+ * delete across store layers that is too early: whatever waits on the deletion would be
+ * let through while a layer was still deleting, and could have a commit erased under it.
  */
-function previousSeq(event: EkmanEvent): number {
-  return event.type === "transition" ? event.seq - 1 : event.seq;
+async function allSettledOrThrow(
+  work: readonly (Promise<unknown> | undefined)[]
+): Promise<void> {
+  const failed = (await Promise.allSettled(work)).find(
+    (outcome) => outcome.status === "rejected"
+  );
+  if (failed !== undefined) {
+    throw failed.reason;
+  }
+}
+
+/** How long `close()` waits for in-flight work unless told otherwise. */
+const DEFAULT_CLOSE_TIMEOUT_MS = 30_000;
+
+/**
+ * Whether `work` settled before `ms` passed.
+ *
+ * The timer keeps the process alive until one or the other happens. An awaited `close()`
+ * has code after it, and a process that exited while waiting on a handler that never
+ * settles would skip closing the store layers along with everything else.
+ */
+function settledWithin(work: Promise<unknown>, ms: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), ms);
+    work.finally(() => {
+      clearTimeout(timer);
+      resolve(true);
+    });
+  });
+}
+
+const RUNTIME_KEYS = [
+  "entities",
+  "inbox",
+  "temporal",
+  "storage",
+  "coordination",
+  "cache",
+  "store",
+  "memory",
+  "audit",
+  "execution",
+  "telemetry",
+  "now",
+  "onUnhandled",
+] as const;
+
+const SWEEP_KEYS = ["sweepMs"] as const;
+
+const CACHE_KEYS = ["timeoutMs"] as const;
+
+/**
+ * The time bound on a call into a cache layer, refused when a timer could not hold it.
+ *
+ * There is no way to ask for no bound. A cache that may take forever is the failure the
+ * bound exists to contain, and the largest value a timer holds is over three weeks.
+ */
+function resolveCacheTimeout(cache: CacheConfig | undefined): number {
+  const timeoutMs = cache?.timeoutMs ?? DEFAULT_CACHE_TIMEOUT_MS;
+  if (!(timeoutMs > 0 && timeoutMs <= MAX_TIMER_MS)) {
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      `cache timeoutMs must be a positive number of milliseconds, at most ${MAX_TIMER_MS}, received ${JSON.stringify(timeoutMs)}`
+    );
+  }
+  return timeoutMs;
+}
+
+/**
+ * Refuse a runtime config the runtime could not honour, before anything is built from it.
+ *
+ * Unrecognized options first, at every level that takes named ones, so a misspelling is
+ * an error rather than a default nobody asked for. Then the runtime-wide execution policy,
+ * which would otherwise only be found unsatisfiable by the first trigger to arrive. Inbox
+ * and memory options are checked where they are resolved.
+ */
+function assertRuntimeConfig(config: EkmanConfig): void {
+  assertKnownKeys("the runtime config", config, RUNTIME_KEYS);
+  assertKnownKeys("temporal", config.temporal, SWEEP_KEYS);
+  assertKnownKeys("storage", config.storage, SWEEP_KEYS);
+  assertKnownKeys("cache", config.cache, CACHE_KEYS);
+  assertKnownKeys("telemetry", config.telemetry, [
+    ...TELEMETRY_EVENT_TYPES,
+    TELEMETRY_FALLBACK,
+  ]);
+
+  assertPolicyKeys(config.execution, "runtime execution policy");
+  resolvePolicy(config.execution, undefined, "runtime execution policy");
+}
+
+function noop(): void {
+  // Deliberately empty: settles a promise whose outcome is somebody else's to report.
+}
+
+function defaultOnUnhandled(error: unknown, context: UnhandledContext): void {
+  const where =
+    context.key === undefined
+      ? context.source
+      : `${context.source} for ${context.key}`;
+  console.error(`[ekman] unhandled failure (${where})`, error);
 }

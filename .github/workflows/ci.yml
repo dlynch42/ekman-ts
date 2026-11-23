@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, release]
+    branches: [main, release, rc]
   pull_request:
 
 permissions:
@@ -17,9 +17,9 @@ jobs:
     name: Lint & typecheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24.x
           cache: npm
@@ -29,6 +29,15 @@ jobs:
         run: npm run lint
       - name: Typecheck
         run: npm run typecheck
+      # The samples in README.md and docs/ that are tagged for it, compiled against src/.
+      - name: Typecheck doc samples
+        run: npm run check:docs
+      # Boots the example service and drives it over HTTP. Nothing else exercises it, and
+      # its checks on the request boundary are worth nothing if they only run by hand.
+      - name: Example smoke test
+        run: npm run example:smoke
+      - name: Service health example smoke test
+        run: npm run example:health:smoke
 
   test:
     name: Test (Node ${{ matrix.node-version }})
@@ -36,13 +45,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Matches engines.node (>=20). The oldest supported version is the one
+        # Matches engines.node (>=22.12). The oldest supported line is the one
         # most likely to break, so it is not optional here.
-        node-version: [20.x, 22.x, 24.x]
+        node-version: [22.x, 24.x]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
@@ -56,9 +65,9 @@ jobs:
     name: Coverage
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22.x
           cache: npm
@@ -72,9 +81,9 @@ jobs:
     name: Build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24.x
           cache: npm
@@ -87,9 +96,9 @@ jobs:
     name: Conformance report
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24.x
           cache: npm
@@ -99,6 +108,9 @@ jobs:
       # pass/fail per scenario per level, visible without opening a log, which
       # is what keeps the conformance claim checkable rather than assertable.
       - name: Conformance
+        # Named explicitly so the step runs with pipefail. The default shell does not set
+        # it, and `tee` would then hide a failing report behind its own exit status.
+        shell: bash
         run: |
           {
             echo '## Conformance'
@@ -108,17 +120,60 @@ jobs:
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
+  demos:
+    name: Demos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.x
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      # Each demo takes one claim the docs make and asserts it, so a demo that fails is a
+      # claim that stopped being true. One step each, so the failure names the claim.
+      - name: demo:ordering
+        run: npm run demo:ordering
+      - name: demo:recovery
+        run: npm run demo:recovery
+      - name: demo:no-going-backwards
+        run: npm run demo:no-going-backwards
+      - name: demo:memory-bound
+        run: npm run demo:memory-bound
+      - name: demo:retention
+        run: npm run demo:retention
+      - name: demo:fencing
+        run: npm run demo:fencing
+      - name: demo:stuck
+        run: npm run demo:stuck
+      - name: demo:execution-policy
+        run: npm run demo:execution-policy
+      - name: demo:durability
+        run: npm run demo:durability
+      - name: demo:audit
+        run: npm run demo:audit
+      - name: demo:coordination
+        run: npm run demo:coordination
+      - name: demo:concurrency
+        run: npm run demo:concurrency
+      - name: demo:unknown
+        run: npm run demo:unknown
+      - name: demo:service-health
+        run: npm run demo:service-health
+
   package:
     name: Package (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        node-version: [20.x, 22.x, 24.x]
+        node-version: [22.x, 24.x]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm

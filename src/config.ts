@@ -1,9 +1,12 @@
+import type { Caches } from "./caches";
 import { EkmanError } from "./errors";
-import type { EkmanEvent } from "./events";
+import type { TransitionEvent } from "./events";
+import type { InstanceRecord } from "./instance";
 import type { ResolvedMemoryConfig } from "./memory";
+import type { ExecutionPolicy } from "./policy";
 import type { ResolvedStack } from "./stack";
-import type { TelemetrySink } from "./telemetry";
-import type { InboxConfig, OverflowPolicy } from "./types";
+import type { TelemetryEvent } from "./telemetry";
+import type { InboxConfig, OnUnhandled, OverflowPolicy } from "./types";
 
 /**
  * Runtime configuration, resolved once at construction.
@@ -28,24 +31,88 @@ export interface ResolvedInboxConfig {
   readonly recordOverflow: boolean;
 }
 
-/** Everything the instances and their inboxes need from the runtime that owns them. */
+/**
+ * Everything the runtime's parts need from the runtime that owns them: its instances and
+ * their inboxes, a dispatch, the sweeps and the queries.
+ *
+ * One bag, built once, so there is a single place each of these is defined and a part is
+ * handed the same clock and the same telemetry as every other.
+ */
 export interface RuntimeDeps {
   readonly now: () => number;
-  readonly telemetry: TelemetrySink | undefined;
-  readonly onUnhandled: (error: unknown) => void;
+  /** Report a telemetry event to whichever sink entry takes it. */
+  readonly emit: (event: TelemetryEvent) => void;
+  readonly onUnhandled: OnUnhandled;
+  /** The runtime-wide execution policy, under every entity and state override. */
+  readonly policy: ExecutionPolicy | undefined;
+  /**
+   * Bring a record another writer has overtaken back in step with the store, through the
+   * runtime, so its indexes and the restore telemetry follow.
+   */
+  readonly reconcile: (instance: InstanceRecord) => Promise<void>;
+  /** Aborted when the runtime begins closing, which ends any wait between attempts. */
+  readonly closing: AbortSignal;
   readonly inbox: ResolvedInboxConfig;
   /** Which layer owns the truth, and which are caches. */
   readonly stack: ResolvedStack;
+  /** The stack's cache layers, and everything that keeps them worth reading. */
+  readonly caches: Caches;
   readonly memory: ResolvedMemoryConfig;
   /**
    * Hand a committed event to the audit sinks. Never awaited, never able to fail a commit.
    */
-  readonly audit: (event: EkmanEvent) => void;
+  readonly audit: (event: TransitionEvent) => void;
+  /**
+   * Called once a commit has been applied to a record, every time.
+   *
+   * The runtime keeps its indexes in step from here rather than from what a dispatch
+   * returns, so a commit is indexed and accounted however the attempt that made it ended.
+   *
+   * @param record the record the commit was applied to
+   * @param moved whether the commit changed its state
+   */
+  readonly committed: (record: CommittedRecord, moved: boolean) => void;
 }
+
+/** What the runtime reads off a record that has just committed. */
+export interface CommittedRecord {
+  readonly key: string;
+  readonly entity: string;
+  readonly state: string;
+  readonly bytes: number;
+}
+
+/**
+ * Refuse keys a config object does not have.
+ *
+ * A misspelled option is otherwise ignored, and the setting it was meant to change keeps
+ * its default with nothing to say so: `maxbytes` leaves the budget unlimited.
+ *
+ * @param where what is being configured, for the error
+ * @param value the object as the caller passed it
+ * @param known every key it may carry
+ */
+export function assertKnownKeys(
+  where: string,
+  value: object | undefined,
+  known: readonly string[]
+): void {
+  for (const key of Object.keys(value ?? {})) {
+    if (!known.includes(key)) {
+      throw new EkmanError(
+        "INVALID_CONFIG",
+        `${where} has an unrecognized option "${key}". Known options: ${known.join(", ")}.`
+      );
+    }
+  }
+}
+
+const INBOX_KEYS = ["capacity", "overflow", "recordOverflow"] as const;
 
 export function resolveInboxConfig(
   config: InboxConfig | undefined
 ): ResolvedInboxConfig {
+  assertKnownKeys("inbox", config, INBOX_KEYS);
   const capacity = config?.capacity ?? DEFAULT_CAPACITY;
   const overflow = config?.overflow ?? "reject";
 

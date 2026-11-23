@@ -3,7 +3,7 @@ import type { ErrorCode } from "./errors";
 import { EkmanError } from "./errors";
 import type { EventCause } from "./events";
 import type { TelemetryEvent } from "./telemetry";
-import { emit, telemetryNow, triggerRef } from "./telemetry";
+import { telemetryNow, triggerRef } from "./telemetry";
 import type { CommitResult, Trigger } from "./types";
 
 /**
@@ -56,6 +56,7 @@ export class Inbox {
   #running: boolean;
 
   readonly #onIdle: () => void;
+  readonly #idleWaiters: (() => void)[] = [];
 
   constructor(args: {
     key: string;
@@ -93,6 +94,19 @@ export class Inbox {
   }
 
   /**
+   * Resolves the next time nothing is running and nothing is waiting, or at once if that
+   * is already so. What a shutdown waits on, so work that was accepted is allowed to land.
+   */
+  whenIdle(): Promise<void> {
+    if (this.idle) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      this.#idleWaiters.push(resolve);
+    });
+  }
+
+  /**
    * Accept a trigger, or apply the overflow policy.
    *
    * Runs synchronously from `send()`, which is what makes FIFO order the same as call
@@ -114,7 +128,7 @@ export class Inbox {
       this.#queue.push({ trigger, run, resolve, reject });
     });
 
-    this.#emit({
+    this.#deps.emit({
       type: "inbox.enqueued",
       key: this.#key,
       entity: this.#entity,
@@ -131,7 +145,9 @@ export class Inbox {
       // The drain settles each entry's own promise, so nothing awaits it here. If the
       // loop itself ever breaks there is no caller to receive that, and it goes where
       // every other uncaught runtime failure does rather than becoming a bare rejection.
-      this.#drain().catch(this.#deps.onUnhandled);
+      this.#drain().catch((error: unknown) => {
+        this.#deps.onUnhandled(error, { source: "inbox", key: this.#key });
+      });
     }
 
     return settled;
@@ -205,7 +221,7 @@ export class Inbox {
     code: "INBOX_OVERFLOW" | "TRIGGER_DROPPED",
     event: TelemetryEvent
   ): EkmanError {
-    this.#emit(event);
+    this.#deps.emit(event);
 
     const { capacity, overflow } = this.#config;
     const full = `the inbox for ${this.#key} is full at its capacity of ${capacity} waiting triggers`;
@@ -224,10 +240,6 @@ export class Inbox {
     }
 
     return new EkmanError(code, reason, { key: this.#key });
-  }
-
-  #emit(event: TelemetryEvent): void {
-    emit(this.#deps.telemetry, event, this.#deps.onUnhandled);
   }
 
   /**
@@ -254,6 +266,9 @@ export class Inbox {
     }
 
     this.#running = false;
+    for (const resolve of this.#idleWaiters.splice(0)) {
+      resolve();
+    }
     // The key is idle only now. Eviction is allowed to touch it from here and not before,
     // which is why the budget acts here rather than at the commit that blew it.
     this.#onIdle();

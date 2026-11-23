@@ -16,6 +16,8 @@ export const ERROR_CODES = [
   "UNKNOWN_STATE",
   /** The trigger's type is not in the entity's declared trigger list. */
   "UNKNOWN_TRIGGER",
+  /** The entity recognizes the trigger's type, and the current state has no handler for it. */
+  "UNHANDLED_TRIGGER",
   /** The handler produced `fail`, or threw. */
   "HANDLER_FAILED",
   /** The inbox was full and the overflow policy is `reject`. */
@@ -30,7 +32,11 @@ export const ERROR_CODES = [
   "CONSTRAINT_VIOLATED",
   /** A conditional append found the key at a different sequence. Nothing was written. */
   "STORE_CONFLICT",
-  /** The commit authority could not be reached, so the commit did not happen. */
+  /**
+   * The store could not do what was asked, so the commit did not happen. Raised by a
+   * store for a failure of whatever it stands on: the file store raises it for a
+   * filesystem error or a log it cannot parse.
+   */
   "STORE_UNAVAILABLE",
   /**
    * A store is at its retention budget and its policy refuses new instances rather than
@@ -57,6 +63,8 @@ export const ERROR_CODES = [
   "INVALID_CONFIG",
   /** Configuration is recognized but not implemented yet. Never silently ignored. */
   "NOT_IMPLEMENTED",
+  /** The runtime has been closed, so no new trigger can be accepted. */
+  "RUNTIME_CLOSED",
 ] as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[number];
@@ -101,7 +109,7 @@ export class EkmanError extends Error {
     // `name` is a class field, so it is assigned after super() and after Error's own
     // stack capture. Re-capture so the stack header reads "EkmanError", not "Error".
     if (Error.captureStackTrace) {
-      Error.captureStackTrace(this, EkmanError);
+      Error.captureStackTrace(this, new.target);
     } else {
       this.stack = composeStack(this.name, message, this.stack);
     }

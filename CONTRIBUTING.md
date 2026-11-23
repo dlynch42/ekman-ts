@@ -38,14 +38,15 @@ For small fixes (typos, doc clarifications, obvious one-line bugs), feel free to
 
 ## Releases
 
-Releases are automated with [`auto`](https://intuit.github.io/auto/). There are two branches and two channels:
+Releases are automated with [`auto`](https://intuit.github.io/auto/). There are three branches and two published channels:
 
-| Branch | Runs | Publishes | Install with |
+| Branch | Role | Publishes | Install with |
 |---|---|---|---|
-| `release` | on every merge | a release candidate, `X.Y.Z-rc.N` | `npm install ekman@rc` |
-| `main` | when `release` is merged into it | the stable release, `X.Y.Z` | `npm install ekman` |
+| `release` | trunk, where work lands | nothing | |
+| `rc` | prerelease | `X.Y.Z-rc.N` | `npm install ekman@rc` |
+| `main` | stable | `X.Y.Z` | `npm install ekman` |
 
-Work lands on `release`, so every merged PR is installable as a release candidate within a few minutes. When a batch is ready, a maintainer opens a `release` into `main` PR and the accumulated changes graduate to a stable version under the `latest` tag. `auto` picks the semver bump from the merged PRs' labels, generates `CHANGELOG.md`, bumps the version in `package.json`, creates the `vX.Y.Z` tag and GitHub release, and publishes to npm.
+Changes promote in one direction: a pull request lands on `release`, a maintainer merges `release` into `rc` to cut a release candidate, and merges `rc` into `main` to graduate it to a stable version under the `latest` tag. `auto` picks the semver bump from the merged pull requests' labels, generates `CHANGELOG.md`, bumps the version in `package.json`, creates the `vX.Y.Z` tag and GitHub release, and publishes to npm.
 
 A release candidate's number is derived, not chosen: the bump ratchets up and never down. If a `minor` PR merges and then a `patch` PR merges, the second lands as `0.2.0-rc.1`, not `0.1.1-rc.0`. The pending minor is not lost.
 
@@ -65,9 +66,13 @@ Each PR wants two labels. The topic labels (`spec`, `runtime`, `constraints`, `s
 
 The label set itself lives in `.autorc` and is applied to the repository with `npx auto create-labels`.
 
+Releases are published by the `Release` workflow and nowhere else. It runs every check in a job that holds no secret, then publishes that job's build from a second job that installs with lifecycle scripts off. `package.json` has no `prepublishOnly`, so an `npm publish` from a laptop runs no checks at all. Do not publish by hand.
+
+A PR whose change a user will notice should carry a `## Release Notes` section in its body. `auto` copies that section into the changelog in place of the PR title, so an entry reads as a note to someone upgrading and not as a commit subject.
+
 ## Getting set up
 
-Ekman is a TypeScript project and requires Node.js 20 or newer. It has no runtime dependencies, and the file store writes under `.ekman/` in the working directory.
+Ekman is a TypeScript project and requires Node.js 22.12 or newer. That is the floor for using the package. Working on it wants a current Node 22 or 24, since the build and lint tooling move faster than the floor does. It has no runtime dependencies, and the file store writes under `.ekman/` beside the nearest `package.json` at or above the working directory, which for a checkout of this repository is its root.
 
 ```bash
 git clone https://github.com/dlynch42/ekman-ts
@@ -84,7 +89,9 @@ npm run typecheck      # tsc --noEmit
 npm run lint           # ultracite / biome, no writes. `npm run format` autofixes
 npm test               # Vitest unit tests plus the conformance suite
 npm run conformance    # standalone report, pass/fail per scenario per level
-npm run test:coverage  # coverage gate. Floor is 90%; actual coverage is 100%
+npm run test:coverage  # coverage gate. Floor is 90%; actual coverage is about 99%
+npm run check:docs     # typechecks the samples tagged `ts check` in README.md and docs/
+npm run example:smoke && npm run example:health:smoke   # boots both example services
 ```
 
 If you changed anything about how the package is built or what it exports:
@@ -108,11 +115,14 @@ CI runs the same set. They must pass.
 | `docs/` | Public reference documentation. |
 | `demos/` | Runnable programs, one per behaviour. Each asserts. |
 | `benchmarks/` | Performance suites and their recorded baselines. |
-| `examples/` | A worked service built on Ekman. |
+| `examples/` | Two worked services built on Ekman: one shaped like memory, one like a workflow. |
+
+Inside `src/`, [docs/architecture.md](./docs/architecture.md) says which module owns what and
+what each must not know about. Read it before moving code between modules.
 
 ## What Ekman is (and isn't)
 
-Ekman is an **embedded runtime for addressable stateful instances**. Each instance is identified by a human-readable key, holds its own state and values, and processes its triggers one at a time. Around that it owns the operational layer: transition history, constraints, retries and timeouts, queries, and a memory budget. It is constructed in your process. A runtime you embed, not a platform you operate.
+Ekman is **per-key memory and state for the things a service watches**, as an embedded runtime. Each instance is identified by a human-readable key, holds its own state and values, and processes its triggers one at a time. Around that it owns the operational layer: transition history, constraints, retries and timeouts, queries, and a memory budget. It is constructed in your process. A runtime you embed, not a platform you operate.
 
 It is **not** an orchestration platform, a workflow DSL, transport-coupled, a distributed transaction coordinator, or durable by default.
 
@@ -132,7 +142,7 @@ If a proposal blurs the line, expect pushback. This is not a marketing rule. It 
 
 Treat these as stable surface and don't change them casually:
 
-1. **Everything exported from `src/index.ts`.** That barrel is the entire public surface, deliberately. Removing or renaming an export is a breaking change.
+1. **Everything exported from `src/index.ts` and from `src/stores/index.ts`,** which is published as `ekman/store` for store adapters. Those two barrels are the entire public surface, deliberately. Removing or renaming an export is a breaking change.
 2. **The key format** `<entity>:<segment>...`. Keys are the public identity and appear in history, queries, telemetry, log filenames and error messages.
 3. **The error codes** in `src/errors.ts`. Callers branch on `code`, so the set and their meanings are contract. Messages are not.
 4. **The telemetry event names and shapes** in `src/telemetry.ts`. These land in other people's metrics pipelines.

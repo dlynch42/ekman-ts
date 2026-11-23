@@ -45,6 +45,7 @@ describe("EkmanError", () => {
       "UNKNOWN_ENTITY",
       "UNKNOWN_STATE",
       "UNKNOWN_TRIGGER",
+      "UNHANDLED_TRIGGER",
       "HANDLER_FAILED",
       "INBOX_OVERFLOW",
       "TRIGGER_DROPPED",
@@ -62,6 +63,7 @@ describe("EkmanError", () => {
       "INITIAL_STATE_NOT_IN_STATES",
       "INVALID_CONFIG",
       "NOT_IMPLEMENTED",
+      "RUNTIME_CLOSED",
     ]);
   });
 });

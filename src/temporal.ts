@@ -1,3 +1,7 @@
+import type { ErrorCode } from "./errors";
+import { isEkmanError } from "./errors";
+import type { EkmanEvent, EventCause } from "./events";
+
 /**
  * The index of who is sitting where, and since when.
  *
@@ -69,8 +73,302 @@ export class TemporalIndex {
     return states === undefined ? [] : [...states.keys()];
   }
 
-  /** How many keys are indexed. Resident instances only, by construction. */
+  /**
+   * How many keys are indexed. Resident instances only, by construction: an instance a
+   * store holds and this runtime does not is found by scanning the store.
+   */
   get size(): number {
     return this.#placement.size;
   }
+}
+
+/**
+ * How one attempt to escalate a temporal constraint ended.
+ *
+ * `delivered` and `warned` are the two ways of having said what there was to say. The two
+ * refusals differ in what the next sweep should do: a `refused` escalation would be refused
+ * again, so the constraint is done for this entry into its state, while one
+ * `refused-transiently` was turned away by a condition that passes and is owed another try.
+ */
+export type EscalationOutcome =
+  | "delivered"
+  | "warned"
+  | "refused"
+  | "refused-transiently";
+
+/**
+ * Refusals that say nothing about the trigger itself: the inbox or the memory budget was
+ * full, the attempt ran out of time, the store could not take the write just then, or the
+ * runtime was closing. The last is owed to whichever runtime loads the instance next.
+ */
+const TRANSIENT_REFUSALS: ReadonlySet<ErrorCode> = new Set<ErrorCode>([
+  "INBOX_OVERFLOW",
+  "TRIGGER_DROPPED",
+  "MEMORY_EXHAUSTED",
+  "HANDLER_TIMEOUT",
+  "STORE_CONFLICT",
+  "STORE_UNAVAILABLE",
+  "STORE_FULL",
+  "RUNTIME_CLOSED",
+]);
+
+/** Classify the error an escalation's `send()` rejected with. */
+export function refusalOutcome(
+  error: unknown
+): Extract<EscalationOutcome, "refused" | "refused-transiently"> {
+  return isEkmanError(error) && TRANSIENT_REFUSALS.has(error.code)
+    ? "refused-transiently"
+    : "refused";
+}
+
+/**
+ * What an instance's time-in-state bounds and rules have already said about its current
+ * stay in a state, in a form a store can hold.
+ *
+ * `fired` names the bounds and rules that are done for now. `owed` names the ones whose
+ * violation is recorded and whose trigger was turned away for a reason that passes, with
+ * the cause that violation named, so whoever loads the instance next can deliver it under
+ * the same id and record nothing twice.
+ *
+ * One record serves both kinds, which is why their names are distinct within an entity.
+ */
+export interface TemporalLatch {
+  readonly fired: readonly string[];
+  readonly owed: Readonly<Record<string, EventCause>>;
+  /**
+   * Which of the names above are freshness bounds. They follow a different rule: one
+   * stays said through the commit that answered it, a move included, and is forgotten at
+   * the next commit from anything else. Absent when none is named.
+   */
+  readonly stale?: readonly string[];
+}
+
+/**
+ * Rebuilds a latch from a stream, one event at a time, in stream order.
+ *
+ * It reaches the same answer the runtime reached while the instance was resident, from
+ * what the stream recorded: a violation under `warn` is all there was to say; one under
+ * `reject` is owed an escalation until the stream shows that trigger committing or being
+ * refused for good; a refusal that passes leaves it owed.
+ */
+export class LatchFold {
+  readonly #fired = new Set<string>();
+  readonly #owed = new Map<string, EventCause>();
+  /** The freshness bounds among the names in the two above. */
+  readonly #stale = new Set<string>();
+  /** How many commits this fold has taken, and the count at which each name was fired. */
+  #commits = 0;
+  readonly #firedAt = new Map<string, number>();
+
+  constructor(seed?: TemporalLatch) {
+    this.merge(seed);
+  }
+
+  /**
+   * The instance moved to another state, so nothing said about the last one carries over.
+   *
+   * With one exception. A freshness bound is about how long the instance has been quiet
+   * and not about where it is, so one whose trigger caused this move has been answered
+   * and stays said in the new state.
+   *
+   * @param cause what caused the move, when it was a commit and not a reload
+   */
+  moved(cause?: EventCause): void {
+    const answered = cause === undefined ? [] : this.#answeredStale(cause);
+    this.#commits += 1;
+    this.#fired.clear();
+    this.#owed.clear();
+    this.#stale.clear();
+    for (const name of answered) {
+      this.fire(name);
+      this.#stale.add(name);
+    }
+  }
+
+  /** Take one event recorded during the current stay in a state. */
+  apply(event: EkmanEvent): void {
+    if (event.type === "violation") {
+      const { kind, name } = event.constraint;
+      if (kind === "rule") {
+        if (this.#sameMatch(name)) {
+          return;
+        }
+        // A rule that matches again was armed again in between, which no event records.
+        this.#fired.delete(name);
+      } else if (
+        !(kind === "temporal" || kind === "stale") ||
+        this.#fired.has(name)
+      ) {
+        return;
+      }
+      if (kind === "stale") {
+        this.#stale.add(name);
+      }
+      if (event.policy === "warn") {
+        this.fire(name);
+      } else {
+        this.#owed.set(event.constraint.name, event.cause);
+      }
+      return;
+    }
+
+    if (event.type === "transition") {
+      this.#commits += 1;
+      this.#heard(event.cause);
+    }
+    const answered =
+      event.type === "transition" ||
+      (event.type === "rejected" && !TRANSIENT_REFUSALS.has(event.code));
+    if (answered) {
+      this.#settle(event.cause);
+    }
+  }
+
+  /** Whether a bound is done for this stay. */
+  hasFired(name: string): boolean {
+    return this.#fired.has(name);
+  }
+
+  /** The cause of the escalation a bound is still owed, if it is owed one. */
+  owed(name: string): EventCause | undefined {
+    return this.#owed.get(name);
+  }
+
+  /** Whether an escalation with this cause is still owed to any bound. */
+  owes(cause: EventCause): boolean {
+    for (const owed of this.#owed.values()) {
+      if (owed.id === cause.id && owed.type === cause.type) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Record a bound as done for this stay, whatever it was owed. */
+  fire(name: string): void {
+    this.#owed.delete(name);
+    this.#fired.add(name);
+    this.#firedAt.set(name, this.#commits);
+  }
+
+  /**
+   * Arm a rule again, because its condition stopped holding. Whatever it had said, and
+   * any proposal it was still owed, belonged to a match that is over.
+   */
+  rearm(name: string): void {
+    this.#fired.delete(name);
+    this.#owed.delete(name);
+    this.#stale.delete(name);
+  }
+
+  /**
+   * Another writer committed, so the instance was heard from where this fold could not
+   * see. Every freshness bound is armed again. Whatever still stands is in that writer's
+   * account of the stay, which the caller merges in next.
+   */
+  heardElsewhere(): void {
+    for (const name of [...this.#stale]) {
+      this.rearm(name);
+    }
+  }
+
+  /** Record an escalation as owed to a bound that has not fired. */
+  owe(name: string, cause: EventCause): void {
+    if (!this.#fired.has(name)) {
+      this.#owed.set(name, cause);
+    }
+  }
+
+  /**
+   * Take in what another account of the same stay says.
+   *
+   * Nothing is forgotten: a bound either side has fired stays fired, and an escalation
+   * the other side still owes is owed here too unless this side knows it was answered.
+   */
+  merge(other: TemporalLatch | undefined): void {
+    for (const name of other?.fired ?? []) {
+      this.fire(name);
+    }
+    for (const [name, cause] of Object.entries(other?.owed ?? {})) {
+      this.owe(name, cause);
+    }
+    for (const name of other?.stale ?? []) {
+      this.#stale.add(name);
+    }
+  }
+
+  /** The latch as it stands, or undefined when there is nothing in it. */
+  result(): TemporalLatch | undefined {
+    if (this.#fired.size === 0 && this.#owed.size === 0) {
+      return;
+    }
+    return {
+      fired: [...this.#fired],
+      owed: Object.fromEntries(this.#owed),
+      ...(this.#stale.size === 0 ? {} : { stale: [...this.#stale] }),
+    };
+  }
+
+  /**
+   * Whether a rule's violation is the match it is already done for, read a second time.
+   *
+   * A rule is armed again by a commit that stops its condition holding, and matches
+   * again at a later one. So a violation with no commit since the rule was marked done
+   * cannot be a new match. It is the one a snapshot already accounts for, handed back
+   * beside that snapshot because it carries the snapshot's own sequence. Taking it for a
+   * new match would make a proposal whose handler failed owed all over again.
+   */
+  #sameMatch(name: string): boolean {
+    return this.#fired.has(name) && this.#firedAt.get(name) === this.#commits;
+  }
+
+  /** The freshness bounds whose owed trigger is the one with this cause. */
+  #answeredStale(cause: EventCause): string[] {
+    return [...this.#stale].filter((name) => {
+      const owed = this.#owed.get(name);
+      return owed?.id === cause.id && owed.type === cause.type;
+    });
+  }
+
+  /**
+   * A commit landed, so the instance has been heard from. Every freshness bound is armed
+   * again, except one this commit is the answer to.
+   */
+  #heard(cause: EventCause): void {
+    const answered = this.#answeredStale(cause);
+    for (const name of [...this.#stale]) {
+      if (!answered.includes(name)) {
+        this.rearm(name);
+      }
+    }
+  }
+
+  #settle(cause: EventCause): void {
+    for (const [name, owed] of this.#owed) {
+      if (owed.id === cause.id && owed.type === cause.type) {
+        this.fire(name);
+      }
+    }
+  }
+}
+
+/**
+ * A cause for an escalation raised for the first time.
+ *
+ * Never one this instance still owes to another bound. Trigger ids start over with each
+ * process, so a fresh id can repeat one a previous process left owed, and the commit
+ * that answered either escalation would then settle both.
+ *
+ * @param nextId draws the next id from the runtime's counter
+ */
+export function freshCause(
+  instance: { owes: (cause: EventCause) => boolean },
+  type: string,
+  nextId: () => string
+): EventCause {
+  let cause = { type, id: nextId() };
+  while (instance.owes(cause)) {
+    cause = { type, id: nextId() };
+  }
+  return cause;
 }

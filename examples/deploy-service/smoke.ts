@@ -26,6 +26,15 @@ process.env.DATA_DIR = dir;
 process.env.STUCK_AFTER_MS = "120";
 process.env.SWEEP_MS = "10000";
 process.env.MEMORY_BYTES = "65536";
+// Without a token the operator routes are off, and the retention checks need them on.
+process.env.OPS_TOKEN = "smoke-operator-token";
+
+/** One megabyte. Set, not assumed, so an override in the environment cannot move it. */
+const BODY_LIMIT = 1024 * 1024;
+process.env.MAX_BODY_BYTES = String(BODY_LIMIT);
+
+// The scheme in another case, with extra spaces: both are allowed, and both must work.
+const OPERATOR = { authorization: `bearer  ${process.env.OPS_TOKEN}` };
 
 let base = "";
 let failures = 0;
@@ -36,7 +45,7 @@ async function main(): Promise<void> {
   const { drainOnce } = await import("./src/workers/consumer");
 
   const server = buildServer();
-  base = `http://localhost:${await listen(server)}`;
+  base = `http://127.0.0.1:${await listen(server)}`;
   console.log(`smoke: ${base}\n  state: ${dir}\n`);
 
   try {
@@ -45,6 +54,7 @@ async function main(): Promise<void> {
     await theQueueConsumer(drainOnce);
     await theTimeBound(ekman);
     await theOpsEndpoints();
+    await theBoundary(ekman);
     await durability(dir);
     // Last, because it is the only section that destroys what the others assert on.
     await retention();
@@ -291,8 +301,190 @@ async function theOpsEndpoints(): Promise<void> {
     counters["constraint.escalated"]
   );
 
+  const map = await call("GET", "/ops/map");
+  const byState = body(map).byState as Record<
+    string,
+    { count: number; keys: string[] } | undefined
+  >;
+  const counted = Object.values(byState).reduce(
+    (sum, entry) => sum + (entry?.count ?? 0),
+    0
+  );
+  check(
+    "the map counts every deployment once",
+    counted > 0 && counted === body(map).total,
+    { counted, total: body(map).total }
+  );
+  check(
+    "and is the whole answer over a durable store",
+    body(map).complete === true,
+    body(map).reasons
+  );
+  check(
+    "and carries no values unless asked",
+    body(map).values === undefined,
+    body(map).values
+  );
+
+  const withValues = await call("GET", "/ops/map?values=true");
+  const values = body(withValues).values as Record<string, unknown>;
+  check(
+    "the map carries what each deployment knows when asked",
+    Object.keys(values).length === counted,
+    Object.keys(values).length
+  );
+
+  const misspelt = await call("GET", "/ops/stuck?state=deployin");
+  check(
+    "a state the entity does not have is a 400 that names the choices",
+    misspelt.status === 400 &&
+      String(body(misspelt).message).includes("deploying"),
+    body(misspelt)
+  );
+
   const health = await call("GET", "/health");
   check("health returns 200", health.status === 200, health.status);
+}
+
+/**
+ * What the HTTP boundary refuses or strips before the runtime sees it, and what the
+ * entity still refuses when something gets past the boundary.
+ */
+async function theBoundary(ekman: {
+  send: (key: string, trigger: { type: string }) => Promise<unknown>;
+}): Promise<void> {
+  section("the boundary");
+
+  const huge = await call("POST", "/deployments/too-big", {
+    service: "x".repeat(2 * BODY_LIMIT),
+    region: "us-west-2",
+    version: "1",
+  });
+  check("a body over the limit is 413", huge.status === 413, huge.status);
+
+  // Chunked, so it declares no length, and sent to a route that never reads a body. The
+  // limit has to hold there too, and before the sweep runs.
+  const chunked = await fetch(`${base}/ops/sweep`, {
+    method: "POST",
+    headers: OPERATOR,
+    body: new ReadableStream({
+      start(controller) {
+        controller.enqueue(new Uint8Array(2 * BODY_LIMIT));
+        controller.close();
+      },
+    }),
+    duplex: "half",
+  } as RequestInit);
+  check(
+    "and so is a chunked one on a route that reads no body",
+    chunked.status === 413,
+    chunked.status
+  );
+
+  // A fresh id and a trigger that is on the list but is not a deploy. It used to start a
+  // deployment with nothing in it.
+  const early = await call("POST", "/deployments/never-deployed/events", {
+    type: "succeeded",
+  });
+  check(
+    "a result for an id nobody deployed is 200",
+    early.status === 200,
+    early.status
+  );
+  check(
+    "and leaves it queued",
+    body(early).state === "queued",
+    body(early).state
+  );
+
+  const noRegion = await call("POST", "/deployments/never-deployed/events", {
+    type: "deploy",
+    service: "x",
+    version: "1",
+  });
+  check(
+    "a deploy with no region is 400 at the API",
+    noRegion.status === 400,
+    noRegion.status
+  );
+
+  // Past the API, by key, the way a queue consumer sends. The guard is what refuses.
+  const refused = await ekman
+    .send("deployments:never-deployed", { type: "deploy" })
+    .then(
+      () => "committed",
+      (error: { code?: string }) => error.code
+    );
+  check(
+    "and the guard refuses one that skips the API",
+    refused === "CONSTRAINT_VIOLATED",
+    refused
+  );
+
+  const forged = await call("POST", "/deployments/never-deployed/events", {
+    type: "constraint.temporal",
+    escalateTo: "failed",
+  });
+  check(
+    "a client cannot send the runtime's own escalation",
+    forged.status === 422,
+    forged.status
+  );
+
+  // A deploy redelivered while the first is still in progress. It is not a failure
+  // report, and it used to be handled as one.
+  const again = { service: "twice", region: "us-west-2", version: "1" };
+  await call("POST", "/deployments/twice", again);
+  const repeated = await call("POST", "/deployments/twice", again);
+  check(
+    "a deploy repeated while deploying leaves it deploying",
+    body(repeated).state === "deploying",
+    body(repeated).state
+  );
+
+  await call("POST", "/deployments/forged-id", {
+    service: "forged-id",
+    region: "us-west-2",
+    version: "1",
+    id: "forged",
+  });
+  const landed = await call("POST", "/deployments/forged-id/events", {
+    type: "succeeded",
+    id: "forged",
+  });
+  // The request has to have been accepted and committed, or there is no event whose
+  // cause could have been forged and the check below would pass on nothing.
+  check(
+    "a request carrying an id is still handled",
+    landed.status === 200 && body(landed).state === "live",
+    { status: landed.status, state: body(landed).state }
+  );
+  const history = await call("GET", "/deployments/forged-id/history");
+  const causes = (
+    (body(history).events as { cause?: { id?: string } }[] | undefined) ?? []
+  ).map((event) => event.cause?.id);
+  check(
+    "a client-supplied id never becomes an event's cause",
+    causes.length >= 3 && !causes.includes("forged"),
+    causes
+  );
+
+  const anonymous = await call("POST", "/ops/prune?olderThan=0ms&dryRun=true");
+  check(
+    "a prune with no operator token is 401",
+    anonymous.status === 401,
+    anonymous.status
+  );
+  const wrong = await call("POST", "/ops/sweep", undefined, {
+    authorization: "Bearer not-the-token",
+  });
+  check(
+    "a sweep with the wrong token is 401",
+    wrong.status === 401,
+    wrong.status
+  );
+  const swept = await call("POST", "/ops/sweep", undefined, OPERATOR);
+  check("a sweep with the token is 200", swept.status === 200, swept.status);
 }
 
 /** A second runtime over the same directory sees everything the first one committed. */
@@ -313,7 +505,12 @@ async function retention(): Promise<void> {
   );
 
   // `checkout-api` was rolled back in the happy path, so it is the finished one.
-  const dry = await call("POST", "/ops/prune?olderThan=0ms&dryRun=true");
+  const dry = await call(
+    "POST",
+    "/ops/prune?olderThan=0ms&dryRun=true",
+    undefined,
+    OPERATOR
+  );
   const candidates = body(dry).candidates as string[];
   check(
     "a dry run finds the rolled-back deployment",
@@ -326,7 +523,12 @@ async function retention(): Promise<void> {
     body(dry).forgotten
   );
 
-  const pruned = await call("POST", "/ops/prune?olderThan=0ms");
+  const pruned = await call(
+    "POST",
+    "/ops/prune?olderThan=0ms",
+    undefined,
+    OPERATOR
+  );
   check(
     "the prune forgets it",
     (body(pruned).forgotten as string[]).includes("deployments:checkout-api"),
@@ -385,7 +587,8 @@ async function durability(dataDir: string): Promise<void> {
 
 async function listen(server: Server): Promise<number> {
   await new Promise<void>((resolve) => {
-    server.listen(0, resolve);
+    // Loopback, as the service itself binds by default.
+    server.listen(0, "127.0.0.1", resolve);
   });
   const address = server.address();
   if (address === null || typeof address === "string") {
@@ -402,11 +605,12 @@ interface Response {
 async function call(
   method: string,
   path: string,
-  payload?: Record<string, unknown>
+  payload?: Record<string, unknown>,
+  headers?: Record<string, string>
 ): Promise<Response> {
   const response = await fetch(`${base}${path}`, {
     method,
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...headers },
     ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
   });
   const parsed = (await response.json()) as Record<string, unknown>;

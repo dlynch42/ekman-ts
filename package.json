@@ -1,12 +1,12 @@
 {
   "name": "ekman",
   "version": "0.1.0",
-  "description": "Declarative, embeddable state management for backend services. A runtime you embed, not a platform you operate.",
+  "description": "Per-key memory and state for the things your service watches. Embedded, budgeted, queryable. A runtime you embed, not a platform you operate.",
   "license": "Apache-2.0",
   "type": "module",
   "sideEffects": false,
   "engines": {
-    "node": ">=20"
+    "node": ">=22.12"
   },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -17,6 +17,11 @@
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
     },
+    "./store": {
+      "types": "./dist/stores/index.d.ts",
+      "import": "./dist/stores/index.js",
+      "require": "./dist/stores/index.cjs"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -25,18 +30,18 @@
     "LICENSE"
   ],
   "keywords": [
-    "state-machine",
-    "state-management",
-    "states",
-    "status",
-    "real-time",
+    "memory",
+    "state",
+    "entity",
+    "fleet",
+    "embedded",
+    "runtime",
     "actor",
     "virtual-actor",
     "stateful",
-    "entity",
-    "embedded",
-    "runtime",
-    "workflow"
+    "state-machine",
+    "status",
+    "real-time"
   ],
   "publishConfig": {
     "access": "public"
@@ -49,12 +54,17 @@
     "test:coverage": "vitest run --coverage",
     "conformance": "tsx runner/cli.ts",
     "verify:package": "node scripts/verify-package.mjs",
+    "check:docs": "node scripts/check-docs.mjs",
     "bench": "tsx benchmarks/run.ts",
     "bench:commit-rate": "tsx benchmarks/run.ts commit-rate",
     "bench:constraints": "tsx benchmarks/run.ts constraints",
     "bench:edge-check": "tsx benchmarks/run.ts edge-check",
+    "bench:eviction-churn": "tsx benchmarks/run.ts eviction-churn",
     "bench:fan-out": "tsx benchmarks/run.ts fan-out",
+    "bench:file-commit": "tsx benchmarks/run.ts file-commit",
+    "bench:long-history": "tsx benchmarks/run.ts long-history",
     "bench:overflow": "tsx benchmarks/run.ts overflow",
+    "bench:query": "tsx benchmarks/run.ts query",
     "demo:ordering": "tsx demos/ordering.ts",
     "demo:recovery": "tsx demos/recovery.ts",
     "demo:no-going-backwards": "tsx demos/no-going-backwards.ts",
@@ -68,22 +78,24 @@
     "demo:coordination": "tsx demos/coordination.ts",
     "demo:concurrency": "tsx demos/concurrency.ts",
     "demo:unknown": "tsx demos/unknown.ts",
+    "demo:service-health": "tsx demos/service-health.ts",
     "example:api": "tsx examples/deploy-service/src/main.ts",
     "example:smoke": "tsx examples/deploy-service/smoke.ts",
+    "example:health": "tsx examples/service-health/src/main.ts",
+    "example:health:smoke": "tsx examples/service-health/smoke.ts",
     "lint": "ultracite check",
-    "format": "ultracite fix",
-    "prepublishOnly": "npm run typecheck && npm run lint && npm test && npm run conformance && npm run build"
+    "format": "ultracite fix"
   },
   "devDependencies": {
     "@auto-it/core": "^11.3.6",
     "@auto-it/npm": "^11.3.6",
-    "@biomejs/biome": "^2.5.6",
+    "@biomejs/biome": "~2.5.6",
     "@types/node": "^22.9.0",
     "@vitest/coverage-v8": "^4.1.10",
     "auto": "^11.3.6",
     "tsup": "^8.3.5",
     "tsx": "^4.19.2",
-    "typescript": "^5.6.3",
+    "typescript": "^6.0.3",
     "ultracite": "^7.10.5",
     "vitest": "^4.1.10"
   },

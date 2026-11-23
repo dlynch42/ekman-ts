@@ -1,0 +1,86 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/032-a-state-dispatches-on-trigger-type",
+  "name": "a state that names its trigger types runs the behaviour declared for the type that arrived",
+  "level": "core",
+  "given": {
+    "entities": [
+      {
+        "name": "tills",
+        "initial": "open",
+        "triggers": ["sale", "close", "audit"],
+        "values": {
+          "sales": 0
+        },
+        "states": [
+          {
+            "state": "open",
+            "on": {
+              "sale": {
+                "else": {
+                  "result": "stay",
+                  "values": {
+                    "sales": 1
+                  }
+                }
+              },
+              "close": {
+                "else": {
+                  "result": "transitionTo",
+                  "to": "closed"
+                }
+              }
+            }
+          },
+          {
+            "state": "closed",
+            "else": {
+              "result": "stay"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "tills:1",
+        "trigger": {
+          "type": "sale"
+        }
+      }
+    },
+    {
+      "send": {
+        "key": "tills:1",
+        "trigger": {
+          "type": "close"
+        }
+      }
+    }
+  ],
+  "then": {
+    "sends": [
+      {
+        "outcome": "committed",
+        "state": "open",
+        "seq": 1
+      },
+      {
+        "outcome": "committed",
+        "state": "closed",
+        "seq": 2
+      }
+    ],
+    "state": {
+      "tills:1": {
+        "state": "closed",
+        "seq": 2,
+        "values": {
+          "sales": 1
+        }
+      }
+    }
+  }
+}

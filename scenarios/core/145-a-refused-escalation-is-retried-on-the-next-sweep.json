@@ -1,0 +1,147 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/145-a-refused-escalation-is-retried-on-the-next-sweep",
+  "name": "an escalation turned away by a full inbox is raised again by the next sweep, and its violation is recorded once",
+  "level": "core",
+  "given": {
+    "runtime": {
+      "clock": {
+        "start": 0,
+        "stepMs": 0
+      },
+      "inbox": {
+        "capacity": 0
+      }
+    },
+    "entities": [
+      {
+        "name": "deployments",
+        "initial": "deploying",
+        "constraints": {
+          "temporal": [
+            {
+              "name": "deploy-timeout",
+              "in": "deploying",
+              "within": 1000,
+              "escalateTo": "stalled"
+            }
+          ]
+        },
+        "states": [
+          {
+            "state": "deploying",
+            "cases": [
+              {
+                "when": {
+                  "trigger": "constraint.temporal"
+                },
+                "do": {
+                  "result": "transitionTo",
+                  "to": {
+                    "$trigger": "escalateTo"
+                  }
+                }
+              },
+              {
+                "when": {
+                  "trigger": "hold"
+                },
+                "do": {
+                  "result": "stay",
+                  "delayMs": 30
+                }
+              }
+            ],
+            "else": {
+              "result": "stay"
+            }
+          },
+          {
+            "state": "stalled",
+            "else": {
+              "result": "stay"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "when": [
+    {
+      "send": {
+        "key": "deployments:a",
+        "trigger": {
+          "type": "start"
+        }
+      }
+    },
+    {
+      "send": {
+        "key": "deployments:a",
+        "trigger": {
+          "type": "hold"
+        }
+      },
+      "await": false
+    },
+    {
+      "advance": 1000
+    },
+    {
+      "sweep": true
+    },
+    {
+      "drain": true
+    },
+    {
+      "sweep": true
+    }
+  ],
+  "then": {
+    "sends": [
+      {
+        "outcome": "committed",
+        "state": "deploying",
+        "seq": 1
+      },
+      {
+        "outcome": "committed",
+        "state": "deploying",
+        "seq": 2
+      }
+    ],
+    "telemetry": [
+      {
+        "type": "inbox.rejected",
+        "key": "deployments:a"
+      },
+      {
+        "type": "constraint.escalated",
+        "constraint": "deploy-timeout",
+        "delivered": false
+      },
+      {
+        "type": "constraint.escalated",
+        "constraint": "deploy-timeout",
+        "delivered": true
+      }
+    ],
+    "history": {
+      "deployments:a": {
+        "events": [
+          "transition@0",
+          "transition@1",
+          "violation@1",
+          "transition@2",
+          "transition@3"
+        ]
+      }
+    },
+    "state": {
+      "deployments:a": {
+        "state": "stalled",
+        "seq": 3
+      }
+    }
+  }
+}

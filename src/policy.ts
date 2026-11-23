@@ -1,3 +1,4 @@
+import { assertKnownKeys } from "./config";
 import { EkmanError, isEkmanError } from "./errors";
 
 /**
@@ -41,6 +42,10 @@ export interface ExecutionPolicy {
   /**
    * Whether a given failure is worth another attempt. Defaults to retrying anything
    * except a refusal, which would only be refused again.
+   *
+   * Receives the error the handler threw or failed with, never the `HANDLER_FAILED` error
+   * the sender is given. For a failure the runtime raised itself (a timeout, a store
+   * conflict, a constraint refusal) it receives that `EkmanError`.
    */
   readonly retryable?: (error: Error) => boolean;
 }
@@ -51,6 +56,28 @@ export interface ResolvedPolicy {
   readonly backoff: Backoff;
   readonly retryable: (error: Error) => boolean;
 }
+
+/**
+ * The longest delay a timer can hold, in milliseconds: 2^31 - 1, a little under 25 days.
+ *
+ * A larger delay is not waited for. The platform's timers store it as a signed 32-bit
+ * integer and fall back to 1ms when it does not fit, so `timeoutMs: Infinity` would time
+ * out every attempt at once. Every setting that becomes a timer is held under this.
+ */
+export const MAX_TIMER_MS = 2_147_483_647;
+
+/** The options an execution policy may carry. A state's policy adds `handler` to these. */
+export const POLICY_KEYS = [
+  "maxAttempts",
+  "timeoutMs",
+  "backoff",
+  "retryable",
+] as const;
+
+const BACKOFF_KEYS = {
+  fixed: ["kind", "delayMs"],
+  exponential: ["kind", "baseMs", "factor", "maxDelayMs"],
+} as const;
 
 const DEFAULT_FACTOR = 2;
 const DEFAULT_MAX_DELAY_MS = 30_000;
@@ -74,12 +101,14 @@ const NOT_RETRYABLE = new Set([
   "UNKNOWN_ENTITY",
   "UNKNOWN_STATE",
   "UNKNOWN_TRIGGER",
+  "UNHANDLED_TRIGGER",
   "INBOX_OVERFLOW",
   "TRIGGER_DROPPED",
   "COMMIT_FENCED",
   "CONSTRAINT_VIOLATED",
   "INVALID_CONFIG",
   "NOT_IMPLEMENTED",
+  "RUNTIME_CLOSED",
 ]);
 
 export function defaultRetryable(error: Error): boolean {
@@ -116,11 +145,14 @@ export function resolvePolicy(
   }
 
   const { timeoutMs } = merged;
-  if (timeoutMs !== undefined && !(timeoutMs > 0)) {
+  if (
+    timeoutMs !== undefined &&
+    !(timeoutMs > 0 && timeoutMs <= MAX_TIMER_MS)
+  ) {
     throw new EkmanError(
       "INVALID_CONFIG",
-      `${label}: timeoutMs must be greater than 0, received ${JSON.stringify(timeoutMs)}. ` +
-        "Omit it for no timeout."
+      `${label}: timeoutMs must be greater than 0 and at most ${MAX_TIMER_MS}, ` +
+        `received ${describe(timeoutMs)}. Omit it for no timeout.`
     );
   }
 
@@ -135,14 +167,89 @@ export function resolvePolicy(
   });
 }
 
+/**
+ * Refuse a backoff whose delays a timer could not hold or that is not one of the two kinds.
+ *
+ * Every field that becomes a wait is checked, the ceiling and the multiplier included. A
+ * multiplier of zero or `NaN` would turn every wait after the first into no wait at all.
+ */
 function assertBackoff(backoff: Backoff, label: string): void {
-  const base = backoff.kind === "fixed" ? backoff.delayMs : backoff.baseMs;
-
-  if (!(Number.isFinite(base) && base >= 0)) {
+  if (!(backoff.kind in BACKOFF_KEYS)) {
     throw new EkmanError(
       "INVALID_CONFIG",
-      `${label}: backoff delay must be a non-negative, finite number of milliseconds, received ${JSON.stringify(base)}`
+      `${label}: backoff kind ${describe((backoff as { kind: unknown }).kind)} is not recognized. ` +
+        `Expected one of: ${Object.keys(BACKOFF_KEYS).join(", ")}`
     );
+  }
+
+  const base = backoff.kind === "fixed" ? backoff.delayMs : backoff.baseMs;
+  assertDelay(base, "backoff delay", label);
+
+  if (backoff.kind === "fixed") {
+    return;
+  }
+
+  if (backoff.maxDelayMs !== undefined) {
+    assertDelay(backoff.maxDelayMs, "backoff maxDelayMs", label);
+  }
+
+  const { factor } = backoff;
+  if (factor !== undefined && !(Number.isFinite(factor) && factor > 0)) {
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      `${label}: backoff factor must be a finite number greater than 0, received ${describe(factor)}`
+    );
+  }
+}
+
+function assertDelay(value: unknown, what: string, label: string): void {
+  if (
+    !(
+      typeof value === "number" &&
+      Number.isFinite(value) &&
+      value >= 0 &&
+      value <= MAX_TIMER_MS
+    )
+  ) {
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      `${label}: ${what} must be a number of milliseconds from 0 to ${MAX_TIMER_MS}, ` +
+        `received ${describe(value)}`
+    );
+  }
+}
+
+/** `JSON.stringify` renders `Infinity` and `NaN` as `null`, which would misreport both. */
+function describe(value: unknown): string {
+  return typeof value === "number" ? String(value) : JSON.stringify(value);
+}
+
+/**
+ * Refuse an execution policy carrying an option it does not have.
+ *
+ * Separate from `resolvePolicy`, which runs on every dispatch and should not pay for a
+ * check whose answer cannot change after definition.
+ *
+ * @param policy the policy as declared, on the runtime, an entity or a state
+ * @param label what it was declared on, for the error
+ */
+export function assertPolicyKeys(
+  policy: ExecutionPolicy | undefined,
+  label: string
+): void {
+  assertKnownKeys(label, policy, POLICY_KEYS);
+
+  // Typed as it can arrive from a caller the compiler never saw. A null here would read
+  // as "use the default" further on, which is not what anyone who wrote it was told.
+  const backoff = policy?.backoff as Backoff | null | undefined;
+  if (backoff === null) {
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      `${label}: backoff is null. Give it a kind, or leave it out.`
+    );
+  }
+  if (backoff !== undefined && backoff.kind in BACKOFF_KEYS) {
+    assertKnownKeys(`${label} backoff`, backoff, BACKOFF_KEYS[backoff.kind]);
   }
 }
 

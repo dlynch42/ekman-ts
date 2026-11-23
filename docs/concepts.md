@@ -6,14 +6,23 @@
 await ekman.send("deployments:abc123", { type: "deploy", region: "us-east-1" });
 ```
 
-That line contains most of the model. `deployments` names an entity, `abc123` identifies one
-instance of it, and the trigger is delivered to that instance's inbox rather than applied to it.
+That line contains most of the model. A key is the identity of one thing your service keeps
+track of: here a deployment, elsewhere an upstream API, a tenant or a device. `deployments`
+names an entity, `abc123` identifies one instance of it, and the instance is what the service
+remembers about that one thing. The trigger is delivered to that instance's inbox rather than
+applied to it.
 
 ## The key is the unit of everything
 
 A key is `<entity>:<segment>[:<segment>]*`, and its first segment names the entity. Keys are
 human-readable on purpose: `deployments:abc123` is what you type into a query, what appears in
 history, and what you page someone with at 3am.
+
+A segment is non-empty and contains no `:`, no whitespace and no control character. It cannot be
+`.` or `..`, though `a.b` and `..x` are fine. A key is at most 512 characters, and it is never
+normalized: `orders:ABC` and `orders:abc` are two instances. An entity's name is the first
+segment of its keys, so it follows the same rules. Anything else is refused with `INVALID_KEY`
+at `send()`.
 
 One key owns one instance's state, its values, its inbox ordering, its resident memory, its
 place in persistence, its sequence numbering, and its history. Nothing is shared across keys,
@@ -33,10 +42,11 @@ trigger -> instance lookup (load or initialize)
         -> per-key bounded FIFO inbox
         -> dispatch on the current committed state
         -> handler, under an execution policy
-        -> result: transitionTo | stay | fail
-        -> constraints
+        -> result: transitionTo | stay | patch | fail
+        -> constraints that can refuse it (graph, guards, invariants)
         -> commit (state, values, sequence and event, atomically)
         -> persistence, then async audit fan-out
+        -> rules, asked about what was just committed
         -> memory accounting
         -> next queued trigger
 ```
@@ -44,8 +54,8 @@ trigger -> instance lookup (load or initialize)
 Four properties of that pipeline are worth stating outright, because a plausible-looking
 implementation gets them wrong.
 
-**A trigger never mutates state.** Only a committed handler result does. Time-in-state
-escalations and constraint escalations are delivered as triggers, not as writes, so every
+**A trigger never mutates state.** Only a committed handler result does. What a time bound,
+a freshness bound or a rule proposes is delivered as a trigger, not as a write, so every
 state change is attributable to a piece of your code rather than to the runtime.
 
 **Dispatch happens on the state at dequeue time,** never the state observed when the trigger
@@ -55,8 +65,10 @@ three left behind.
 **One handler runs per key at a time.** Retries keep the key occupied, so a queued trigger
 cannot slip past an attempt that is still in flight.
 
-**Unknown is never silent.** No handler for the current state, or a trigger type the entity
-never declared, goes to the entity's unknown policy. That policy has no silent-discard
+**Unknown is never silent.** No handler for the current state, a trigger type the entity
+never declared, or a declared type the current state has no entry for when it
+[names the types it handles](./entities.md#handling-by-trigger-type), goes to the entity's
+unknown policy. That policy has no silent-discard
 setting; unconfigured means refuse and record.
 
 ## Serialization is per key and nowhere else

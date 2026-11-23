@@ -2,7 +2,8 @@ import { EkmanError } from "./errors";
 import type { Store } from "./store";
 import type { FileStoreOptions } from "./stores/file";
 import { fileStore } from "./stores/file";
-import { memoryStore } from "./stores/memory";
+import type { MemoryKeep } from "./stores/memory";
+import { MemoryStore, memoryStore } from "./stores/memory";
 
 /**
  * A store described rather than constructed.
@@ -18,6 +19,17 @@ export type StoreSpec =
       readonly kind: "memory";
       readonly name?: string;
       readonly authority?: boolean;
+      /**
+       * What to keep for a key: `stream`, every event, or `state`, one snapshot. Defaults
+       * to `state` for a cache layer and `stream` otherwise. `state` is refused on the
+       * commit authority.
+       */
+      readonly keep?: MemoryKeep;
+      /**
+       * The most keys to hold, dropping the least recently used. For a cache layer only,
+       * and refused on the commit authority.
+       */
+      readonly maxKeys?: number;
     }
   | ({ readonly kind: "file"; readonly dir?: string } & FileStoreOptions);
 
@@ -111,18 +123,26 @@ function toLayers(configured: readonly StoreLayer[]): Store[] {
 /**
  * The store stack: one commit authority, everything else a cache.
  *
- * Layering exists so a hot local layer can answer reads while a slower durable one owns the
- * truth. What it must never become is two things that both think they are the truth, which
- * is why exactly one layer is the authority and the rest are explicitly derived.
+ * Layering exists so a hot local layer can answer the load of an instance while a slower
+ * durable one owns the truth. What it must never become is two things that both think they
+ * are the truth, which is why exactly one layer is the authority and the rest are
+ * explicitly derived.
  *
- * A cache write that fails is reported and forgotten. A commit is already durable by the
- * time caches are touched, so a stale cache is a performance problem; treating it as a
- * commit failure would turn one into a correctness problem.
+ * A cache write that fails is reported, and the key is deleted from that cache so its next
+ * read is a miss. A commit is already durable by the time caches are touched, so a cache
+ * that fell behind is a performance problem; treating it as a commit failure would turn
+ * one into a correctness problem, and so would reading from it.
  */
 export interface ResolvedStack {
-  /** Owns the truth. Every commit goes here first, and reads fall back to it. */
+  /**
+   * Owns the truth. Every commit goes here first. `history`, `query` and the reload that
+   * follows a conflict read only this.
+   */
   readonly authority: Store | undefined;
-  /** Read-first, write-after layers, in declaration order. */
+  /**
+   * Layers in front of the authority, in declaration order. Written after it, and read
+   * before it when an instance is first loaded.
+   */
   readonly caches: readonly Store[];
   /** Every layer, in declaration order. */
   readonly layers: readonly Store[];
@@ -189,6 +209,16 @@ export function assertCoordination(
     );
   }
 
+  if (stack.caches.length > 0) {
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      `coordination "multi" means other processes write these keys, and cache layer ` +
+        `"${stack.caches[0]?.name}" would be read before the commit authority without ` +
+        "knowing what they wrote. Remove the cache layers, or leave coordination at " +
+        '"single".'
+    );
+  }
+
   if (!authority.capabilities.multiWriter) {
     throw new EkmanError(
       "INVALID_CONFIG",
@@ -237,12 +267,27 @@ export function resolveStack(
       "INVALID_CONFIG",
       `${claimed.length} store layers claim to be the commit authority (${claimed
         .map((layer) => layer.name)
-        .join(", ")}). Exactly one layer owns the truth.`
+        .join(
+          ", "
+        )}). Exactly one layer owns the truth. Remove authority: true from all but one layer.`
     );
   }
 
   const authority = claimed[0] ?? pickAuthority(layers);
   const caches = layers.filter((layer) => layer !== authority);
+  for (const cache of caches) {
+    assertCacheable(cache);
+  }
+  if (caches.length > 0 && !authority.capabilities.conditionalAppend) {
+    // A cache can be behind, and what stops a commit built on its answer is the authority
+    // refusing it. One that cannot refuse would take the stale event as the next one.
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      `store layer "${authority.name}" is the commit authority behind ${caches.length === 1 ? "a cache layer" : "cache layers"}, ` +
+        "and it does not declare a conditional append. A cache that fell behind would then " +
+        "have its stale answer committed over newer state. Use it as the only layer."
+    );
+  }
 
   if (
     authority.capabilities.durability === "ephemeral" &&
@@ -258,12 +303,51 @@ export function resolveStack(
     );
   }
 
+  MemoryStore.placed(authority, "authority");
+  if (authority.capabilities.evicts === true) {
+    // Whatever the store is, and however it came to drop keys: with nothing behind it, a
+    // key it drops is committed state gone.
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      `store layer "${authority.name}" is the commit authority and declares that it drops ` +
+        "keys to stay inside a bound of its own. Nothing is behind an authority to answer " +
+        "for a key it dropped. Use it in front of another store, as a cache."
+    );
+  }
+  for (const cache of caches) {
+    MemoryStore.placed(cache, "cache");
+  }
+
   return Object.freeze({
     authority,
     caches: Object.freeze(caches),
     layers: Object.freeze(layers),
     durable: authority.capabilities.durability === "durable",
   });
+}
+
+/**
+ * Refuse a cache layer that could not be kept honest.
+ *
+ * A cache is read before the authority, so it has to be exactly what the authority
+ * accepted or nothing at all. Staying in step takes a conditional append, which refuses a
+ * write that would leave a hole. Getting back to nothing takes a delete.
+ */
+function assertCacheable(cache: Store): void {
+  const missing = [
+    cache.capabilities.conditionalAppend ? undefined : "a conditional append",
+    cache.capabilities.forget && cache.forget ? undefined : "forget",
+  ].filter((need) => need !== undefined);
+
+  if (missing.length > 0) {
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      `store layer "${cache.name}" is a cache layer, read before the commit authority, and it ` +
+        `does not declare ${missing.join(" or ")}. Without both, a write it missed would ` +
+        "leave it serving a state the authority has moved past. Use it as the only layer, " +
+        "or as the authority."
+    );
+  }
 }
 
 /**
@@ -289,7 +373,8 @@ function assertUniqueNames(layers: readonly Store[]): void {
       throw new EkmanError(
         "INVALID_CONFIG",
         `two store layers are both named "${layer.name}". Layer names appear in telemetry ` +
-          "and in query results, so they have to tell the layers apart."
+          "and in query results, so they have to tell the layers apart. Give one of them a " +
+          "different name with the store's name option."
       );
     }
     seen.add(layer.name);

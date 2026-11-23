@@ -35,6 +35,38 @@
     }
   },
   "$defs": {
+    "telemetryMatcher": {
+      "description": "A subset match against one telemetry event.",
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "enum": [
+            "inbox.enqueued",
+            "inbox.rejected",
+            "inbox.dropped",
+            "handler.started",
+            "handler.settled",
+            "handler.retried",
+            "handler.timedOut",
+            "commit.fenced",
+            "constraint.violated",
+            "constraint.escalated",
+            "commit.raced",
+            "memory.accounted",
+            "memory.refused",
+            "instance.evicted",
+            "instance.forgotten",
+            "instance.restored",
+            "audit.failed",
+            "store.cacheFailed",
+            "store.cacheSuspended",
+            "storage.swept",
+            "runtime.closed"
+          ]
+        }
+      }
+    },
     "given": {
       "type": "object",
       "required": ["entities"],
@@ -317,6 +349,67 @@
               "policy": { "$ref": "#/$defs/violationPolicy" }
             }
           }
+        },
+        "stale": {
+          "description": "Bounds on how long an instance may go without a commit. Evaluated by a sweep, and firing delivers a trigger.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["after"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string" },
+              "in": {
+                "description": "States the bound watches. Omitted means every state.",
+                "type": "array",
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "after": {
+                "description": "Milliseconds an instance may go without a commit.",
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "propose": {
+                "description": "Carried on the delivered trigger for the handler to act on. The runtime never applies it directly.",
+                "type": "string"
+              },
+              "trigger": {
+                "description": "Type of the delivered trigger. Defaults to constraint.stale.",
+                "type": "string"
+              },
+              "policy": { "$ref": "#/$defs/violationPolicy" }
+            }
+          }
+        },
+        "rules": {
+          "description": "Conditions over what an instance knows. Evaluated after every commit in a watched state, and coming to hold delivers a trigger.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["when"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string" },
+              "in": {
+                "description": "States the rule watches. Omitted means every state.",
+                "type": "array",
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "when": {
+                "description": "The condition, read against what was just committed. It holds when the check does.",
+                "$ref": "#/$defs/check"
+              },
+              "propose": {
+                "description": "Carried on the delivered trigger for the handler to act on. The runtime never applies it directly.",
+                "type": "string"
+              },
+              "trigger": {
+                "description": "Type of the delivered trigger. Defaults to rule.matched.",
+                "type": "string"
+              },
+              "policy": { "$ref": "#/$defs/violationPolicy" }
+            }
+          }
         }
       }
     },
@@ -355,6 +448,33 @@
         }
       }
     },
+    "cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["do"],
+        "additionalProperties": false,
+        "properties": {
+          "when": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "trigger": {
+                "type": "string"
+              },
+              "attempt": {
+                "description": "Matches the 1-based attempt number, so a case can fail once then commit.",
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          },
+          "do": {
+            "$ref": "#/$defs/do"
+          }
+        }
+      }
+    },
     "stateSpec": {
       "type": "object",
       "required": ["state"],
@@ -365,34 +485,27 @@
           "minLength": 1
         },
         "cases": {
-          "type": "array",
-          "items": {
+          "$ref": "#/$defs/cases"
+        },
+        "else": {
+          "$ref": "#/$defs/do"
+        },
+        "on": {
+          "description": "One behaviour per trigger type, in place of cases and else. A type with no entry is refused with UNHANDLED_TRIGGER. Declaring this together with cases or else is refused at definition.",
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
             "type": "object",
-            "required": ["do"],
             "additionalProperties": false,
             "properties": {
-              "when": {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                  "trigger": {
-                    "type": "string"
-                  },
-                  "attempt": {
-                    "description": "Matches the 1-based attempt number, so a case can fail once then commit.",
-                    "type": "integer",
-                    "minimum": 1
-                  }
-                }
+              "cases": {
+                "$ref": "#/$defs/cases"
               },
-              "do": {
+              "else": {
                 "$ref": "#/$defs/do"
               }
             }
           }
-        },
-        "else": {
-          "$ref": "#/$defs/do"
         },
         "policy": {
           "description": "Policy for this state alone, over the entity's and the runtime's.",
@@ -405,7 +518,7 @@
       "additionalProperties": false,
       "properties": {
         "result": {
-          "enum": ["transitionTo", "stay", "fail"]
+          "enum": ["transitionTo", "stay", "patch", "fail"]
         },
         "to": {
           "description": "A state name, or a value expression resolving to one. An escalation carries its target on the trigger."
@@ -605,7 +718,14 @@
                   "additionalProperties": false,
                   "properties": {
                     "kind": {
-                      "enum": ["transition", "guard", "invariant", "temporal"]
+                      "enum": [
+                        "transition",
+                        "guard",
+                        "invariant",
+                        "temporal",
+                        "rule",
+                        "stale"
+                      ]
                     },
                     "name": { "type": "string" }
                   }
@@ -615,7 +735,7 @@
                   "enum": ["reject", "warn"]
                 },
                 "attempted": {
-                  "description": "The change a violation was refusing. Absent on a temporal violation, which is attached to no result.",
+                  "description": "The change a violation was refusing. Absent on a temporal violation and on a rule's match, which are attached to no result.",
                   "type": "object",
                   "additionalProperties": false,
                   "properties": {
@@ -635,33 +755,12 @@
         "telemetry": {
           "description": "Telemetry matchers, asserted as an ordered subsequence of what was emitted rather than an exact list.",
           "type": "array",
-          "items": {
-            "type": "object",
-            "required": ["type"],
-            "properties": {
-              "type": {
-                "enum": [
-                  "inbox.enqueued",
-                  "inbox.rejected",
-                  "inbox.dropped",
-                  "handler.started",
-                  "handler.settled",
-                  "handler.retried",
-                  "handler.timedOut",
-                  "commit.fenced",
-                  "constraint.violated",
-                  "constraint.escalated",
-                  "commit.raced",
-                  "memory.accounted",
-                  "memory.refused",
-                  "instance.evicted",
-                  "instance.restored",
-                  "audit.failed",
-                  "store.cacheFailed"
-                ]
-              }
-            }
-          }
+          "items": { "$ref": "#/$defs/telemetryMatcher" }
+        },
+        "telemetryAbsent": {
+          "description": "Telemetry matchers that must match nothing that was emitted.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/telemetryMatcher" }
         },
         "state": {
           "type": "object",
@@ -749,11 +848,62 @@
                   }
                 ]
               },
+              "staleFor": {
+                "description": "Milliseconds since the last commit, or a duration such as 5m. Inclusive at the bound.",
+                "oneOf": [
+                  { "type": "integer", "minimum": 0 },
+                  {
+                    "type": "string",
+                    "pattern": "^\\d+(\\.\\d+)?(ms|s|m|h|d)$"
+                  }
+                ]
+              },
               "limit": { "type": "integer", "minimum": 0 },
+              "includeValues": {
+                "description": "Ask for each match's values. Without it, a match carrying values is a failure.",
+                "type": "boolean"
+              },
               "keys": {
                 "description": "Matching keys, oldest in state first, ties broken on the key.",
                 "type": "array",
                 "items": { "type": "string" }
+              },
+              "values": {
+                "description": "Values a match must carry, by key, each asserted as a subset.",
+                "type": "object",
+                "additionalProperties": { "type": "object" }
+              },
+              "complete": { "type": "boolean" },
+              "reasons": {
+                "description": "Asserted as a set.",
+                "type": "array",
+                "items": { "$ref": "#/$defs/partiality" }
+              }
+            }
+          }
+        },
+        "maps": {
+          "description": "State maps read after everything settles, each with the answer it must give.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["entity", "byState"],
+            "additionalProperties": false,
+            "properties": {
+              "entity": { "type": "string", "minLength": 1 },
+              "limitPerState": { "type": "integer", "minimum": 0 },
+              "byState": {
+                "description": "Every state holding an instance, each with its keys, oldest in state first, ties broken on the key. States are compared as a set.",
+                "type": "object",
+                "additionalProperties": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                }
+              },
+              "total": {
+                "description": "How many instances the map counted. A per-state limit does not reduce it.",
+                "type": "integer",
+                "minimum": 0
               },
               "complete": { "type": "boolean" },
               "reasons": {
@@ -798,7 +948,14 @@
     },
     "partiality": {
       "description": "Why an answer is not the whole answer. A result is complete exactly when there are none.",
-      "enum": ["no-durable-store", "unsupported-criteria", "limit-reached"]
+      "enum": [
+        "no-durable-store",
+        "unsupported-criteria",
+        "limit-reached",
+        "compacted",
+        "history-capped",
+        "resident-only"
+      ]
     },
     "errorCode": {
       "enum": [
@@ -806,6 +963,7 @@
         "UNKNOWN_ENTITY",
         "UNKNOWN_STATE",
         "UNKNOWN_TRIGGER",
+        "UNHANDLED_TRIGGER",
         "HANDLER_FAILED",
         "INBOX_OVERFLOW",
         "TRIGGER_DROPPED",
@@ -822,7 +980,8 @@
         "MISSING_INITIAL_STATE",
         "INITIAL_STATE_NOT_IN_STATES",
         "INVALID_CONFIG",
-        "NOT_IMPLEMENTED"
+        "NOT_IMPLEMENTED",
+        "RUNTIME_CLOSED"
       ]
     },
     "policy": {

@@ -1,3 +1,5 @@
+import { constraintsOf } from "./compiled";
+import type { RuntimeDeps } from "./config";
 import type { ProposedCommit } from "./constraints";
 import { checkConstraints, rejection, violationError } from "./constraints";
 import { resolveErrorHandler } from "./entity";
@@ -6,29 +8,26 @@ import type { EventCause } from "./events";
 import type { CommitToken } from "./fence";
 import { fenceReason } from "./fence";
 import type { InstanceRecord } from "./instance";
-import { sealValues } from "./instance";
-import type { ExecutionPolicy, ResolvedPolicy } from "./policy";
-import { backoffDelay, resolvePolicy } from "./policy";
-import type { HandlerResult, StayResult, TransitionToResult } from "./results";
+import type { ResolvedPolicy } from "./policy";
+import { backoffDelay, defaultRetryable, resolvePolicy } from "./policy";
+import type {
+  HandlerResult,
+  PatchResult,
+  StayResult,
+  TransitionToResult,
+} from "./results";
 import { isHandlerResult, toError } from "./results";
-import type { TelemetryEvent } from "./telemetry";
 import { telemetryNow, triggerRef } from "./telemetry";
 import type {
   CommitResult,
   EntityDefinition,
   Handler,
   HandlerContext,
+  StateEntry,
   Trigger,
   Values,
 } from "./types";
-
-/** Everything a dispatch needs that is owned by the runtime rather than the instance. */
-export interface DispatchDeps {
-  now: () => number;
-  /** The runtime-wide execution policy, under every entity and state override. */
-  policy: ExecutionPolicy | undefined;
-  emit: (event: TelemetryEvent) => void;
-}
+import { sealValues } from "./values";
 
 /**
  * Run one trigger against one instance, to completion.
@@ -41,7 +40,7 @@ export async function dispatch<S extends string, V extends Values>(
   instance: InstanceRecord<S, V>,
   definition: EntityDefinition<string, S, V, Trigger>,
   trigger: Trigger,
-  deps: DispatchDeps,
+  deps: RuntimeDeps,
   depth: number
 ): Promise<CommitResult<S, V>> {
   const cause: EventCause = { type: trigger.type, id: trigger.id as string };
@@ -101,6 +100,15 @@ export async function dispatch<S extends string, V extends Values>(
     );
   }
 
+  const handler = handlerFor(entry, trigger.type);
+
+  if (handler === undefined) {
+    settle("refused", 1);
+    return refuse(instance, deps, cause, "UNHANDLED_TRIGGER", () =>
+      unhandledReason(definition.name, instance.state, trigger.type, entry)
+    );
+  }
+
   const policy = resolvePolicy(
     deps.policy,
     entry.policy,
@@ -110,7 +118,7 @@ export async function dispatch<S extends string, V extends Values>(
   return await attemptLoop(instance, definition, trigger, deps, {
     cause,
     policy,
-    handler: entry.handler,
+    handler,
     depth,
     settle,
   });
@@ -135,12 +143,19 @@ interface AttemptContext<S extends string, V extends Values> {
  *
  * The last failure is what reaches the caller. An earlier attempt's error is reported
  * through telemetry as it happens and then superseded.
+ *
+ * Each attempt supersedes the one before it, whose token is invalidated so that its
+ * eventual result is harmless if it is still running. A retry that follows a store
+ * conflict reloads first: see `reconciled`.
+ *
+ * A wait between attempts that the runtime's closing cut short ends the dispatch as a
+ * failure, settled like any other, without consulting the retry policy again.
  */
 async function attemptLoop<S extends string, V extends Values>(
   instance: InstanceRecord<S, V>,
   definition: EntityDefinition<string, S, V, Trigger>,
   trigger: Trigger,
-  deps: DispatchDeps,
+  deps: RuntimeDeps,
   ctx: AttemptContext<S, V>
 ): Promise<CommitResult<S, V>> {
   const { policy } = ctx;
@@ -150,25 +165,27 @@ async function attemptLoop<S extends string, V extends Values>(
   // attempt always throws. Saying that to the compiler is what keeps an unreachable
   // fallback from sitting after the loop pretending to be one.
   for (let attempt = 1; ; attempt += 1) {
-    // The attempt that came before this one is now superseded. Invalidating its token is
-    // what makes its eventual result harmless if it is still running.
     previous?.invalidate("superseded");
-    const token = instance.issueToken(attempt);
-    previous = token;
-
-    deps.emit({
-      type: "handler.started",
-      key: instance.key,
-      entity: instance.entity,
-      state: instance.state,
-      attempt,
-      depth: ctx.depth,
-      trigger: triggerRef(trigger),
-      at: telemetryNow(),
-    });
 
     try {
-      // biome-ignore lint/performance/noAwaitInLoops: attempts are sequential by definition, and the key stays occupied for all of them
+      if (instance.needsHydration) {
+        // biome-ignore lint/performance/noAwaitInLoops: a reload belongs to the attempt it precedes, and attempts are sequential
+        ctx.handler = await reconciled(instance, definition, deps, ctx);
+      }
+      const token = instance.issueToken(attempt);
+      previous = token;
+
+      deps.emit({
+        type: "handler.started",
+        key: instance.key,
+        entity: instance.entity,
+        state: instance.state,
+        attempt,
+        depth: ctx.depth,
+        trigger: triggerRef(trigger),
+        at: telemetryNow(),
+      });
+
       const committed = await runAttempt(
         instance,
         definition,
@@ -180,11 +197,15 @@ async function attemptLoop<S extends string, V extends Values>(
       ctx.settle("committed", attempt);
       return committed;
     } catch (error) {
-      const failure = toError(error);
+      const failure = toAttemptFailure(error);
 
-      if (attempt >= policy.maxAttempts || !policy.retryable(failure)) {
+      if (failure.terminal) {
+        ctx.settle("refused", attempt);
+        throw failure.reported;
+      }
+      if (attempt >= policy.maxAttempts || !worthRetrying(policy, failure)) {
         ctx.settle("failed", attempt);
-        throw failure;
+        throw failure.reported;
       }
 
       const delayMs = backoffDelay(policy.backoff, attempt + 1);
@@ -196,14 +217,164 @@ async function attemptLoop<S extends string, V extends Values>(
         attempt,
         maxAttempts: policy.maxAttempts,
         delayMs,
-        error: failure.message,
+        error: failure.detail,
         trigger: triggerRef(trigger),
         at: telemetryNow(),
       });
 
-      await wait(delayMs);
+      try {
+        await wait(delayMs, deps.closing, instance.key);
+      } catch (closed) {
+        ctx.settle("failed", attempt);
+        throw closed;
+      }
     }
   }
+}
+
+/**
+ * The handler an attempt should run, after reloading the record if it has fallen behind.
+ *
+ * A store conflict means another writer moved the key. Retrying against the values this
+ * runtime still holds would conflict again, every time, and repeat the handler's side
+ * effects each time. So the record is reloaded before the attempt's token is issued, which
+ * binds the token to the sequence the store now holds, and the handler is looked up again
+ * for the state the other writer left. The policy stays the one the trigger was dispatched
+ * under: a reload does not change which state's policy governs this trigger's attempts.
+ *
+ * A state with no handler, or none for this trigger's type, ends the dispatch, whatever
+ * the retry predicate says. The record has been reloaded by then, so a further attempt
+ * would skip the reload and run the old state's handler against a state it was never
+ * written for.
+ *
+ * Only awaited for a record that needs it. An attempt that has nothing to reload must
+ * reach its handler in the same turn, or telemetry interleaves differently with the sends
+ * around it.
+ */
+async function reconciled<S extends string, V extends Values>(
+  instance: InstanceRecord<S, V>,
+  definition: EntityDefinition<string, S, V, Trigger>,
+  deps: RuntimeDeps,
+  ctx: AttemptContext<S, V>
+): Promise<Handler<S, V, Trigger>> {
+  await deps.reconcile(instance as unknown as InstanceRecord);
+
+  const entry = definition.handlers.get(instance.state);
+  if (entry === undefined) {
+    const reason =
+      `entity "${definition.name}" has no handler for state "${instance.state}", ` +
+      "which is where a reload after a store conflict found the instance";
+    instance.reject({
+      code: "UNKNOWN_STATE",
+      reason,
+      at: deps.now(),
+      cause: ctx.cause,
+    });
+    const refusal = new EkmanError("UNKNOWN_STATE", reason, {
+      key: instance.key,
+    });
+    throw new AttemptFailure(refusal, refusal, true);
+  }
+
+  const handler = handlerFor(entry, ctx.cause.type);
+  if (handler === undefined) {
+    const reason = unhandledReason(
+      definition.name,
+      instance.state,
+      ctx.cause.type,
+      entry
+    );
+    instance.reject({
+      code: "UNHANDLED_TRIGGER",
+      reason,
+      at: deps.now(),
+      cause: ctx.cause,
+    });
+    const refusal = new EkmanError("UNHANDLED_TRIGGER", reason, {
+      key: instance.key,
+    });
+    throw new AttemptFailure(refusal, refusal, true);
+  }
+  return handler;
+}
+
+/**
+ * The handler a state has for a trigger type, or undefined when the state names its
+ * trigger types and this is not one of them.
+ */
+function handlerFor<S extends string, V extends Values>(
+  entry: StateEntry<S, V, Trigger>,
+  type: string
+): Handler<S, V, Trigger> | undefined {
+  return entry.on === undefined ? entry.handler : entry.on.get(type);
+}
+
+function unhandledReason(
+  entity: string,
+  state: string,
+  type: string,
+  entry: { readonly on?: ReadonlyMap<string, unknown> }
+): string {
+  return (
+    `entity "${entity}" state "${state}" has no handler for trigger type "${type}". ` +
+    `Handled in this state: ${[...(entry.on?.keys() ?? [])].join(", ")}`
+  );
+}
+
+/**
+ * A handler's failure, carried out of an attempt in both of its forms.
+ *
+ * `original` is what the handler threw or failed with, which is what a `retryable`
+ * predicate is written against. `reported` is what the sender receives: the same failure
+ * under a stable code, with the original as its cause. A `terminal` failure is a refusal
+ * no further attempt can change, and is never offered to the retry predicate.
+ */
+class AttemptFailure extends Error {
+  readonly original: Error;
+  readonly reported: Error;
+  readonly terminal: boolean;
+  /** What telemetry says about it. The reported message, unless that adds where it was. */
+  readonly detail: string;
+
+  constructor(
+    original: Error,
+    reported: Error,
+    terminal = false,
+    detail = reported.message
+  ) {
+    super(reported.message);
+    this.original = original;
+    this.reported = reported;
+    this.terminal = terminal;
+    this.detail = detail;
+  }
+}
+
+/** Anything else an attempt can reject with is already the runtime's own error, in one form. */
+function toAttemptFailure(error: unknown): AttemptFailure {
+  if (error instanceof AttemptFailure) {
+    return error;
+  }
+  const failure = toError(error);
+  return new AttemptFailure(failure, failure);
+}
+
+/**
+ * Whether a failed attempt should be followed by another.
+ *
+ * A predicate the caller supplied judges the handler's own error, so
+ * `(e) => e instanceof NetworkError` means what it says. The default predicate judges what
+ * the sender would be told instead. Its rule is about the runtime refusing this trigger,
+ * and an error the handler threw is not that, even when it carries one of those codes
+ * because the handler got it from sending to another key.
+ */
+function worthRetrying(
+  policy: ResolvedPolicy,
+  failure: AttemptFailure
+): boolean {
+  return policy.retryable === defaultRetryable
+    ? defaultRetryable(failure.reported)
+    : policy.retryable(failure.original);
 }
 
 /**
@@ -217,7 +388,7 @@ async function runAttempt<S extends string, V extends Values>(
   instance: InstanceRecord<S, V>,
   definition: EntityDefinition<string, S, V, Trigger>,
   trigger: Trigger,
-  deps: DispatchDeps,
+  deps: RuntimeDeps,
   ctx: AttemptContext<S, V>,
   token: CommitToken
 ): Promise<CommitResult<S, V>> {
@@ -303,12 +474,17 @@ async function runAttempt<S extends string, V extends Values>(
  * On timeout the token is invalidated first, so the abandoned attempt cannot commit even
  * if it finishes microseconds later. The signal is aborted second, as a courtesy to a
  * handler that watches it. Neither can stop the function; only the fence is guaranteed.
+ *
+ * An attempt whose token is already sealed is past the fence: its write is in flight and
+ * will land. There is nothing left to abandon, so the timer only records that it fired,
+ * which surfaces as `commit.raced`, and the attempt is left to finish and report its
+ * commit. Telling the sender it timed out would invite a retry of work that committed.
  */
 function underTimeout<S extends string, V extends Values>(
   settled: Promise<CommitResult<S, V>>,
   instance: InstanceRecord<S, V>,
   trigger: Trigger,
-  deps: DispatchDeps,
+  deps: RuntimeDeps,
   timeoutMs: number,
   token: CommitToken,
   controller: AbortController
@@ -318,6 +494,10 @@ function underTimeout<S extends string, V extends Values>(
   const expiry = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
       token.invalidate("timeout");
+      if (token.sealed) {
+        return;
+      }
+
       controller.abort(
         new EkmanError(
           "HANDLER_TIMEOUT",
@@ -377,7 +557,7 @@ async function runHandler<S extends string, V extends Values>(
       kind: "fail",
       error: new Error(
         `handler for state "${snapshot.state}" returned ${describe(result)} ` +
-          "instead of transitionTo(), stay() or fail()"
+          "instead of transitionTo(), stay(), patch() or fail()"
       ),
     };
   }
@@ -394,7 +574,7 @@ async function handleFailure<S extends string, V extends Values>(
   definition: EntityDefinition<string, S, V, Trigger>,
   error: Error,
   ctx: HandlerContext,
-  deps: DispatchDeps,
+  deps: RuntimeDeps,
   cause: EventCause,
   token: CommitToken,
   trigger: Trigger
@@ -408,7 +588,7 @@ async function handleFailure<S extends string, V extends Values>(
     } catch (thrown) {
       // An error handler that itself fails does not get another error handler. That
       // would be an unbounded chain, and the original failure is the one worth reporting.
-      throw failed(instance.key, error, toError(thrown));
+      throw failed(instance, trigger, error, toError(thrown));
     }
 
     if (isHandlerResult(recovery)) {
@@ -425,27 +605,43 @@ async function handleFailure<S extends string, V extends Values>(
           token
         );
       }
-      throw failed(instance.key, error, recovery.error);
+      throw failed(instance, trigger, error, recovery.error);
     }
   }
 
-  throw failed(instance.key, error);
+  throw failed(instance, trigger, error);
 }
 
-function failed(key: string, error: Error, from?: Error): EkmanError {
+function failed(
+  instance: { readonly key: string; readonly state: string },
+  trigger: Trigger,
+  error: Error,
+  from?: Error
+): AttemptFailure {
   // A constraint refusal that nothing recovered keeps its own code all the way to the
   // sender. Rewrapping it as a generic handler failure would throw away the classification
   // at exactly the boundary where a caller wants to branch on it.
   if (from === undefined && isConstraintViolation(error)) {
-    return error;
+    return new AttemptFailure(error, error);
   }
 
   const suffix =
     from === undefined ? "" : ` (error handler also failed: ${from.message})`;
-  return new EkmanError("HANDLER_FAILED", `${error.message}${suffix}`, {
-    key,
-    cause: error,
-  });
+  const detail = `${error.message}${suffix}`;
+
+  // The sender's error says where, because the inner message alone does not: the same
+  // "connection refused" could have come from any handler of any entity. Telemetry keeps
+  // the bare detail, since its events already carry the key and the attempt.
+  return new AttemptFailure(
+    error,
+    new EkmanError(
+      "HANDLER_FAILED",
+      `handler for ${instance.key} in "${instance.state}" failed on "${trigger.type}": ${detail}`,
+      { key: instance.key, cause: error }
+    ),
+    false,
+    detail
+  );
 }
 
 /**
@@ -459,7 +655,7 @@ function failed(key: string, error: Error, from?: Error): EkmanError {
 function applyConstraints<S extends string, V extends Values>(
   instance: InstanceRecord<S, V>,
   definition: EntityDefinition<string, S, V, Trigger>,
-  deps: DispatchDeps,
+  deps: RuntimeDeps,
   args: {
     next: ProposedCommit<S, V>;
     trigger: Trigger;
@@ -468,7 +664,7 @@ function applyConstraints<S extends string, V extends Values>(
     mutatingValues: boolean;
   }
 ): void {
-  const compiled = definition.constraints;
+  const compiled = constraintsOf(definition);
 
   // Entity with no constraints must not pay for a snapshot of an instance nobody inspects
   if (compiled === undefined || !compiled.checksAtCommit) {
@@ -519,17 +715,42 @@ function applyConstraints<S extends string, V extends Values>(
 }
 
 /**
+ * The values a result asks to commit.
+ *
+ * Omitted values carry the current ones forward rather than clearing them. A patch is
+ * merged over the current ones here, once, so everything downstream of this (constraints,
+ * the event, the store, a replay) sees whole values and never a delta.
+ */
+function nextValues<S extends string, V extends Values>(
+  instance: InstanceRecord<S, V>,
+  result: TransitionToResult<S, V> | StayResult<V> | PatchResult<V>
+): Readonly<V> {
+  if (result.kind === "patch") {
+    return sealValues(
+      { ...instance.values, ...result.values } as V,
+      instance.key
+    );
+  }
+  return result.values === undefined
+    ? instance.values
+    : sealValues(result.values, instance.key);
+}
+
+/**
  * Apply a transitionTo or stay result, through the fence.
  *
  * Every committed result in the runtime passes through here, which is what makes the
  * fence a single gate rather than a check somebody can forget.
+ *
+ * A timeout that arrived while the write was in flight is reported as `commit.raced`. The
+ * commit stands and is returned to the sender; the event says the two crossed.
  */
 async function commit<S extends string, V extends Values>(
   instance: InstanceRecord<S, V>,
   definition: EntityDefinition<string, S, V, Trigger>,
-  result: TransitionToResult<S, V> | StayResult<V>,
+  result: TransitionToResult<S, V> | StayResult<V> | PatchResult<V>,
   trigger: Trigger,
-  deps: DispatchDeps,
+  deps: RuntimeDeps,
   cause: EventCause,
   token: CommitToken
 ): Promise<CommitResult<S, V>> {
@@ -550,11 +771,7 @@ async function commit<S extends string, V extends Values>(
   }
 
   const state = result.kind === "transitionTo" ? result.state : instance.state;
-  // Omitted values carry the current ones forward rather than clearing them.
-  const values =
-    result.values === undefined
-      ? instance.values
-      : sealValues(result.values, instance.key);
+  const values = nextValues(instance, result);
 
   // Constraints are skipped for an attempt that cannot commit anyway. Recording a
   // violation for a result that was never going to land would put noise in the stream
@@ -574,9 +791,6 @@ async function commit<S extends string, V extends Values>(
     token
   );
 
-  // The commit reached the authority, and then a timeout arrived. The event is durable, so
-  // it stays: the sender was already told the attempt failed, and the honest thing is to
-  // say the two crossed rather than to leave the store and memory disagreeing.
   if (token.racedBy !== undefined) {
     deps.emit({
       type: "commit.raced",
@@ -602,9 +816,9 @@ async function commit<S extends string, V extends Values>(
 /** Record a refusal in the key's stream and reject the sender. */
 function refuse<S extends string, V extends Values>(
   instance: InstanceRecord<S, V>,
-  deps: DispatchDeps,
+  deps: RuntimeDeps,
   cause: EventCause,
-  code: "UNKNOWN_STATE" | "UNKNOWN_TRIGGER",
+  code: "UNKNOWN_STATE" | "UNKNOWN_TRIGGER" | "UNHANDLED_TRIGGER",
   reason: () => string
 ): never {
   const message = reason();
@@ -616,8 +830,40 @@ function ignoreFencedResult(): void {
   // Deliberately empty. See the call site: this exists to mark a promise as handled.
 }
 
-function wait(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * Wait out a backoff, unless the runtime starts closing first.
+ *
+ * A retry is new work, and a closing runtime starts none, so the wait ends at once with
+ * `RUNTIME_CLOSED` and the sender learns its trigger did not land.
+ *
+ * The timer deliberately keeps the process alive. A program whose only pending work is an
+ * awaited `send()` between attempts would otherwise exit, successfully and silently, with
+ * the send never settled. Closing the runtime is how a waiting retry is let go.
+ */
+function wait(ms: number, closing: AbortSignal, key: string): Promise<void> {
+  const closed = () =>
+    new EkmanError(
+      "RUNTIME_CLOSED",
+      `the runtime closed while ${key} was waiting to retry, so no further attempt was made`,
+      { key }
+    );
+
+  return new Promise((resolve, reject) => {
+    if (closing.aborted) {
+      reject(closed());
+      return;
+    }
+
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(closed());
+    };
+    const timer = setTimeout(() => {
+      closing.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    closing.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function describe(value: unknown): string {

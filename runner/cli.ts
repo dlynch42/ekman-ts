@@ -4,6 +4,10 @@
  * Loads every scenario file, drives a runtime through the library's public API, and
  * reports pass/fail per scenario per conformance level. Exits non-zero if any scenario
  * at a claimed level fails.
+ *
+ * The exit code starts as a failure and is only cleared by a finished report. If the
+ * process ever runs out of work before the scenarios do, it exits on its own with no
+ * output, and that must not read as a pass.
  */
 import { format, summarize } from "./report";
 import type { ScenarioResult } from "./run";
@@ -35,6 +39,8 @@ async function main(): Promise<number> {
 
   return report.conforming ? 0 : 1;
 }
+
+process.exitCode = 1;
 
 main().then(
   (exitCode) => {

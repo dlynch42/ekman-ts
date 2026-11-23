@@ -1,12 +1,17 @@
 import type { AuditSink } from "./audit";
-import type { CompiledConstraints, ConstraintsConfig } from "./constraints";
+import type { ConstraintsConfig } from "./constraints";
 import type { TransitionEvent } from "./events";
 import type { MemoryConfig } from "./memory";
 import type { ExecutionPolicy } from "./policy";
-import type { HistoryResult, QueryCriteria, QueryResult } from "./query";
+import type {
+  HistoryResult,
+  QueryCriteria,
+  QueryResult,
+  StateMap,
+  StateMapOptions,
+} from "./query";
 import type { HandlerResult } from "./results";
 import type { Coordination, StoreLayer } from "./stack";
-import type { States } from "./states";
 // Type-only, and so erased: `telemetry.ts` names `OverflowPolicy` from here, and this
 // names `TelemetrySink` from there. Neither import survives compilation, so the cycle
 // exists only for the typechecker, which resolves it fine.
@@ -43,6 +48,13 @@ export interface InstanceSnapshot<
   readonly state: S;
   readonly values: Readonly<V>;
   readonly seq: number;
+  /** When the instance entered its current state, on the runtime's clock. */
+  readonly enteredAt: number;
+  /**
+   * When the instance last committed anything, on the runtime's clock: the last time it
+   * was heard from. A values-only commit advances this and leaves `enteredAt` alone.
+   */
+  readonly lastCommittedAt: number;
 }
 
 export interface HandlerContext {
@@ -116,19 +128,86 @@ export interface StatePolicyConfig<
   readonly handler: Handler<S, V, T>;
 }
 
+/**
+ * A state that names the trigger types it handles, one handler per type, with the same
+ * optional execution policy as the `handler` form.
+ *
+ * ```ts
+ * states: {
+ *   pending: {
+ *     on: {
+ *       pay: (order, trigger) => transitionTo("paid", { total: trigger.amount }),
+ *       cancel: () => transitionTo("cancelled"),
+ *     },
+ *   },
+ *   paid: () => stay(),
+ * }
+ * ```
+ *
+ * Each handler receives the member of the entity's trigger union its key names, so a
+ * payload field needs no narrowing and no cast. A trigger whose type has no entry here is
+ * refused with `UNHANDLED_TRIGGER` and the refusal is recorded: there is no fallback entry,
+ * because a fallback is the silent discard the unknown policy exists to prevent. A state
+ * that should accept any type is written as a plain handler.
+ *
+ * Triggers the runtime delivers are no exception. A state under a time bound, a freshness
+ * bound or a rule lists that trigger's type too.
+ */
+export interface StateOnConfig<
+  S extends string = string,
+  V extends Values = Values,
+  T extends TriggerLike = Trigger,
+> extends ExecutionPolicy {
+  readonly on: {
+    readonly [K in NoInfer<T>["type"]]?: Handler<
+      S,
+      V,
+      NoInfer<HandledBy<T, K>>
+    >;
+  };
+}
+
+/**
+ * The members of a trigger union a given `on` key receives.
+ *
+ * A union whose types are plain strings cannot be told apart by key, so every entry takes
+ * the whole of it. That is the entity with no declared union, whose handlers have always
+ * seen an untyped payload.
+ *
+ * Otherwise a member is chosen when its `type` includes the key, not only when it is the
+ * key. One member may stand for several types, as `{ type: "opened" | "closed" }` does,
+ * and its entry receives it with `type` narrowed to the one the key names.
+ */
+type HandledBy<T extends TriggerLike, K> = string extends T["type"]
+  ? T
+  : T extends unknown
+    ? K extends T["type"]
+      ? T["type"] extends K
+        ? T
+        : T & { readonly type: K }
+      : never
+    : never;
+
 export type StateConfig<
   S extends string = string,
   V extends Values = Values,
   T extends TriggerLike = Trigger,
-> = Handler<S, V, T> | StatePolicyConfig<S, V, T>;
+> = Handler<S, V, T> | StatePolicyConfig<S, V, T> | StateOnConfig<S, V, T>;
 
-/** One state's handler with its policy already layered and resolved. */
+/**
+ * What one state does with a trigger, with its policy already layered.
+ *
+ * Exactly one of `handler` and `on` is set: `handler` for a state that takes every trigger
+ * type, `on` for one that names the types it handles.
+ */
 export interface StateEntry<
   S extends string = string,
   V extends Values = Values,
   T extends TriggerLike = Trigger,
 > {
-  readonly handler: Handler<S, V, T>;
+  readonly handler?: Handler<S, V, T>;
+  /** Handlers by trigger type. A type with no entry is refused. */
+  readonly on?: ReadonlyMap<string, Handler<S, V, T>>;
   /** The entity-level policy with this state's override applied. Still unresolved. */
   readonly policy: ExecutionPolicy | undefined;
 }
@@ -157,11 +236,16 @@ export interface EntityConfig<
   readonly unknown?: UnknownPolicy;
   /**
    * Trigger types this entity recognizes. Omitted means every type is recognized and
-   * only a state with no handler reaches the unknown policy.
+   * only a state with no handler reaches the unknown policy, unless every state names its
+   * trigger types with `on`: then the recognized types are the ones those maps name.
+   *
+   * Checked against the trigger union when the entity has one, so a typo here is a compile
+   * error. With no union declared this is any list of strings.
    */
-  readonly triggers?: readonly string[];
+  readonly triggers?: readonly NoInfer<T>["type"][];
   /**
-   * Exactly one handler per state. Exhaustive over `S`.
+   * What each state does with a trigger: one handler, or one per trigger type under `on`.
+   * Exhaustive over `S`.
    *
    * Every type parameter is wrapped in `NoInfer`, and each one earns it:
    *
@@ -174,9 +258,15 @@ export interface EntityConfig<
    * - `T`: an unannotated handler parameter offers the bare constraint, which has no
    *   index signature, so `trigger.actor` would not compile. Blocking it lets the
    *   default apply instead.
+   *
+   * The `on` form is handed `T` bare because it does the wrapping itself: it has to pick
+   * one member of the union per key, and a wrapped union cannot be picked from.
    */
   readonly states: {
-    readonly [K in S]: StateConfig<NoInfer<S>, NoInfer<V>, NoInfer<T>>;
+    readonly [K in S]:
+      | Handler<NoInfer<S>, NoInfer<V>, NoInfer<T>>
+      | StatePolicyConfig<NoInfer<S>, NoInfer<V>, NoInfer<T>>
+      | StateOnConfig<NoInfer<S>, NoInfer<V>, T>;
   };
   /**
    * Execution policy for every state of this entity, layered over the runtime's own
@@ -201,6 +291,36 @@ export interface EntityConfig<
   readonly constraints?: ConstraintsConfig<NoInfer<S>, NoInfer<V>, NoInfer<T>>;
 }
 
+/** The states an entity declares and the moves between them it allows. Read-only. */
+export interface StateGraph {
+  /** How many states. */
+  readonly size: number;
+  /** Every state, in declaration order. */
+  readonly names: readonly string[];
+  /** Whether a transition graph was declared. Without one, every move is allowed. */
+  readonly hasEdges: boolean;
+  has: (state: string) => boolean;
+  allows: (from: string, to: string) => boolean;
+  targetsOf: (from: string) => readonly string[];
+  outDegree: (from: string) => number;
+  /** States nothing leaves. */
+  terminals: () => readonly string[];
+  reachableFrom: (from: string) => ReadonlySet<string>;
+  unreachableFrom: (from: string) => readonly string[];
+}
+
+declare const COMPILED: unique symbol;
+
+/**
+ * An entity's constraints in the form the runtime checks them in.
+ *
+ * Opaque on purpose. What a constraint compiles to is the runtime's business and changes
+ * with it; what was declared is in the config the entity was defined from.
+ */
+export interface EntityConstraints {
+  readonly [COMPILED]: never;
+}
+
 /** A validated, runtime-free entity definition. Safe to share across runtimes. */
 export interface EntityDefinition<
   N extends string = string,
@@ -218,7 +338,7 @@ export interface EntityDefinition<
    * The states this entity has and the moves between them it allows, present whether or not
    * any constraint was declared. With no edges declared, every transition is legal.
    */
-  readonly states: States;
+  readonly states: StateGraph;
   /**
    * What the entity attaches to each of its states. One handler per state, which is what
    * makes the entity the implementer of the structure above rather than a description of it.
@@ -230,7 +350,7 @@ export interface EntityDefinition<
    * Compiled constraints, or undefined when the entity declares none. Constraints set to
    * `off` compile away entirely, so undefined and "all off" are the same fast path.
    */
-  readonly constraints: CompiledConstraints<S, V, T> | undefined;
+  readonly constraints: EntityConstraints | undefined;
   /** Build a full key from an id, without needing a runtime. */
   key: (id: string) => string;
 }
@@ -264,13 +384,24 @@ export interface EntityHandle<
   key: (id: string) => string;
   /** Resolves at commit. Rejects on a failed handler or a refused trigger. */
   send: (id: string, trigger: T) => Promise<CommitResult<S, V>>;
-  /** Fire and forget. Wraps `send` and swallows nothing: failures surface as telemetry. */
+  /** Fire and forget. Wraps `send` and swallows nothing: a failure goes to `onUnhandled`. */
   post: (id: string, trigger: T) => void;
   inspect: (id: string) => InstanceSnapshot<S, V> | undefined;
   /** The full per-key stream, read through the store when one is configured. */
   history: (id: string) => Promise<HistoryResult<S, V>>;
-  /** This entity's instances by state and time in state. */
-  query: (criteria?: Omit<QueryCriteria, "entity">) => Promise<QueryResult>;
+  /**
+   * This entity's instances by state and time in state. A state the entity does not have
+   * is a compile error here.
+   *
+   * Declared as a method, where its neighbours are properties, so that a handle with
+   * narrow states still fits a parameter typed as a plain `EntityHandle`.
+   */
+  // biome-ignore lint/style/useConsistentMethodSignatures: see above; a property signature would make the handle invariant in its states
+  query(
+    criteria?: Omit<QueryCriteria<S, V>, "entity">
+  ): Promise<QueryResult<S, V>>;
+  /** Where every instance of this entity is: a count and the keys for each state. */
+  map: (options?: StateMapOptions) => Promise<StateMap<S>>;
   /**
    * Delete an instance outright, from memory and from every store layer.
    *
@@ -335,8 +466,8 @@ export interface InboxConfig {
  * How temporal constraints are evaluated.
  *
  * Evaluation is a sweep rather than a timer per instance, so one pass costs the states
- * that are actually watched and nothing else. `sweep()` runs a pass on demand; `sweepMs`
- * additionally runs one on an interval.
+ * that are actually watched and, with a store, one scan of it per entity that has a
+ * bound. `sweep()` runs a pass on demand; `sweepMs` additionally runs one on an interval.
  */
 export interface TemporalConfig {
   /**
@@ -371,6 +502,28 @@ export interface StorageConfig {
   readonly sweepMs?: number;
 }
 
+/** How the runtime treats the cache layers of a layered store. */
+export interface CacheConfig {
+  /**
+   * How long one call into a cache layer may take, in milliseconds. Defaults to 5 seconds.
+   *
+   * A cache is never allowed to cost more than itself. A read that takes longer is a
+   * miss, and the commit authority answers. A write that takes longer is a failed write.
+   * Both are reported as `store.cacheFailed`. A layer whose reads, or whose writes, go
+   * unanswered three times in a row is not used again by this runtime, which is reported
+   * as `store.cacheSuspended`.
+   *
+   * Has no effect on the commit authority, or on a stack with no cache layer.
+   */
+  readonly timeoutMs?: number;
+}
+
+/** What `close()` accepts. */
+export interface CloseOptions {
+  /** How long to wait for in-flight work, in milliseconds. Defaults to 30 seconds. */
+  readonly timeoutMs?: number;
+}
+
 export interface EkmanConfig<
   D extends readonly AnyEntityDefinition[] = readonly AnyEntityDefinition[],
 > {
@@ -389,18 +542,22 @@ export interface EkmanConfig<
    * processes is refused at startup rather than accepted and quietly under-delivered.
    */
   readonly coordination?: Coordination;
+  /** The time bound on calls into cache layers. */
+  readonly cache?: CacheConfig;
   /**
    * Where commits go. Omitted means memory only, which is a valid documented mode rather
    * than a degraded one: nothing survives the process, and nothing pretends to.
    *
-   * A list is a layered stack, read fastest first. Exactly one layer is the commit
-   * authority: the last durable one, or the last one when none is durable, unless a layer
-   * claims it with `authority: true`. Every other layer is a cache, written after the fact
-   * and never able to fail a commit.
+   * A list is a layered stack, fastest first. Exactly one layer is the commit authority:
+   * the last durable one, or the last one when none is durable, unless a layer claims it
+   * with `authority: true`. Every other layer is a cache: written after the authority and
+   * never able to fail a commit, and read before it when an instance is loaded. `history`
+   * and `query` read the authority only.
    *
    * ```ts
    * store: "file"                                  // durable, in .ekman/logs
    * store: ["memory", "file"]                      // layered, fastest first
+   * store: [{ kind: "memory", maxKeys: 10_000 }, "file"]  // a cache with a bound
    * store: { kind: "file", dir: "/var/lib/svc" }   // somewhere specific
    * store: ["memory", redisStore(client)]          // an adapter core does not ship
    * store: "none"                                  // keeps nothing, and says so
@@ -440,10 +597,47 @@ export interface EkmanConfig<
   /** Time source, in milliseconds. Defaults to `Date.now`. Injected by tests. */
   readonly now?: () => number;
   /**
-   * Where a failure from `post()` goes. There is no caller to reject, and dropping it
-   * silently is exactly the failure mode this runtime exists to prevent.
+   * Where a failure with no caller to reject goes: a `post()` that failed, a telemetry
+   * handler that threw, an escalation that could not be delivered, a sweep that failed, a
+   * snapshot or a refusal that could not be written. Dropping one silently is exactly the
+   * failure mode this runtime exists to prevent.
    *
-   * Defaults to logging on stderr. Replace it to route into your own telemetry.
+   * Defaults to logging on stderr with the source named. Replace it to route into your own
+   * telemetry.
    */
-  readonly onUnhandled?: (error: unknown) => void;
+  readonly onUnhandled?: OnUnhandled;
 }
+
+/** Where a failure nobody was waiting on came from. */
+export interface UnhandledContext {
+  /**
+   * What was being done when it failed.
+   *
+   * - `post`: a fire-and-forget send was refused or its handler failed.
+   * - `telemetry`: a telemetry handler threw or rejected.
+   * - `escalation`: a time-in-state bound fired and its trigger was refused.
+   * - `sweep`: an automatic time-in-state sweep failed, or a sweep could not scan the
+   *   store or load an instance it found there.
+   * - `storage-sweep`: an automatic storage sweep failed.
+   * - `snapshot`: the snapshot written when an instance is evicted failed.
+   * - `persist`: a refusal or a violation could not be written to the store.
+   * - `audit`: delivering to an audit sink failed in a way the sink's own retries did
+   *   not cover.
+   * - `inbox`: a key's queue stopped draining.
+   */
+  readonly source:
+    | "post"
+    | "telemetry"
+    | "escalation"
+    | "sweep"
+    | "storage-sweep"
+    | "snapshot"
+    | "persist"
+    | "audit"
+    | "inbox";
+  /** The key it concerned, when it concerned one. */
+  readonly key?: string;
+}
+
+/** Receives a failure nobody was waiting on, and where it came from. */
+export type OnUnhandled = (error: unknown, context: UnhandledContext) => void;

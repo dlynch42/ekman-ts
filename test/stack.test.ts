@@ -3,11 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { isEkmanError } from "../src/errors";
+import type { EkmanEvent } from "../src/events";
 import type { Coordination } from "../src/stack";
 import { assertCoordination, createStore, resolveStack } from "../src/stack";
 import type { Store } from "../src/store";
+import { EMPTY_SEQ } from "../src/store";
 import { defaultLogDir, fileStore } from "../src/stores/file";
-import { memoryStore } from "../src/stores/memory";
+import { memoryStore, STATE_FOLD_EVERY } from "../src/stores/memory";
 
 const NOT_COMBINABLE = /cannot be combined/;
 const NOT_BUILT = /is not one this runtime builds/;
@@ -16,6 +18,10 @@ const ABSENCE_OF_A_STORE = /names the absence/;
 const NOT_A_COORDINATION = /is not recognized/;
 const NEEDS_MULTI_WRITER = /declares it cannot/;
 const NOTHING_TO_COORDINATE = /no store is configured/;
+const DROPS_KEYS = /declares that it drops keys/;
+const NAMES_KEEP = /keep: "state"/;
+const NAMES_MAX_KEYS = /maxKeys/;
+const CACHE_UNDER_MULTI = /cache layer "memory" would be read before/;
 
 const dirs: string[] = [];
 function freshDir(): string {
@@ -47,6 +53,10 @@ const code = (run: () => unknown): string => {
   return "no-throw";
 };
 
+const UNCONDITIONAL_AUTHORITY =
+  /"truth" is the commit authority behind a cache layer, and it does not declare a conditional append/;
+const BEHIND_SEVERAL = /behind cache layers/;
+
 describe("resolving a store stack", () => {
   it("is empty when no store is configured, which is a valid mode", () => {
     const stack = resolveStack(undefined);
@@ -67,6 +77,131 @@ describe("resolving a store stack", () => {
     expect(stack.authority).toBe(only);
     expect(stack.caches).toEqual([]);
     expect(stack.durable).toBe(false);
+  });
+
+  describe("a memory layer", () => {
+    const first: EkmanEvent = {
+      type: "transition",
+      key: "orders:1",
+      from: null,
+      to: "open",
+      seq: 0,
+      at: 0,
+      cause: { type: "touch", id: "t0" },
+      values: {},
+    };
+
+    it("keeps state and not the stream when it is a cache", async () => {
+      const cache = memoryStore({ name: "cache" });
+      resolveStack([cache, durable()]);
+
+      await cache.append("orders:1", first, EMPTY_SEQ);
+      for (let seq = 1; seq < STATE_FOLD_EVERY; seq += 1) {
+        // biome-ignore lint/performance/noAwaitInLoops: each append is conditional on the one before
+        await cache.append(
+          "orders:1",
+          { ...first, from: "open", seq },
+          seq - 1
+        );
+      }
+
+      expect(await cache.read("orders:1")).toEqual([]);
+      expect((await cache.load("orders:1"))?.snapshot?.seq).toBe(
+        STATE_FOLD_EVERY - 1
+      );
+    });
+
+    it("keeps the stream when it is the only layer", async () => {
+      const only = memoryStore();
+      resolveStack(only);
+
+      await only.append("orders:1", first, EMPTY_SEQ);
+
+      expect(await only.read("orders:1")).toHaveLength(1);
+    });
+
+    it("keeps the stream as a cache when it is told to", async () => {
+      const cache = memoryStore({ name: "cache", keep: "stream" });
+      resolveStack([cache, durable()]);
+
+      await cache.append("orders:1", first, EMPTY_SEQ);
+
+      expect(await cache.read("orders:1")).toHaveLength(1);
+    });
+
+    it("folds what it already held when it becomes a cache", async () => {
+      const cache = memoryStore({ name: "cache" });
+      await cache.append("orders:1", first, EMPTY_SEQ);
+
+      resolveStack([cache, durable()]);
+
+      expect(await cache.read("orders:1")).toEqual([]);
+      expect(await cache.load("orders:1")).toMatchObject({
+        seq: 0,
+        events: [],
+        snapshot: { state: "open", seq: 0 },
+      });
+    });
+
+    it.each([
+      ["state and not the stream", { keep: "state" }, NAMES_KEEP],
+      ["a limited number of keys", { maxKeys: 10 }, NAMES_MAX_KEYS],
+    ] as const)(
+      "is refused as the authority when asked to keep %s",
+      (_what, options, naming) => {
+        const alone = () => resolveStack({ kind: "memory", ...options });
+        const behind = () =>
+          resolveStack([
+            "memory",
+            { kind: "memory", name: "truth", ...options },
+          ]);
+
+        expect(code(alone)).toBe("INVALID_CONFIG");
+        expect(alone).toThrow(naming);
+        expect(code(behind)).toBe("INVALID_CONFIG");
+      }
+    );
+
+    it("is decided by what it was asked for, not by a role it had before", async () => {
+      const store = memoryStore({ name: "moved" });
+      resolveStack(store);
+      await store.append("orders:1", first, EMPTY_SEQ);
+      expect(await store.read("orders:1")).toHaveLength(1);
+
+      // Once an authority, now a cache: it keeps state, and folds what it held.
+      resolveStack([store, durable()]);
+      expect(await store.read("orders:1")).toEqual([]);
+
+      // And an authority again, without being refused for a choice it never made.
+      expect(resolveStack(store).authority).toBe(store);
+    });
+
+    it("takes both as a cache, named in the stack", () => {
+      const stack = resolveStack([
+        { kind: "memory", name: "hot", keep: "state", maxKeys: 10 },
+        durable(),
+      ]);
+
+      expect(stack.caches[0]?.capabilities.evicts).toBe(true);
+    });
+  });
+
+  it("refuses any authority that drops keys, whatever kind of store it is", () => {
+    const inner = memoryStore({ name: "bounded", maxKeys: 1 });
+    const wrapped: Store = {
+      name: inner.name,
+      capabilities: inner.capabilities,
+      append: inner.append.bind(inner),
+      load: inner.load.bind(inner),
+      read: inner.read.bind(inner),
+      scan: inner.scan.bind(inner),
+      snapshot: inner.snapshot.bind(inner),
+      forget: inner.forget.bind(inner),
+    };
+
+    expect(code(() => resolveStack(wrapped))).toBe("INVALID_CONFIG");
+    expect(() => resolveStack(wrapped)).toThrow(DROPS_KEYS);
+    expect(resolveStack([wrapped, durable()]).caches).toEqual([wrapped]);
   });
 
   it("picks the last durable layer as the authority", () => {
@@ -134,6 +269,86 @@ describe("resolving a store stack", () => {
       memoryStore({ name: "b" }),
     ]);
     expect(stack.durable).toBe(false);
+  });
+
+  describe("a layer that would be a cache", () => {
+    const lacking = (
+      capabilities: Partial<Store["capabilities"]>,
+      methods: Partial<Store> = {}
+    ): Store => {
+      const inner = memoryStore({ name: "front" });
+      return {
+        name: inner.name,
+        capabilities: { ...inner.capabilities, ...capabilities },
+        append: inner.append.bind(inner),
+        load: inner.load.bind(inner),
+        read: inner.read.bind(inner),
+        snapshot: inner.snapshot.bind(inner),
+        scan: inner.scan.bind(inner),
+        forget: inner.forget.bind(inner),
+        ...methods,
+      };
+    };
+    const refusal = (layer: Store): string => {
+      try {
+        resolveStack([layer, durable()]);
+      } catch (error) {
+        return isEkmanError(error) && error.code === "INVALID_CONFIG"
+          ? error.message
+          : "not a configuration refusal";
+      }
+      return "accepted";
+    };
+
+    it("is refused without a conditional append, which is what keeps it in step", () => {
+      const message = refusal(lacking({ conditionalAppend: false }));
+      expect(message).toContain('store layer "front"');
+      expect(message).toContain("does not declare a conditional append.");
+    });
+
+    it("is refused when it cannot delete a key, which is how it is cleared", () => {
+      expect(refusal(lacking({ forget: false }))).toContain(
+        "does not declare forget."
+      );
+      // Declaring it is not having it.
+      const { forget: _forget, ...withoutTheMethod } = lacking({});
+      expect(refusal(withoutTheMethod)).toContain("does not declare forget.");
+    });
+
+    it("is refused in front of an authority that cannot refuse a stale commit", () => {
+      const inner = memoryStore({ name: "truth", authority: true });
+      const unconditional: Store = {
+        name: inner.name,
+        authority: true,
+        capabilities: { ...inner.capabilities, conditionalAppend: false },
+        append: inner.append.bind(inner),
+        load: inner.load.bind(inner),
+        read: inner.read.bind(inner),
+        snapshot: inner.snapshot.bind(inner),
+        scan: inner.scan.bind(inner),
+        forget: inner.forget.bind(inner),
+      };
+
+      expect(() => resolveStack([lacking({}), unconditional])).toThrow(
+        UNCONDITIONAL_AUTHORITY
+      );
+      expect(() =>
+        resolveStack([lacking({}), memoryStore({ name: "mid" }), unconditional])
+      ).toThrow(BEHIND_SEVERAL);
+      // On its own it has no cache to be misled by.
+      expect(resolveStack([unconditional]).authority).toBe(unconditional);
+    });
+
+    it("is told everything it lacks at once", () => {
+      expect(
+        refusal(lacking({ conditionalAppend: false, forget: false }))
+      ).toContain("does not declare a conditional append or forget.");
+    });
+
+    it("is accepted as the only layer, where nothing is read ahead of it", () => {
+      const alone = lacking({ conditionalAppend: false, forget: false });
+      expect(resolveStack(alone).authority).toBe(alone);
+    });
   });
 
   it("keeps the declared order in layers", () => {
@@ -235,6 +450,12 @@ describe("coordination", () => {
     expect(() => assertCoordination(stack, "multi")).toThrow(
       NEEDS_MULTI_WRITER
     );
+  });
+
+  it("refuses multi-runtime with a cache layer, which would not know what the others wrote", () => {
+    const stack = resolveStack(["memory", durable()]);
+    expect(() => assertCoordination(stack, "multi")).toThrow(CACHE_UNDER_MULTI);
+    expect(() => assertCoordination(stack, "single")).not.toThrow();
   });
 
   it("refuses multi-runtime with nothing to coordinate through", () => {

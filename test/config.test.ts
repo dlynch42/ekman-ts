@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_CAPACITY, resolveInboxConfig } from "../src/config";
+import {
+  assertKnownKeys,
+  DEFAULT_CAPACITY,
+  resolveInboxConfig,
+} from "../src/config";
 import { EkmanError } from "../src/errors";
+
+const MISSPELLED =
+  /memory has an unrecognized option "maxbytes"\. Known options: maxBytes, eviction\./;
 
 describe("resolveInboxConfig", () => {
   it("defaults to a bounded inbox that rejects on overflow", () => {
@@ -50,5 +57,24 @@ describe("resolveInboxConfig", () => {
 
   it("is frozen, so a resolved config cannot drift under the runtime", () => {
     expect(Object.isFrozen(resolveInboxConfig(undefined))).toBe(true);
+  });
+});
+
+describe("assertKnownKeys", () => {
+  it("accepts known keys and an absent object", () => {
+    expect(() =>
+      assertKnownKeys("inbox", { capacity: 1 }, ["capacity"])
+    ).not.toThrow();
+    expect(() =>
+      assertKnownKeys("inbox", undefined, ["capacity"])
+    ).not.toThrow();
+  });
+
+  it("names the key it does not recognize and the ones it does", () => {
+    const asserting = () =>
+      assertKnownKeys("memory", { maxbytes: 1 }, ["maxBytes", "eviction"]);
+
+    expect(asserting).toThrow(EkmanError);
+    expect(asserting).toThrow(MISSPELLED);
   });
 });

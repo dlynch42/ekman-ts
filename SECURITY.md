@@ -4,7 +4,8 @@
 
 | Version | Supported |
 |---|---|
-| 0.1.x | Yes |
+| 0.2.x | Yes |
+| 0.1.x | No |
 
 Ekman is pre-1.0. Fixes land on the latest minor version; older minors are not patched.
 
@@ -33,7 +34,10 @@ application, and it is not a mechanism for running untrusted code.
 **Committed values are written to disk in plaintext.** With `store: "file"`, whatever you put in
 an instance's `values` is serialized as JSON into `.ekman/logs/`, one log per key, alongside the
 transition history. Ekman does not encrypt, redact or classify it. If values hold secrets or
-personal data, that is what is on disk, subject to your own filesystem permissions and retention.
+personal data, that is what is on disk, subject to your retention settings. The files are created readable
+and writable by the process's own user only (`0o600`, in directories of `0o700`) unless you
+configure a wider `mode`. Files created by an earlier version keep whatever permissions they
+were given.
 
 **Keys are visible.** Keys appear in log filenames, history, query results, telemetry events and
 error messages. They are designed to be human-readable, so do not encode secrets in them.

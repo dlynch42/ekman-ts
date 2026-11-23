@@ -66,8 +66,11 @@ export const ekman = new Ekman({
 
   // Nothing here should ever fire. It exists so that if something does, it is visible
   // rather than becoming an unhandled rejection with no context.
-  onUnhandled: (error) => {
-    console.error("[ekman] unhandled", error);
+  onUnhandled: (error, { source, key }) => {
+    console.error(
+      `[ekman] unhandled (${source}${key ? ` ${key}` : ""})`,
+      error
+    );
   },
 });
 

@@ -1,0 +1,36 @@
+{
+  "$schema": "../schema/scenario.schema.json",
+  "id": "core/162-query-ties-order-by-key-as-plain-strings",
+  "name": "instances that entered a state at the same instant are ordered by key as plain strings, uppercase before lowercase, whether or not the answer is limited",
+  "level": "core",
+  "given": {
+    "runtime": { "clock": { "start": 0, "stepMs": 0 } },
+    "entities": [
+      {
+        "name": "orders",
+        "initial": "open",
+        "states": [{ "state": "open", "else": { "result": "stay" } }]
+      }
+    ]
+  },
+  "when": [
+    { "send": { "key": "orders:b", "trigger": { "type": "t" } } },
+    { "send": { "key": "orders:a", "trigger": { "type": "t" } } },
+    { "send": { "key": "orders:B", "trigger": { "type": "t" } } }
+  ],
+  "then": {
+    "queries": [
+      {
+        "entity": "orders",
+        "keys": ["orders:B", "orders:a", "orders:b"]
+      },
+      {
+        "entity": "orders",
+        "limit": 2,
+        "keys": ["orders:B", "orders:a"],
+        "complete": false,
+        "reasons": ["no-durable-store", "limit-reached"]
+      }
+    ]
+  }
+}

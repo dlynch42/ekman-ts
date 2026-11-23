@@ -26,6 +26,7 @@ client you are not using.
 | `"file"` | Durable. Writes to `.ekman/logs/`. |
 | `"none"` | Says out loud that this runtime keeps nothing. |
 | `{ kind: "file", dir, retention }` | The file store with options. |
+| `{ kind: "memory", keep, maxKeys }` | The memory store with options, for when it is a [cache](#a-memory-cache). |
 | a `Store` instance | An adapter Ekman does not ship. |
 
 ## Layering
@@ -35,9 +36,128 @@ store: ["memory", "file"],
 ```
 
 Layers are listed fastest first. **Exactly one layer is the commit authority** and owns the
-truth: the last durable one. The rest are caches, written after the fact, and a cache that fails
-to write is reported through [telemetry](./telemetry.md) as `store.cacheFailed` without failing
-the commit.
+truth: the last durable one. The rest are caches.
+
+To choose the authority yourself, mark one layer with `authority: true`:
+
+```ts
+store: [{ kind: "memory" }, { kind: "file", authority: true }],
+```
+
+Marking more than one is refused at startup. So is an authority that is held in memory while
+a durable layer sits in front of it, since a restart would then lose committed state with a
+durable store configured.
+
+A commit goes to the authority, and resolves there. The caches are written afterwards, in order
+per key, and no commit or `history()` ever waits for one.
+
+`close()` waits for cache writes only when a cache outlives the process, as a file store placed
+in front of another authority does. A write it never received would leave it one commit behind
+for the next process to load. The wait shares the deadline of `close({ timeoutMs })`, and
+whatever is still queued at the deadline is dropped and counted in `runtime.closed` as
+`cachePending`. A write that ran out of `cache.timeoutMs` and has still not settled is waited
+for and counted too, since it can land after the layers close. A stack whose caches are all `"memory"` is never waited for: what they are owed
+dies with them. With a cache of each kind, a key's writes reach its caches in one order, so
+they are waited for together.
+
+A cache that outlives the process can still end up behind, after a crash between the
+authority's write and its own, or a shutdown that ran out of time. The next process then loads
+that key from the cache, the authority refuses the commit built on it, and that one `send()`
+rejects with `STORE_CONFLICT`. The key is cleared from the caches and the next send loads from
+the authority. Nothing stale is committed.
+
+When an instance that is not resident is loaded, the caches are asked first, fastest first, and
+the first that holds the key answers. If none does, the authority answers and the caches are
+filled from it, so the next load of that key is a cache's. This is the one read a cache serves.
+A load that arrives while writes for its key are still on their way to the caches does not wait
+for them either: the authority answers it, so a cache that is slow costs the key its cache and
+nothing else.
+`history()` and `query()` always read the authority, because a cache holds the state of a key
+and not necessarily its whole stream.
+
+A cache is only read while it holds exactly what the authority accepted for a key, or nothing:
+
+- A cache write that fails is reported through [telemetry](./telemetry.md) as
+  `store.cacheFailed`, without failing the commit, and the key is deleted from that cache. Its
+  next read is a miss, and the cache is filled again from the authority.
+- If the key cannot be deleted either, that cache is neither read nor written for that key again,
+  until a `forget` of the key succeeds there.
+- A cache that fails to answer is treated as a miss and reported the same way.
+- A cache that starts empty, as a memory layer does after every restart, is filled as instances
+  are loaded. Nothing fails while it catches up.
+
+Two things follow from a cache being read first:
+
+- **A cache layer has to be able to stay honest.** One that does not declare a conditional
+  append and `forget` is refused at startup with `INVALID_CONFIG`. So is an authority behind a
+  cache that does not declare a conditional append, since refusing a commit built on a stale
+  answer is its job.
+- **Nothing else may write the authority.** A cache cannot know what another process committed,
+  so a stack with a cache layer is refused under `coordination: "multi"`. If something outside
+  the runtime does move a key, the cache can answer one load with the older state. The commit
+  built on it is refused by the authority with `STORE_CONFLICT`, the key is cleared from the
+  caches, and the next trigger loads from the authority.
+
+An `instance.restored` event says what the layer that answered held: `from: "snapshot"` when a
+cache answered from a snapshot and has had few events since, whatever the authority's own log
+looks like.
+
+### A memory cache
+
+A `"memory"` layer in front of another store trades memory for skipping a disk read when an
+evicted instance comes back. None of what it holds is counted by the
+[memory budget](./memory.md), so it has bounds of its own.
+
+**It keeps state and not the stream.** A cache answers one read, the load of an instance, and
+that needs the key's state. So as a cache the memory store holds one snapshot per key and at
+most the last 16 events, folding them into the snapshot as they gather. A key costs it the same
+on its millionth commit as on its first. Pass `keep: "stream"` to have it hold every event, as
+it does when it is the only layer.
+
+**It can be told the most keys to hold:**
+
+```ts
+store: [{ kind: "memory", maxKeys: 10_000 }, "file"],
+```
+
+At the limit the key used least recently is dropped. A dropped key is a miss: the authority
+answers the next load of it and the cache is filled again. Without `maxKeys` it holds every key
+it has been sent for the life of the process, so set it when the budget is the point.
+
+Both are for a cache. On the commit authority, where `keep: "state"` would lose the history
+and `maxKeys` would lose committed state, they are refused at startup with `INVALID_CONFIG`.
+
+A memory store you wrap in a layer of your own is not told that it is a cache. Build it with
+`createStore({ kind: "memory", keep: "state" })` to get the same behaviour.
+
+### A cache that does not answer
+
+A cache layer is somebody else's code, often on the other end of a network, and it may never
+answer. Every call the runtime makes into one has a time bound:
+
+```ts
+cache: { timeoutMs: 5_000 },   // the default
+```
+
+- A read that runs out is a miss. The authority answers, so the load costs the bound once
+  and not forever.
+- A write that runs out is a failed write, and the writes queued behind it for that key go
+  ahead. It may still land later, so the cache is neither read nor written for that key until
+  the write has settled and the key has been deleted from it.
+- Both are reported as `store.cacheFailed`.
+- A cache whose reads, or whose writes, run out three times in a row is not used again by
+  this runtime. Nothing queued for it is sent. This is reported once, as
+  `store.cacheSuspended`, and a restart is what brings the layer back.
+- `forget()` still deletes the key from the authority and from every cache that answers, and
+  then rejects with `STORE_UNAVAILABLE` for a cache that was given up on, which may still
+  hold the key. Call `forget()` again once that cache is back.
+
+The bound cannot be turned off, only raised. It applies to cache layers alone: a commit waits
+for the authority for as long as the authority takes, and the handler's own `timeoutMs` is what
+bounds that.
+
+A layer that settles on the same turn it is called, as `"memory"` does, never has a timer set
+for it.
 
 ## Capabilities, and configurations that are refused
 
@@ -61,22 +181,130 @@ store: "file"                              // .ekman/logs/
 store: { kind: "file", dir: "/var/lib/app" }
 ```
 
-`.ekman/logs/` is found by walking up from the working directory to the nearest `package.json`,
-so the same service finds the same state however it was launched. A deployment with no
-`package.json` beside it, such as a bundled single-file build, should name the path explicitly
-rather than take the default.
+The default directory depends on where the process was started. `.ekman/logs/` is placed beside
+the nearest `package.json` at or above the **working directory**, and in the working directory
+itself when there is none. Starting the same service from somewhere else can therefore find a
+different, empty store:
 
-One log per key:
+- A service unit with `WorkingDirectory=/` and no `package.json` above it writes to `/.ekman/logs`.
+- In a monorepo, starting from a package directory and starting from the repository root resolve
+  to two different directories.
+- A bundled single-file build or a container image often has no `package.json` beside it.
+- On a read-only filesystem the directory cannot be created, and the runtime refuses to start
+  with `INVALID_CONFIG`.
+
+In production, name the path with `dir` and do not take the default.
+
+One log per key, in a directory per entity:
 
 ```
 .ekman/logs/orders/orders%3Aa-1.jsonl
 ```
+
+### What a commit guarantees
+
+A commit that resolved has been written to its log through the operating system. That survives
+the process ending, by a crash or a kill. It does not survive the machine losing power before
+the system flushes its cache: there is no fsync per commit.
+
+### Open logs
+
+A log being written to is kept open, so a commit is one write. Up to 256 are open at once, and
+past that the one least recently written to is closed and opened again when it is next needed.
+Change the number for a process with a tight descriptor limit:
+
+```ts
+store: { kind: "file", dir: "/var/lib/app", maxOpenLogs: 64 }
+```
+
+A file store also reports how many are open now, as `openLogs`. It is on the store object
+and not on the `Store` type, which every adapter shares, so build the store yourself to read
+it:
+
+```ts
+import { createStore } from "ekman";
+
+const store = createStore({ kind: "file", dir: "/var/lib/app", maxOpenLogs: 64 });
+const ekman = new Ekman({ entities: [orders], store });
+
+(store as { openLogs?: number }).openLogs; // never more than 64
+```
+
+`ekman.close()` closes them. The files belong to the store while it runs: removing one from
+outside leaves the store writing to a file nobody can reach, so delete through `forget`.
+
+### File names
+
+A file is named for its key, with every byte percent-escaped except lowercase ASCII letters,
+digits, `-` and `_`. Uppercase letters are escaped as well: `orders:ABC` is stored as
+`orders%3A%41%42%43.jsonl`. Keys are case-sensitive and many filesystems are not (macOS and
+Windows by default, and most network shares), so two keys that differ only in case have to
+differ in more than case on disk to stay two instances. The key itself is unchanged inside the
+file, and it is the key, never the file name, that appears in history and queries.
+
+Versions before this escaped less, leaving uppercase letters and `.` as they were. Files named
+that way are renamed the first time the store uses their entity's directory, with no step for
+you to run. If a key has a file under both schemes, which takes moving between versions and
+back to produce, the store refuses that entity's directory with `STORE_UNAVAILABLE` and changes
+neither file. It refuses the same way, naming the key, when an earlier file belongs to a key
+whose name under the current scheme is too long to be a file name. Move that file out of the
+store to carry on without the key.
+
+A name has to fit in one path component, so the file store refuses a key whose escaped name is
+longer than 240 bytes with `INVALID_KEY`. A key of lowercase letters and digits reaches that at
+240 characters; each uppercase letter, `:` or `.` counts as three, and other characters as three
+or more. A store used directly also refuses a key holding half of a surrogate pair, which the
+runtime never lets through.
+
+### Permissions
+
+The store creates its directories as `0o700` and its files as `0o600`: readable by the user
+the process runs as and nobody else. To share them with a group, say so:
+
+```ts
+store: { kind: "file", mode: { file: 0o640, dir: 0o750 } }
+```
+
+The mode is applied when something is created. Files that already exist keep the permissions
+they have until a snapshot or a compaction replaces them.
 
 ### Compaction
 
 Each log compacts once it passes 5MB. The events already folded into a snapshot are dropped, so
 current state and replay are untouched and only `history()` shortens. When it does, `history()`
 reports itself incomplete rather than presenting a truncated stream as a whole one.
+
+A log that passes its limit is compacted shortly after the commit that crossed it, on a later
+turn of the event loop, and not inside that commit: folding a log means rewriting it, and the
+sender who happened to cross the limit should not wait for that. A caller that never gives the
+event loop a turn, such as a loop of awaited sends and nothing else, gets a backstop instead: a
+log that reaches twice its limit is compacted in the commit that got it there. So a log can run
+to twice its limit, and no further. `ekman.close()` does any compaction still waiting.
+
+The snapshot and the shortened log are each written under a temporary name and renamed into
+place, snapshot first, so a crash mid-compaction leaves the old files or the new ones.
+Refusals and violations are never folded. A log that holds nothing else is left alone until
+the next commit gives compaction something to fold.
+
+### Failures
+
+A filesystem failure (a full disk, a permission change, a corrupt log) surfaces as
+`STORE_UNAVAILABLE`. The message names the store and the key, never a path; `store.dir` says
+where the files are, and the original error is on `cause`.
+
+A commit is reported as failed only if its line did not reach the log. Accounting and
+compaction run after the write, and a failure there does not fail the commit. It is kept on
+the store instead, until the next pass of the same kind succeeds:
+
+```ts
+const store = createStore({ kind: "file", dir: "/var/lib/app" });
+(store as { lastHousekeepingError?: EkmanError }).lastHousekeepingError;
+```
+
+Like `openLogs`, it belongs to the file store and is not on the `Store` type.
+
+A write that fails partway can leave a fragment at the end of a log. The store trims it
+before the next append to that key, so the fragment costs the one event that never landed.
 
 ## Retention
 
@@ -110,10 +338,75 @@ A trigger for an instance that is not resident reloads it transparently, from a 
 one exists and by replaying the stream where one does not. Your code cannot tell a resident
 instance from one that just came back off disk.
 
+The file store reads the snapshot first and then only the events after it. The first load of a
+key in a process parses its whole log, which is also when a torn last line is trimmed. After
+that it remembers where the events past the snapshot begin, so an instance that is evicted and
+reloaded over and over pays for what it committed since it was last loaded, not for its whole
+history.
+
 The reload is recorded in the per-key stream as a `restored` event, carrying the sequence it was
 restored *to* without advancing it. That is what makes a gap in a stream explicable rather than
 mysterious. It is deliberately not persisted; writing a restore back to the store would turn
 every read into a write.
+
+## Writing a store adapter
+
+A store is anything that implements `Store`. Import the type, the shared helpers and the
+contract from `ekman/store`, declare your capabilities honestly, since the runtime refuses a
+configuration your declaration cannot satisfy, and run `storeContract` in your own tests:
+
+```ts
+import { describe, expect, it } from "vitest";
+import { storeContract } from "ekman/store";
+
+describe("my store", () => {
+  storeContract("mine", () => myStore(), { durable: true }, { it, expect });
+});
+```
+
+The contract takes the `it` and `expect` your suite already uses, so it depends on no test
+framework of its own. An adapter that passes can be put in a stack without reading the
+runtime.
+
+Three things about `load` and `snapshot` are easy to get wrong:
+
+- `load` returns the snapshot and every event the snapshot does not account for. That is each
+  commit above the snapshot's sequence, and also any refusal or violation recorded *at* that
+  sequence, since those carry the sequence of the commit they followed. `isAfterSnapshot` from
+  `ekman/store` is that test. Leaving them out loses the record that a time-in-state bound
+  already fired, and the bound fires a second time after the next reload.
+- A snapshot may carry a `temporal` field, which says what the instance's bounds and rules
+  had already said when it was taken. Store it and hand it back as given. `replay` reads it.
+- A snapshot may carry `lastCommittedAt`, when the instance last committed anything. Store
+  it and hand it back as given too. A store that builds its own snapshots, when compacting
+  for instance, takes it from `replay`, as it takes everything else. Never fill it in from
+  somewhere else: absent means unknown, and the runtime treats unknown as not stale.
+
+What the runtime holds you to:
+
+- `capabilities.scan` says whether your `scan` applies the `state` and `olderThan` criteria. A
+  scan that could not apply one names it in `unsupported`, as `"state"` or `"olderThan"`, and
+  the runtime finishes the filter and reports the answer as partial. If you declare that you
+  cannot filter, the runtime filters whether or not an answer says so.
+- `capabilities.scan.staleFor` says whether your `scan` applies `staleForMs`, the minimum
+  time since the last commit. It is optional and absent means no. Without it the runtime
+  finishes the filter and reports the answer as partial, loading any match that came back
+  with no `lastCommittedAt`. A store built on `scanKeys` applies it already and can declare
+  `staleFor: true`.
+- A scan may set `includeValues`. Carry each match's committed values in `values` when it
+  does; `scanKeys` already does. A `scan` that leaves them out is still correct, and the
+  runtime then loads each key it needs values for and reports the revision it loaded, so
+  supporting it is a matter of speed.
+  What a store must not do is carry values other than the last committed ones.
+- A scan may carry `skip`, a set of keys the runtime already has an answer for. Leave them
+  out without loading them. Ignoring it is still correct, only slower: the runtime drops those
+  rows itself.
+- `usage` is optional, and a method: `usage(): StoreUsage`. Implement it when the store can
+  say what it holds. `ekman.storageUsage` sums it across the stack.
+- `capabilities.evicts` says your store drops keys by itself to stay inside a bound of its own.
+  It is optional and absent means no. Only a cache layer should: the write it then refuses
+  with `STORE_CONFLICT`, for a key it no longer holds, is taken as a miss and not reported as
+  `store.cacheFailed`.
 
 ## Next
 

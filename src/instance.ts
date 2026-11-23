@@ -1,8 +1,14 @@
+import type { Loaded } from "./caches";
 import type { RuntimeDeps } from "./config";
 import type { Violation } from "./constraints";
 import type { ErrorCode } from "./errors";
 import { EkmanError, isEkmanError } from "./errors";
-import type { EkmanEvent, EventCause, TransitionEvent } from "./events";
+import type {
+  EkmanEvent,
+  EventCause,
+  RestoredEvent,
+  TransitionEvent,
+} from "./events";
 import {
   rejectedEvent,
   restoredEvent,
@@ -11,11 +17,22 @@ import {
 } from "./events";
 import { assertCommittable, CommitToken, fenceViolation } from "./fence";
 import { Inbox } from "./inbox";
-import { accountBytes } from "./memory";
+import { accountValueBytes, byteLength } from "./memory";
 import type { NodeId, States } from "./states";
-import type { ReplayedState, Store, StoreSnapshot } from "./store";
+import type { LoadResult, ReplayedState, Store, StoreSnapshot } from "./store";
 import { EMPTY_SEQ, replay } from "./store";
+import { LatchFold } from "./temporal";
 import type { InstanceSnapshot, Values } from "./types";
+import { freezeValues } from "./values";
+
+/**
+ * How many of its own events a record keeps in memory.
+ *
+ * Only reached when nothing else holds the stream. Without a bound, a key that commits for
+ * the life of a process grows without limit in a place the memory budget cannot see, since
+ * the budget counts values and not history.
+ */
+export const RESIDENT_HISTORY_LIMIT = 1000;
 
 /**
  * One resident instance: its committed state, values, sequence, event stream, and inbox.
@@ -43,19 +60,50 @@ export class InstanceRecord<
   #values: Readonly<V>;
   #seq: number;
   #enteredAt: number;
+  #lastCommittedAt: number;
   #bytes: number;
-  readonly #events: EkmanEvent<S, V>[] = [];
+  /** UTF-8 length of the key, measured once: it is part of every accounting and never changes. */
+  readonly #keyBytes: number;
+  /** UTF-8 length of the current state name, re-measured only when the state changes. */
+  #stateBytes!: number;
+  /**
+   * The events this record keeps.
+   *
+   * With no store this is the only copy of the stream, so everything is kept, up to
+   * `RESIDENT_HISTORY_LIMIT`. With a store the stream is read from there, and the only
+   * events kept are restores, which are never persisted and have to be woven back into a
+   * history read. The array is trimmed in batches, so it may briefly hold up to twice the
+   * limit; `events` never returns more than the limit.
+   */
+  #events: EkmanEvent<S, V>[] = [];
+  /** Whether the oldest events have been dropped. Assigned in the constructor, like `#stale`. */
+  #historyTrimmed: boolean;
+  #lastRestored: RestoredEvent | undefined;
+  /** Whether this record is the only holder of its stream, which is so when there is no store. */
+  readonly #retainsStream: boolean;
   readonly #deps: RuntimeDeps;
   readonly #states: States;
 
   /**
-   * Temporal constraints that have already fired for the current state.
+   * What this instance's time-in-state bounds have said about its current stay.
    *
-   * Cleared on every state change, so a constraint fires once per entry rather than on
-   * every sweep for as long as the instance sits there. Without this an interval sweep
-   * over one stuck instance produces an unbounded stream of identical escalations.
+   * Kept by the same fold a replay uses, fed every event this record writes, so what is
+   * resident and what the stream would rebuild are the same answer at every moment. That
+   * matters at eviction: the snapshot is taken when the key goes idle, which is before
+   * the sweep that raised an escalation has heard how it ended.
+   *
+   * Cleared on every move, so a bound fires once per stay rather than on every sweep for
+   * as long as the instance sits there.
    */
-  readonly #firedTemporal = new Set<string>();
+  readonly #temporal = new LatchFold();
+  /**
+   * Rules whose proposal is queued or running, with the id of that proposal's trigger.
+   * Memory only: a key with a trigger queued is never evicted, so there is nothing here
+   * for a store to hold.
+   */
+  readonly #proposing = new Map<string, string>();
+  /** How many callers are holding this record resident. See `pin`. */
+  #pins = 0;
 
   /**
    * Whether this record still has to be reconciled with the store.
@@ -115,10 +163,18 @@ export class InstanceRecord<
     deps: RuntimeDeps;
     /** Called when this key goes idle, which is when eviction may consider it. */
     onIdle?: () => void;
+    /**
+     * Load the key if the store holds it, and do not create it if the store does not.
+     * For a reader such as a sweep, which must never bring an instance into being.
+     */
+    loadOnly?: boolean;
   }) {
     this.key = args.key;
     this.entity = args.entity;
     this.#deps = args.deps;
+    this.#keyBytes = byteLength(args.key);
+    this.#retainsStream = args.deps.stack.authority === undefined;
+    this.#historyTrimmed = false;
     this.inbox = new Inbox({
       key: args.key,
       entity: args.entity,
@@ -136,16 +192,16 @@ export class InstanceRecord<
     this.#values = args.initialValues;
     this.#seq = 0;
     this.#enteredAt = args.at;
+    this.#lastCommittedAt = args.at;
     this.#bytes = this.#measure();
     this.#stale = false;
 
     if (args.deps.stack.authority === undefined) {
       // No store, so there is nothing to reconcile with and initialization is settled now.
       const event = this.#initEvent(args.at, args.cause);
-      this.#events.push(event);
+      this.#keep(event);
       // Initialization is a commit, so it fans out like one. Skipping it here would give
-      // an audit trail that starts at the second event, and leave a cache layer without
-      // the only event that establishes the key exists.
+      // an audit trail that starts at the second event.
       args.deps.audit(event);
       return;
     }
@@ -155,6 +211,7 @@ export class InstanceRecord<
       initialValues: args.initialValues,
       at: args.at,
       cause: args.cause,
+      loadOnly: args.loadOnly === true,
     };
   }
 
@@ -181,6 +238,7 @@ export class InstanceRecord<
   #setState(state: S): void {
     this.#state = state;
     this.#stateId = this.#states.idOf(state);
+    this.#stateBytes = byteLength(state);
   }
 
   get values(): Readonly<V> {
@@ -191,8 +249,43 @@ export class InstanceRecord<
     return this.#seq;
   }
 
+  /**
+   * The events this record retains, oldest first: the most recent
+   * `RESIDENT_HISTORY_LIMIT` of the stream with no store, and restores only with one.
+   */
   get events(): readonly EkmanEvent<S, V>[] {
-    return this.#events;
+    return this.#events.length > RESIDENT_HISTORY_LIMIT
+      ? this.#events.slice(-RESIDENT_HISTORY_LIMIT)
+      : this.#events;
+  }
+
+  /** Whether events older than the ones retained have been dropped. */
+  get historyTrimmed(): boolean {
+    return this.#historyTrimmed || this.#events.length > RESIDENT_HISTORY_LIMIT;
+  }
+
+  /** The most recent reload of this record from the store, if there has been one. */
+  get lastRestored(): RestoredEvent | undefined {
+    return this.#lastRestored;
+  }
+
+  /**
+   * Retain an event, dropping the oldest once there are too many.
+   *
+   * Dropped a limit's worth at a time rather than one per event, so a key at the limit
+   * does not shift a thousand entries on every commit.
+   */
+  #keep(event: EkmanEvent<S, V>): void {
+    this.#events.push(event);
+    if (this.#events.length >= RESIDENT_HISTORY_LIMIT * 2) {
+      this.#events = this.#events.slice(-RESIDENT_HISTORY_LIMIT);
+      this.#historyTrimmed = true;
+    }
+  }
+
+  #restored(event: RestoredEvent): void {
+    this.#lastRestored = event;
+    this.#keep(event as EkmanEvent<S, V>);
   }
 
   /** What this instance is accounted at, on the documented basis. */
@@ -211,13 +304,87 @@ export class InstanceRecord<
     return this.#enteredAt;
   }
 
-  /** Whether a temporal constraint has already fired since this state was entered. */
-  hasFired(constraint: string): boolean {
-    return this.#firedTemporal.has(constraint);
+  /**
+   * When this instance last committed anything, on the runtime's clock.
+   *
+   * Every commit advances it, a values-only one included, which is what separates "when
+   * did we last hear from it" from "how long has it been in this state". An instance
+   * loaded from a snapshot that never recorded it counts from the moment it was loaded:
+   * the runtime cannot call something stale on the strength of a time it does not know.
+   */
+  get lastCommittedAt(): number {
+    return this.#lastCommittedAt;
   }
 
-  markFired(constraint: string): void {
-    this.#firedTemporal.add(constraint);
+  /** Whether a temporal constraint has already fired since this state was entered. */
+  hasFired(constraint: string): boolean {
+    return this.#temporal.hasFired(constraint);
+  }
+
+  /** The trigger id of an escalation still owed to this constraint, if one was turned away. */
+  undelivered(constraint: string): string | undefined {
+    return this.#temporal.owed(constraint)?.id;
+  }
+
+  /**
+   * Whether an escalation with this cause is owed to any constraint on this instance.
+   *
+   * Asked before a fresh escalation is given an id. Trigger ids start over with each
+   * process, so a new one can repeat the id of an escalation a previous process left
+   * owed, and a commit answering either would then settle both.
+   */
+  owes(cause: EventCause): boolean {
+    return this.#temporal.owes(cause);
+  }
+
+  /** Arm a rule again, because its condition has stopped holding. */
+  rearm(rule: string): void {
+    this.#temporal.rearm(rule);
+    this.#proposing.delete(rule);
+  }
+
+  /** Whether a proposal this rule raised is still on its way to a handler. */
+  isProposing(rule: string): boolean {
+    return this.#proposing.has(rule);
+  }
+
+  /** Note that a rule's proposal has been sent, under this trigger id, and not yet answered. */
+  proposing(rule: string, id: string): void {
+    this.#proposing.set(rule, id);
+  }
+
+  /**
+   * Note that a proposal was answered.
+   *
+   * Only the proposal the rule is waiting on counts. A rule can be armed again and match
+   * again while an earlier proposal is still queued, and that earlier one being answered
+   * says nothing about the later one, which is still on its way.
+   */
+  proposed(rule: string, id: string): void {
+    if (this.#proposing.get(rule) === id) {
+      this.#proposing.delete(rule);
+    }
+  }
+
+  /**
+   * Record that the trigger a bound or a rule raised was refused for good, in a way the
+   * stream does not show, so it is done until it is armed again.
+   *
+   * Only while that trigger is the one still owed. If the instance moved, or was heard
+   * from, or the rule was armed again in the meantime, the refusal is about something
+   * that is over, and marking the bound or rule done would silence the next time.
+   */
+  refused(name: string, id: string): void {
+    if (this.#temporal.owed(name)?.id === id) {
+      this.#temporal.fire(name);
+    }
+  }
+
+  #rearmTemporal(cause?: EventCause): void {
+    this.#temporal.moved(cause);
+    // A proposal still queued was raised for the stay that just ended. The new one
+    // raises its own.
+    this.#proposing.clear();
   }
 
   /**
@@ -225,7 +392,22 @@ export class InstanceRecord<
    * waiting behind it.
    */
   get idle(): boolean {
-    return this.inbox.idle;
+    return this.inbox.idle && this.#pins === 0;
+  }
+
+  /**
+   * Keep this record from being evicted or deleted until the returned function is called.
+   *
+   * For work on a record that happens outside its inbox, where nothing else says the
+   * record is in use: a sweep loading it and evaluating its bounds one after another.
+   * Without this an escalation's own inbox turn ends, the key goes idle, and the record
+   * is released with the rest of its bounds still unread.
+   */
+  pin(): () => void {
+    this.#pins += 1;
+    return () => {
+      this.#pins -= 1;
+    };
   }
 
   /**
@@ -257,8 +439,21 @@ export class InstanceRecord<
       return Promise.resolve();
     }
 
-    this.#hydration ??= this.#hydrate(pending, authority);
+    this.#hydration ??= this.#hydrating(pending, authority);
     return this.#hydration;
+  }
+
+  /**
+   * Start a hydration whose failure is forgotten rather than cached.
+   *
+   * A failed load is a failed attempt, not a verdict on the key. Kept, the rejection would
+   * be handed to every later trigger for the life of the record.
+   */
+  #hydrating(pending: PendingInit<S, V>, authority: Store): Promise<void> {
+    return this.#hydrate(pending, authority).catch((error: unknown) => {
+      this.#hydration = undefined;
+      throw error;
+    });
   }
 
   /**
@@ -274,6 +469,16 @@ export class InstanceRecord<
    */
   get needsHydration(): boolean {
     return this.#pending !== undefined || this.#stale;
+  }
+
+  /**
+   * Whether this record has never been reconciled with the store at all.
+   *
+   * Narrower than `needsHydration`: a record another writer overtook is a real instance
+   * that is behind, while one that never loaded holds only the entity's initial state.
+   */
+  get unloaded(): boolean {
+    return this.#pending !== undefined;
   }
 
   /**
@@ -298,11 +503,14 @@ export class InstanceRecord<
       state: this.#state,
       values: this.#values,
       seq: this.#seq,
+      enteredAt: this.#enteredAt,
+      lastCommittedAt: this.#lastCommittedAt,
     });
   }
 
   /** The picture a store persists so a reload does not replay from the beginning. */
   storeSnapshot(at: number): StoreSnapshot<S, V> {
+    const temporal = this.#temporal.result();
     return Object.freeze({
       key: this.key,
       entity: this.entity,
@@ -311,6 +519,8 @@ export class InstanceRecord<
       seq: this.#seq,
       enteredAt: this.#enteredAt,
       at,
+      lastCommittedAt: this.#lastCommittedAt,
+      ...(temporal === undefined ? {} : { temporal }),
     });
   }
 
@@ -340,6 +550,10 @@ export class InstanceRecord<
    *
    * The apply itself is one synchronous block with no await inside it, which is what makes
    * a commit atomic to any observer reading through the runtime.
+   *
+   * The new values are measured before anything is written, so values that cannot be
+   * serialized refuse the commit. Measured afterwards, they would be applied in memory and
+   * then throw on the way out, leaving a commit no sender, audit sink or ledger heard about.
    */
   async commit(
     next: {
@@ -351,6 +565,10 @@ export class InstanceRecord<
     token: CommitToken
   ): Promise<TransitionEvent<S, V>> {
     assertCommittable(token, { key: this.key, seq: this.#seq });
+    const bytes = this.#measure(
+      next.values,
+      next.state === this.#state ? this.#stateBytes : byteLength(next.state)
+    );
     // From here the attempt owns the outcome: a timeout arriving mid-write must not leave
     // the store holding an event the runtime refused to apply.
     token.seal();
@@ -374,7 +592,7 @@ export class InstanceRecord<
       // doing it inside a failing commit would reload on behalf of an attempt that is
       // already over. Nothing was written, so there is nothing to undo.
       if (isEkmanError(error) && error.code === "STORE_CONFLICT") {
-        this.#stale = true;
+        this.#overtaken();
       }
       throw error;
     }
@@ -384,14 +602,22 @@ export class InstanceRecord<
     this.#setState(next.state);
     this.#values = next.values;
     this.#seq = event.seq;
-    this.#events.push(event);
+    this.#lastCommittedAt = next.at;
+    if (this.#retainsStream) {
+      this.#keep(event);
+    }
 
     if (moved) {
       this.#enteredAt = next.at;
-      this.#firedTemporal.clear();
+      this.#rearmTemporal(event.cause);
+    } else {
+      // A commit that answers an escalation settles the bound that raised it, here and
+      // not when the sweep hears back, because the key can be evicted in between.
+      this.#temporal.apply(event as EkmanEvent);
     }
 
-    this.#bytes = this.#measure();
+    this.#bytes = bytes;
+    this.#deps.committed(this, moved);
     this.#deps.audit(event);
     return event;
   }
@@ -448,15 +674,31 @@ export class InstanceRecord<
     );
   }
 
-  /** Append a non-commit event: into the stream now, towards the store behind it. */
+  /**
+   * Append a non-commit event: into the stream now, towards the store behind it.
+   *
+   * Not handed to audit sinks. A sink is told what was committed, and a refusal or a
+   * violation changed nothing. Both are in the stream and in telemetry for whoever wants
+   * them.
+   */
   #record(event: EkmanEvent<S, V>): void {
-    this.#events.push(event);
-    this.#deps.audit(event);
+    this.#temporal.apply(event as EkmanEvent);
+    if (this.#retainsStream) {
+      this.#keep(event);
+    }
 
     // Not awaited. Nothing downstream depends on it, and a caller being refused should not
     // wait on a disk write to be told so. Ordering against the next commit is preserved by
     // the write chain rather than by the caller.
-    this.#persist(event, this.#seq).catch(this.#deps.onUnhandled);
+    this.#persist(event, this.#seq).catch((error: unknown) => {
+      // Refused as conflicting, so another writer has moved this key, and whatever was
+      // just turned away was turned away on a state that is no longer the key's. Nothing
+      // else would ever say so: a record that only refuses never tries a commit.
+      if (isEkmanError(error) && error.code === "STORE_CONFLICT") {
+        this.#overtaken();
+      }
+      this.#deps.onUnhandled(error, { source: "persist", key: this.key });
+    });
   }
 
   /**
@@ -471,8 +713,16 @@ export class InstanceRecord<
    * committed. The handler for the next trigger gets the winner's state, which is the same
    * thing that would have happened had the two arrived in the other order.
    *
+   * If the other writer moved the instance, what the store holds is a different entry into
+   * a state than the one this record was tracking, even when the state name is the same
+   * because it left and came back. Temporal constraints are re-armed then, so nothing that
+   * fired or was owed for the old entry carries over. A change to values alone keeps the
+   * entry, and keeps them.
+   *
    * A key another writer deleted comes back as gone rather than as its old self, so it
-   * re-initializes on the next trigger like any other key nothing holds.
+   * re-initializes on the next trigger like any other key nothing holds. That is a new
+   * life: it enters the initial state now, and no temporal constraint that fired in the
+   * deleted one counts as fired.
    */
   async #reload(authority: Store): Promise<void> {
     const loaded = await authority.load(this.key);
@@ -480,6 +730,9 @@ export class InstanceRecord<
       loaded === undefined
         ? undefined
         : (replay(loaded) as ReplayedState<S, V> | undefined);
+    if (current !== undefined && this.#deps.caches.any) {
+      this.#deps.caches.refill(this.key, current);
+    }
 
     this.#stale = false;
 
@@ -494,77 +747,151 @@ export class InstanceRecord<
       this.#seq = 0;
       this.#bytes = this.#measure();
 
+      this.#enteredAt = this.#deps.now();
+      this.#lastCommittedAt = this.#enteredAt;
+      this.#rearmTemporal();
+
       const pending: PendingInit<S, V> = {
         initial: this.#initial,
         initialValues: this.#initialValues,
         at: this.#enteredAt,
         cause: RELOAD_CAUSE,
+        loadOnly: false,
       };
       this.#pending = pending;
-      this.#hydration = this.#hydrate(pending, authority);
+      this.#hydration = this.#hydrating(pending, authority);
       await this.#hydration;
       return;
     }
 
+    if (
+      current.state !== this.#state ||
+      current.enteredAt !== this.#enteredAt
+    ) {
+      this.#rearmTemporal();
+    } else {
+      // A reload follows a conflict, so another writer committed, here without moving
+      // the instance: it has been heard from since this record last looked. What its
+      // freshness bounds had said here is out of date, and the store's account, merged
+      // below, says what still stands.
+      this.#temporal.heardElsewhere();
+    }
+    // The store's account of the stay is taken in either way. Another runtime can have
+    // answered an escalation without moving the instance, and this one would raise it
+    // again if it kept only what it knew.
+    this.#temporal.merge(current.temporal);
+
     this.#setState(current.state);
-    this.#values = current.values;
+    this.#values = freezeValues(current.values);
     this.#seq = current.seq;
     this.#enteredAt = current.enteredAt;
+    this.#lastCommittedAt = current.lastCommittedAt ?? this.#deps.now();
     this.#bytes = this.#measure();
 
     // Recorded as a restore, because that is what it is: this runtime's view of the key
     // now begins somewhere other than where it thought. Without it, a stream would show a
     // handler deciding against values no earlier event in it accounts for.
-    this.#events.push(
+    this.#restored(
       restoredEvent({
         key: this.key,
         seq: current.seq,
         at: current.enteredAt,
         cause: RELOAD_CAUSE,
         from: loaded.snapshot === undefined ? "replay" : "snapshot",
-        replayed: loaded.events.length,
+        replayed: replayedCount(loaded),
       })
     );
   }
 
   async #hydrate(pending: PendingInit<S, V>, authority: Store): Promise<void> {
-    const loaded = await authority.load(this.key);
+    const found = await this.#load(pending, authority);
+    const { loaded } = found;
     // The store contract is untyped in the state and values, because a store holds many
     // entities. The definition this record was built from is what knows their real types.
-    const current =
-      loaded === undefined
-        ? undefined
-        : (replay(loaded) as ReplayedState<S, V> | undefined);
+    const current = found.current as ReplayedState<S, V> | undefined;
 
     if (loaded === undefined || current === undefined) {
+      if (pending.loadOnly && this.inbox.idle) {
+        // Nothing stored and nobody waiting to send, so there is no instance to make. The
+        // record stays unloaded for its creator to release. Should a trigger arrive
+        // first, it starts over and initializes the key as it would any other.
+        this.#pending = { ...pending, loadOnly: false };
+        this.#hydration = undefined;
+        return;
+      }
+
       // Genuinely new. Initialization is a commit at sequence 0, and it has to be durable
       // before anything is dispatched against it.
       const event = this.#initEvent(pending.at, pending.cause);
-      await this.#persist(event, EMPTY_SEQ);
-      this.#events.push(event);
+      try {
+        await this.#persist(event, EMPTY_SEQ);
+      } catch (error) {
+        if (isEkmanError(error) && error.code === "STORE_CONFLICT") {
+          this.#overtaken();
+          this.#pending = undefined;
+        }
+        throw error;
+      }
       this.#deps.audit(event);
       this.#pending = undefined;
       return;
     }
 
     this.#setState(current.state);
-    this.#values = current.values;
+    this.#values = freezeValues(current.values);
     this.#seq = current.seq;
     this.#enteredAt = current.enteredAt;
+    this.#lastCommittedAt = current.lastCommittedAt ?? pending.at;
     this.#bytes = this.#measure();
+    this.#temporal.moved();
+    this.#temporal.merge(current.temporal);
 
-    this.#events.push(
+    this.#restored(
       restoredEvent({
         key: this.key,
         seq: current.seq,
         at: pending.at,
         cause: pending.cause,
         from: loaded.snapshot === undefined ? "replay" : "snapshot",
-        replayed: loaded.events.length,
+        replayed: replayedCount(loaded),
       })
     );
 
     this.#pending = undefined;
+  }
+
+  /**
+   * Read this key for a record that has never been reconciled.
+   *
+   * A first load may be answered by a cache layer. A load that follows a conflict may
+   * not: it happens because another writer moved the key, and a cache is exactly what
+   * would not know. With no cache layers the authority is asked directly, so a runtime
+   * without them takes no extra turn on the way in.
+   */
+  async #load(pending: PendingInit<S, V>, authority: Store): Promise<Loaded> {
+    const { caches } = this.#deps;
+    if (caches.any && pending.cause !== RELOAD_CAUSE) {
+      return caches.read(this.key, () => authority.load(this.key));
+    }
+
+    const loaded = await authority.load(this.key);
+    return {
+      loaded,
+      current: loaded === undefined ? undefined : replay(loaded),
+    };
+  }
+
+  /**
+   * Note that another writer has moved this key.
+   *
+   * Whatever a cache layer holds for it is suspect from here, and may be what misled this
+   * record in the first place, so the key is cleared from them.
+   */
+  #overtaken(): void {
+    this.#stale = true;
+    if (this.#deps.caches.any) {
+      this.#deps.caches.drop(this.key, this.#seq);
+    }
   }
 
   #initEvent(at: number, cause: EventCause): TransitionEvent<S, V> {
@@ -582,10 +909,13 @@ export class InstanceRecord<
   }
 
   /**
-   * Send one event to the commit authority, in stream order.
+   * Send one event to the commit authority, in stream order, and on to the cache layers
+   * once the authority has it.
    *
    * The returned promise carries this write's real outcome; the chain itself is kept
-   * non-rejecting so one failure cannot poison every write queued behind it.
+   * non-rejecting so one failure cannot poison every write queued behind it. The caches
+   * are handed the event from the same chain, so they see events in stream order, and on
+   * a chain of their own, so nothing here waits for them.
    */
   #persist(event: EkmanEvent<S, V>, expectedSeq: number): Promise<void> {
     const { authority } = this.#deps.stack;
@@ -596,17 +926,40 @@ export class InstanceRecord<
     const written = this.#writes.then(() =>
       authority.append(this.key, event as EkmanEvent, expectedSeq)
     );
+    const { caches } = this.#deps;
+    if (caches.any) {
+      written.then(() => caches.mirror(event as EkmanEvent), ignore);
+    }
     this.#writes = written.then(ignore, ignore);
     return written;
   }
 
-  #measure(): number {
-    return accountBytes(
-      this.key,
-      this.#state,
-      this.#values,
-      this.#deps.memory.sizeOf
-    );
+  /**
+   * What this instance is accounted at, for the values and state given or the ones it has.
+   *
+   * Values it cannot serialize are refused with a code. A `BigInt` passes structured clone
+   * and fails here, and left bare that failure would reach the sender as a `TypeError`
+   * naming nothing.
+   */
+  #measure(
+    values: Values = this.#values,
+    stateBytes: number = this.#stateBytes
+  ): number {
+    try {
+      return (
+        this.#keyBytes +
+        stateBytes +
+        accountValueBytes(values, this.#deps.memory.sizeOf)
+      );
+    } catch (cause) {
+      // biome-ignore lint/style/useErrorCause: EkmanError takes `cause` in its options bag and forwards it to the Error constructor
+      throw new EkmanError(
+        "HANDLER_FAILED",
+        `values committed for ${this.key} cannot be serialized to JSON: ` +
+          `${(cause as Error).message}. Values must be plain JSON data.`,
+        { key: this.key, cause }
+      );
+    }
   }
 }
 
@@ -615,6 +968,8 @@ interface PendingInit<S extends string, V extends Values> {
   readonly initialValues: Readonly<V>;
   readonly at: number;
   readonly cause: EventCause;
+  /** Whether a key the store does not hold is left alone rather than initialized. */
+  readonly loadOnly: boolean;
 }
 
 /**
@@ -628,35 +983,24 @@ const RELOAD_CAUSE: EventCause = Object.freeze({
   id: "store-conflict",
 });
 
+/**
+ * How many events a load replayed on top of its snapshot.
+ *
+ * A refusal or a violation at the snapshot's own sequence comes back with the load and
+ * is not counted: nothing is rebuilt from it.
+ */
+function replayedCount(loaded: LoadResult): number {
+  const { snapshot, events } = loaded;
+  if (snapshot === undefined) {
+    return events.length;
+  }
+  return events.filter((event) => event.seq > snapshot.seq).length;
+}
+
 function ignore(): void {
   // Deliberately empty: this exists to keep the write chain from rejecting.
 }
 
 function noop(): void {
   // Deliberately empty: the default for a record nobody is watching for idleness.
-}
-
-/**
- * Deep-copy and freeze values at the commit boundary.
- *
- * Copying means a handler that keeps a reference to what it returned cannot mutate
- * committed state afterwards. `structuredClone` also enforces the documented contract
- * that values are serializable, and fails loudly here rather than at the first attempt
- * to persist them.
- */
-export function sealValues<V extends Values>(
-  values: V,
-  key: string
-): Readonly<V> {
-  try {
-    return Object.freeze(structuredClone(values) as V);
-  } catch (cause) {
-    // biome-ignore lint/style/useErrorCause: EkmanError takes `cause` in its options bag and forwards it to the Error constructor
-    throw new EkmanError(
-      "HANDLER_FAILED",
-      `values committed for ${key} are not serializable. Values must be a plain, ` +
-        "serializable map: no functions, class instances, or symbols.",
-      { key, cause }
-    );
-  }
 }

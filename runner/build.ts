@@ -11,21 +11,25 @@ import type {
   HandlerResult,
   InstanceSnapshot,
   ProposedCommit,
+  ReplayedState,
+  RuleConstraint,
+  StateConfig,
   Store,
   Trigger,
 } from "../src/index";
 import {
+  createStore,
   defineEntity,
   fail,
+  patch,
+  replay,
   statesFromEntries,
   stay,
   transitionTo,
 } from "../src/index";
-import { fileStore } from "../src/stores/file";
-import type { MemoryStore } from "../src/stores/memory";
-import { memoryStore } from "../src/stores/memory";
 import type {
   AuditSpec,
+  BehaviourSpec,
   CheckSpec,
   ConstraintsSpec,
   DoSpec,
@@ -44,17 +48,7 @@ import type {
 export function buildEntity(spec: EntitySpec): AnyEntityDefinition {
   const states = statesFromEntries(
     spec.name,
-    spec.states.map(
-      (state) =>
-        [
-          state.state,
-          // A state declaring a policy compiles to the object form, which is the same
-          // choice an application author makes when a state needs its own policy.
-          state.policy === undefined
-            ? compileState(state)
-            : { handler: compileState(state), ...state.policy },
-        ] as const
-    )
+    spec.states.map((state) => [state.state, declareState(state)] as const)
   );
 
   return defineEntity(spec.name, {
@@ -85,6 +79,7 @@ function buildConstraints(spec: ConstraintsSpec): ConstraintsConfig {
       ? {}
       : { transitions: spec.transitions }),
     ...(spec.temporal === undefined ? {} : { temporal: spec.temporal }),
+    ...(spec.stale === undefined ? {} : { stale: spec.stale }),
     ...(spec.guards === undefined
       ? {}
       : {
@@ -101,6 +96,35 @@ function buildConstraints(spec: ConstraintsSpec): ConstraintsConfig {
             check: compileCheck(invariant.check),
           })),
         }),
+    ...(spec.rules === undefined
+      ? {}
+      : {
+          rules: spec.rules.map((rule) => ({
+            ...rule,
+            when: compileCondition(rule.when),
+          })),
+        }),
+  };
+}
+
+/**
+ * A rule's condition, in the same grammar as a check and with the sense turned round: the
+ * condition holds when the check does. It is read against the committed instance, which
+ * stands where a check has the proposed commit.
+ */
+function compileCondition(spec: CheckSpec): RuleConstraint["when"] {
+  return (instance) => {
+    if (spec.throw !== undefined) {
+      throw new Error(spec.throw);
+    }
+
+    // A rule is evaluated against no trigger, so a `trigger` source reads nothing,
+    // whatever path it names.
+    const subject =
+      spec.trigger === undefined
+        ? readSubject(spec, instance, { type: "" })
+        : undefined;
+    return holds(spec, subject) ? (spec.reason ?? true) : false;
   };
 }
 
@@ -211,12 +235,26 @@ export class ScenarioStorage {
         // A memory layer cannot survive a restart, so one instance is kept and reused.
         // That is not cheating: it models a cache that happened to still be warm, and
         // nothing durable is being claimed for it.
-        this.#memory[index] ??= memoryStore(options);
+        this.#memory[index] ??= createStore({ kind: "memory", ...options });
         return this.#memory[index];
       }
 
-      return fileStore(this.#dir(index), options);
+      return createStore({ kind: "file", dir: this.#dir(index), ...options });
     });
+  }
+
+  /**
+   * What the commit authority holds for a key, without making it resident.
+   *
+   * Read the way a reload reads it, snapshot included, so a stream whose transitions were
+   * folded into a snapshot still yields its state, sequence and values.
+   */
+  async committed(key: string): Promise<ReplayedState | undefined> {
+    if (!this.configured) {
+      return;
+    }
+    const loaded = await authorityOf(this.build())?.load(key);
+    return loaded === undefined ? undefined : replay(loaded);
   }
 
   cleanup(): void {
@@ -226,7 +264,7 @@ export class ScenarioStorage {
     this.#dirs.clear();
   }
 
-  readonly #memory: (MemoryStore | undefined)[] = [];
+  readonly #memory: (Store | undefined)[] = [];
 
   #dir(index: number): string {
     let dir = this.#dirs.get(index);
@@ -236,6 +274,20 @@ export class ScenarioStorage {
     }
     return dir;
   }
+}
+
+/**
+ * The layer that owns the truth, picked the way the runtime picks it: the one that claims
+ * it, else the last durable one, else the last.
+ */
+function authorityOf(layers: readonly Store[]): Store | undefined {
+  return (
+    layers.find((layer) => layer.authority === true) ??
+    [...layers]
+      .reverse()
+      .find((layer) => layer.capabilities.durability === "durable") ??
+    layers.at(-1)
+  );
 }
 
 /** Audit sinks that record what they were given, and can be told to fail first. */
@@ -297,7 +349,36 @@ export function buildClock(given: Given): ScenarioClock | undefined {
   };
 }
 
-function compileState(spec: StateSpec): Handler {
+/**
+ * Declare a state the way an application author would for what the scenario asks of it.
+ *
+ * A bare handler unless something needs the object form: a policy of the state's own, or
+ * one behaviour per trigger type. A state that declares `on` and a behaviour of its own is
+ * passed on with both, so that the refusal is the library's and a scenario can assert it.
+ */
+function declareState(spec: StateSpec): StateConfig {
+  if (spec.on === undefined) {
+    return spec.policy === undefined
+      ? compileState(spec)
+      : { handler: compileState(spec), ...spec.policy };
+  }
+
+  const on = Object.fromEntries(
+    Object.entries(spec.on).map(([type, behaviour]) => [
+      type,
+      compileState(behaviour),
+    ])
+  );
+  const alsoHandles = spec.cases !== undefined || spec.else !== undefined;
+
+  return {
+    on,
+    ...(alsoHandles ? { handler: compileState(spec) } : {}),
+    ...spec.policy,
+  } as StateConfig;
+}
+
+function compileState(spec: BehaviourSpec): Handler {
   return async (instance, trigger, ctx) => {
     // Every declared condition must match. `attempt` is what lets a scenario say
     // "fail the first time, commit the second", which is the whole of retry behaviour.
@@ -352,6 +433,8 @@ function toResult(
       return action.values === undefined
         ? stay()
         : stay(resolveValues(action.values, context));
+    case "patch":
+      return patch(resolveValues(action.values ?? {}, context));
     case "fail":
       return fail(named(new Error(action.error ?? "failed"), action.errorName));
     default:

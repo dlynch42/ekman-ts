@@ -1,4 +1,6 @@
 import type { EkmanEvent, TransitionEvent } from "./events";
+import type { TemporalLatch } from "./temporal";
+import { LatchFold } from "./temporal";
 import type { Values } from "./types";
 
 /**
@@ -42,6 +44,11 @@ export interface StoreCapabilities {
   readonly scan: {
     readonly byState: boolean;
     readonly olderThan: boolean;
+    /**
+     * Whether `staleForMs` is applied. Optional, and absent means it is not, so a store
+     * written before the criterion existed is filtered by the runtime instead of trusted.
+     */
+    readonly staleFor?: boolean;
   };
   /**
    * Whether this store can delete a key's stream outright.
@@ -59,6 +66,15 @@ export interface StoreCapabilities {
    * honestly offer either, both, or neither.
    */
   readonly compact: boolean;
+  /**
+   * Whether this store drops keys by itself to stay inside a bound of its own.
+   *
+   * Optional, and absent means it does not. Only a cache layer may: a key it dropped is a
+   * miss, and the commit authority still holds it. Declared so that the write the store
+   * then refuses, for a key it no longer holds, is taken as the miss it is and not
+   * reported as a failing cache.
+   */
+  readonly evicts?: boolean;
 }
 
 /**
@@ -105,6 +121,17 @@ export interface StoreSnapshot<
   readonly enteredAt: number;
   /** When the snapshot was taken. */
   readonly at: number;
+  /**
+   * When the instance last committed anything, on the runtime's clock, so the time since
+   * it was last heard from survives a restart. Absent in snapshots written before this
+   * was recorded, where it means unknown. Nothing else stands in for it.
+   */
+  readonly lastCommittedAt?: number;
+  /**
+   * What the instance's time-in-state bounds had already said about its stay in `state`.
+   * Absent when none had fired, and in snapshots written before this was recorded.
+   */
+  readonly temporal?: TemporalLatch;
 }
 
 /**
@@ -131,6 +158,25 @@ export interface ScanCriteria {
   /** The instant `olderThanMs` is measured against, from the runtime's clock. */
   readonly now: number;
   readonly limit?: number;
+  /**
+   * Keys the caller already has an answer for, which the store should leave out.
+   *
+   * Loading them is wasted work: the runtime's resident view wins on any key that appears
+   * in both. Optional in both directions. A caller may omit it, and a store that ignores it
+   * is still correct, only slower.
+   */
+  readonly skip?: ReadonlySet<string>;
+  /**
+   * Minimum milliseconds since the instance last committed anything, measured against
+   * `now`. An instance whose last commit time is unknown does not match: unknown is not
+   * stale.
+   */
+  readonly staleForMs?: number;
+  /**
+   * Carry each match's values. A store that ignores it is still correct: the runtime reads
+   * the values of any match that arrives without them, which costs a load per match.
+   */
+  readonly includeValues?: boolean;
 }
 
 export interface ScanMatch {
@@ -139,7 +185,14 @@ export interface ScanMatch {
   readonly state: string;
   readonly seq: number;
   readonly enteredAt: number;
+  /** When the instance last committed anything. Absent when the store does not know. */
+  readonly lastCommittedAt?: number;
+  /** The committed values, when the scan asked for them with `includeValues`. */
+  readonly values?: Readonly<Values>;
 }
+
+/** A scan criterion a store may be unable to apply. */
+export type ScanFilter = "state" | "olderThan" | "staleFor";
 
 export interface ScanResult {
   readonly matches: readonly ScanMatch[];
@@ -147,7 +200,7 @@ export interface ScanResult {
    * Criteria this store could not evaluate, named so the runtime can report a partial
    * answer as partial. A store that quietly ignores a filter turns a query into a lie.
    */
-  readonly unsupported: readonly string[];
+  readonly unsupported: readonly ScanFilter[];
   /** False when the answer was truncated, by a limit or by anything else. */
   readonly complete: boolean;
 }
@@ -228,8 +281,13 @@ export interface Store {
    */
   readonly compact?: () => Promise<StoreCompaction>;
 
-  /** What this store is holding, when it accounts for itself. */
-  readonly usage?: StoreUsage;
+  /**
+   * What this store is holding, when it accounts for itself.
+   *
+   * A method, because measuring is work: a store may have to walk what it holds to
+   * answer, and a property that does that on every read hides the cost from its caller.
+   */
+  readonly usage?: () => StoreUsage;
 
   /** Release anything held open. Optional, because a memory store holds nothing. */
   readonly close?: () => Promise<void>;
@@ -239,8 +297,11 @@ export interface Store {
  * Rebuild current state from a load.
  *
  * Shared by every adapter and by the runtime, because "replay" having one meaning is the
- * whole point of the event stream. Only transition events reconstruct: a rejection or a
- * violation records that something happened, not that anything changed.
+ * whole point of the event stream. Only transition events reconstruct state: a rejection
+ * or a violation records that something happened, not that anything changed. Those are
+ * still read for one thing, which is what the instance's time-in-state bounds have already
+ * said about its current stay, so a bound that fired before an eviction or a restart does
+ * not fire again after it.
  */
 export interface ReplayedState<
   S extends string = string,
@@ -250,13 +311,57 @@ export interface ReplayedState<
   readonly values: Readonly<V>;
   readonly seq: number;
   readonly enteredAt: number;
+  /**
+   * When the last commit was made. Absent only when a snapshot that did not record it
+   * was all there was to replay.
+   */
+  readonly lastCommittedAt?: number;
+  /** Absent when no time-in-state bound has fired during the current stay. */
+  readonly temporal?: TemporalLatch;
+}
+
+/**
+ * The time of the last commit as a field to spread into a record, or nothing when it is
+ * not known. Unknown is left out everywhere and never stood in for.
+ */
+export function lastCommitOf(known: {
+  readonly lastCommittedAt?: number | undefined;
+}): { readonly lastCommittedAt?: number } {
+  return known.lastCommittedAt === undefined
+    ? {}
+    : { lastCommittedAt: known.lastCommittedAt };
+}
+
+/**
+ * A snapshot of a replayed state, taken at `at`.
+ *
+ * Carries everything the state does, the time of the last commit and what its bounds have
+ * said included, so a load answered from the snapshot alone loses none of it.
+ */
+export function snapshotOf(
+  key: string,
+  current: ReplayedState,
+  at: number
+): StoreSnapshot {
+  return Object.freeze({
+    key,
+    entity: entityOf(key),
+    state: current.state,
+    values: current.values,
+    seq: current.seq,
+    enteredAt: current.enteredAt,
+    at,
+    ...lastCommitOf(current),
+    ...(current.temporal === undefined ? {} : { temporal: current.temporal }),
+  });
 }
 
 export function replay<S extends string, V extends Values>(
   loaded: LoadResult<S, V>
 ): ReplayedState<S, V> | undefined {
   const { snapshot } = loaded;
-  let current: ReplayedState<S, V> | undefined =
+  const latch = new LatchFold(snapshot?.temporal);
+  let current: Omit<ReplayedState<S, V>, "temporal"> | undefined =
     snapshot === undefined
       ? undefined
       : {
@@ -264,32 +369,62 @@ export function replay<S extends string, V extends Values>(
           values: snapshot.values,
           seq: snapshot.seq,
           enteredAt: snapshot.enteredAt,
+          ...lastCommitOf(snapshot),
         };
 
   for (const event of loaded.events) {
+    // Anything below the sequence reached so far is already accounted for: a commit
+    // folded into the snapshot, or a refusal from a stay in a state that has since ended.
+    if (current !== undefined && event.seq < current.seq) {
+      continue;
+    }
     if (event.type !== "transition") {
+      latch.apply(event);
+      continue;
+    }
+    if (current !== undefined && event.seq === current.seq) {
       continue;
     }
 
     const transition = event as TransitionEvent<S, V>;
-    // Events already folded into the snapshot are skipped rather than reapplied.
-    if (current !== undefined && transition.seq <= current.seq) {
-      continue;
+    // A move restarts time in state; a values-only commit leaves it running.
+    const before = current;
+    const stayed = before !== undefined && transition.from === transition.to;
+    if (stayed) {
+      latch.apply(event);
+    } else {
+      latch.moved(event.cause);
     }
 
     current = {
       state: transition.to,
       values: transition.values,
       seq: transition.seq,
-      // A move restarts time in state; a values-only commit leaves it running.
-      enteredAt:
-        transition.from === transition.to && current !== undefined
-          ? current.enteredAt
-          : transition.at,
+      enteredAt: stayed ? before.enteredAt : transition.at,
+      lastCommittedAt: transition.at,
     };
   }
 
-  return current;
+  const temporal = latch.result();
+  if (current === undefined || temporal === undefined) {
+    return current;
+  }
+  return { ...current, temporal };
+}
+
+/**
+ * Whether a load should hand back an event alongside a snapshot at `covered`.
+ *
+ * Every commit up to the snapshot's sequence is folded into it, so those are left out.
+ * A refusal or a violation recorded at that sequence is not: it carries the sequence of
+ * the commit it followed, a snapshot at a sequence a store already holds is ignored, and
+ * so the event is the only record that it happened since.
+ */
+export function isAfterSnapshot(event: EkmanEvent, covered: number): boolean {
+  return (
+    event.seq > covered ||
+    (event.seq === covered && event.type !== "transition")
+  );
 }
 
 /** The sequence a key is at after these events, ignoring everything that is not a commit. */
@@ -301,6 +436,16 @@ export function latestSeq(events: readonly EkmanEvent[]): number {
     }
   }
   return seq;
+}
+
+/**
+ * The sequence an append of this event is conditional on.
+ *
+ * A commit is conditional on the sequence before it. Anything else carries the current
+ * sequence, because it does not advance one.
+ */
+export function previousSeq(event: EkmanEvent): number {
+  return event.type === "transition" ? event.seq - 1 : event.seq;
 }
 
 /** The entity name a key addresses: its first segment. */
@@ -325,7 +470,7 @@ export async function scanKeys(
   const matches: ScanMatch[] = [];
 
   for (const key of keys) {
-    if (entityOf(key) !== criteria.entity) {
+    if (entityOf(key) !== criteria.entity || criteria.skip?.has(key)) {
       continue;
     }
 
@@ -364,6 +509,13 @@ function toMatch(
   ) {
     return;
   }
+  if (
+    criteria.staleForMs !== undefined &&
+    (current.lastCommittedAt === undefined ||
+      criteria.now - current.lastCommittedAt < criteria.staleForMs)
+  ) {
+    return;
+  }
 
   return {
     key,
@@ -371,5 +523,7 @@ function toMatch(
     state: current.state,
     seq: current.seq,
     enteredAt: current.enteredAt,
+    ...lastCommitOf(current),
+    ...(criteria.includeValues === true ? { values: current.values } : {}),
   };
 }

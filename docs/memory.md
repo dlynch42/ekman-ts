@@ -17,18 +17,54 @@ is bytes on disk. Evicting an instance frees the first and never the second.
 
 Serialized UTF-8 byte length of **the key, the state name, and the values**, measured at commit.
 
-Values are being serialized at that moment anyway, so this costs nothing extra on the path that
-matters, and it is a number you can reason about because it is roughly what the instance costs to
-persist. It is approximate as a measure of heap. It is exact and reproducible as a measure of
+With a store, values are being serialized at that moment anyway. With no store the count is
+the only reason they are, so accounting costs one `JSON.stringify` of the values per commit,
+whether or not a budget is set. Pass `sizeOf` if you can count them more cheaply. It is a
+number you can reason about because it is roughly what the instance costs to persist. It is approximate as a measure of heap. It is exact and reproducible as a measure of
 itself, which is the property that matters for a budget you can test against.
 
 Supply your own basis if you need a different one:
 
-```ts
-memory: { maxBytes: 32 * 1024 * 1024, sizeOf: (values) => values.blob.byteLength },
+<!-- check-docs:
+import { Ekman } from "ekman";
+import type { AnyEntityDefinition } from "ekman";
+declare const orders: AnyEntityDefinition;
+-->
+```ts check
+const ekman = new Ekman({
+  entities: [orders],
+  memory: {
+    maxBytes: 32 * 1024 * 1024,
+    sizeOf: (values) => (values.blob as Uint8Array).byteLength,
+  },
+});
 ```
 
+`values` is the open `Values` map here, since one function sizes every entity's instances, so a
+field is read with a cast or a type guard.
+
 `ekman.memoryUsage` reports `{ bytes, instances, maxBytes }` at any time.
+
+### History is not in the budget, and is bounded separately
+
+The basis counts an instance's current values, not the events that led to them. What a runtime
+keeps of a key's history depends on whether anything else holds it:
+
+- **With a store**, the stream lives in the store and `history()` reads it from there. An
+  instance keeps none of its own transitions in memory, so a key that commits for the life of
+  a process costs the same resident memory on its millionth commit as on its first. A
+  `"memory"` layer in front of another store is outside the budget. It keeps the state of
+  each key and not its stream, and holds every key it is sent unless you give it
+  [`maxKeys`](./durability.md#a-memory-cache).
+- **With `store: "memory"` as the only layer**, that store is the commit authority, so it keeps
+  every event of every key for the life of the process, outside the budget. A runtime
+  configured this way holds more than `maxBytes` says, and more with every commit. It is the
+  right choice for tests and for `history()` in a short-lived process. For a long-lived one,
+  use no store, or a durable one.
+- **With no store**, the runtime's copy is the only one, so each instance keeps its most recent
+  1,000 events and drops older ones. `history()` then reports `history-capped` beside
+  `no-durable-store`. Current state, values and sequence are never affected. If you need the
+  whole stream, configure a store.
 
 ## When the budget is full
 
@@ -61,6 +97,12 @@ A trigger for an evicted instance reloads it. Your application code cannot tell 
 instance from one that just came back off disk: the same `send()`, the same result, the same
 guarantees. The reload appears in the per-key stream as a `restored` event and in telemetry as
 `instance.restored`.
+
+A [sweep](./constraints.md#instances-that-are-not-resident) reloads an evicted instance too,
+when it has sat past a time-in-state or freshness bound and is owed an escalation. That load is counted
+against the budget like any other, and the instance is evictable again as soon as it is idle.
+Under `reject` a full budget refuses the load: the sweep reports it through `onUnhandled` and
+tries again on its next pass.
 
 ```
 npm run demo:memory-bound   # 5000 instances inside a 64 KB budget
