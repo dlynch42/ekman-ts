@@ -38,6 +38,14 @@ export const DEFAULT_AUDIT_ATTEMPTS = 3;
 
 const SINK_KEYS = ["name", "deliver", "maxAttempts"] as const;
 
+/** Names a value that is not a sink, for the error that refuses it. */
+function describeNonSink(value: unknown): string {
+  if (value === null) {
+    return "null";
+  }
+  return Array.isArray(value) ? "an array" : typeof value;
+}
+
 /**
  * Refuse an audit sink that could never deliver anything.
  *
@@ -45,6 +53,15 @@ const SINK_KEYS = ["name", "deliver", "maxAttempts"] as const;
  * an audit trail exists to rule out, so it is refused when the runtime is built.
  */
 export function assertAuditSink(sink: AuditSink): void {
+  // Typed as a sink, but a JavaScript caller can pass anything.
+  const given: unknown = sink;
+  if (typeof given !== "object" || given === null || Array.isArray(given)) {
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      `an audit sink must be an object with a \`name\` and a \`deliver\` function, received ${describeNonSink(given)}`
+    );
+  }
+
   const where = `audit sink ${JSON.stringify(sink.name)}`;
   assertKnownKeys(where, sink, SINK_KEYS);
 

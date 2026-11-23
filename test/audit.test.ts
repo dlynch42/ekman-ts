@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AuditSink } from "../src/audit";
-import { DEFAULT_AUDIT_ATTEMPTS, deliverTo } from "../src/audit";
+import {
+  assertAuditSink,
+  DEFAULT_AUDIT_ATTEMPTS,
+  deliverTo,
+} from "../src/audit";
+import { isEkmanError } from "../src/errors";
 import type { EkmanEvent } from "../src/events";
 
 const event: EkmanEvent = Object.freeze({
@@ -12,6 +17,31 @@ const event: EkmanEvent = Object.freeze({
   at: 0,
   cause: { type: "init", id: "t1" },
   values: {},
+});
+
+describe("refusing an audit sink", () => {
+  it.each([
+    ["null", null],
+    ["undefined", undefined],
+    ["a string", "a-name"],
+    ["a number", 3],
+    ["an array", []],
+  ])(
+    "refuses %s, which is not a sink, as a configuration error",
+    (_what, sink) => {
+      let thrown: unknown;
+      try {
+        assertAuditSink(sink as unknown as AuditSink);
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(isEkmanError(thrown) && thrown.code).toBe("INVALID_CONFIG");
+      expect((thrown as Error).message).toContain(
+        "an audit sink must be an object"
+      );
+    }
+  );
 });
 
 describe("delivering to an audit sink", () => {
