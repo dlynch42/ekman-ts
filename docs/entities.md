@@ -14,12 +14,17 @@ export const orders = defineEntity.withTriggers<OrderTrigger>()("orders", {
   initial: "pending",
   values: { total: 0, receipt: "" },
   states: {
-    pending: async (order, trigger) => {
-      if (trigger.type !== "pay") return stay(order.values);
-      const receipt = await chargeCard(trigger.amount);
-      return transitionTo("paid", { ...order.values, receipt });
+    pending: {
+      on: {
+        pay: async (order, trigger) => {
+          const receipt = await chargeCard(trigger.amount);
+          return transitionTo("paid", { ...order.values, receipt });
+        },
+        cancel: (order) => transitionTo("cancelled", order.values),
+      },
     },
     paid: (order) => stay(order.values),
+    cancelled: (order) => stay(order.values),
   },
 });
 ```
@@ -33,14 +38,14 @@ to bring instances of it to life.
 | Field | Type | Required | What it does |
 |---|---|---|---|
 | `initial` | a key of `states` | yes | The state a new instance starts in. Checked against `states`, so a typo is a compile error. |
-| `states` | map of state name to handler or `{ handler, ...policy }` | yes | The state machine. Its keys are the only source of the state union. |
+| `states` | map of state name to a handler, `{ on, ...policy }` or `{ handler, ...policy }` | yes | The state machine. Its keys are the only source of the state union. A state takes every trigger with one handler, or names the types it handles under [`on`](#handling-by-trigger-type). |
 | `values` | object | no | The starting values for a new instance, and the type of `instance.values` everywhere. Must be plain JSON data. They are copied and frozen at every depth, as committed values are, so a handler cannot change them in place. |
-| `triggers` | `string[]` | no | The contract with producers. Any trigger type not in this list is refused and recorded rather than ignored. Checked against the trigger union when the entity has one. |
-| `unknown` | `"reject"` | no | What happens when the current state has no handler or the trigger type is unrecognized. `"reject"` is the only value, and also the default: there is deliberately no silent-discard setting. |
+| `triggers` | list of trigger types | no | The contract with producers. Any trigger type not in this list is refused and recorded rather than ignored. Checked against the trigger union when the entity has one. Left out, every type is recognized, unless every state uses `on`: then the recognized types are the ones those maps name. |
+| `unknown` | `"reject"` | no | What happens when the current state has no handler, has none for the trigger's type, or the type is unrecognized. `"reject"` is the only value, and also the default: there is deliberately no silent-discard setting. |
 | `policy` | `ExecutionPolicy` | no | Retries, timeout and backoff for every state in this entity. Overrides the runtime's. See [Execution](./execution.md). |
 | `onError` | map of classification to handler | no | Handlers for failures, resolved specific-then-fallback. |
 | `classify` | `(error) => string` | no | Turns a thrown error into the key `onError` looks up. |
-| `constraints` | `ConstraintsConfig` | no | Transition graph, guards, invariants, time-in-state bounds. See [Constraints](./constraints.md). |
+| `constraints` | `ConstraintsConfig` | no | Rules, freshness bounds and time-in-state bounds, which propose a state, and a transition graph, guards and invariants, which refuse one. See [Constraints](./constraints.md). |
 
 ### Typing `values`
 
@@ -76,6 +81,52 @@ export const orders = defineEntity("orders", {
 `as OrderValues`: an assertion is not checked for missing fields, so a field you forgot
 compiles and is `undefined` at runtime.
 
+## Handling by trigger type
+
+A state that does different things for different triggers names them under `on`, one handler
+per type:
+
+```ts
+states: {
+  pending: {
+    on: {
+      pay: (order, trigger) => transitionTo("paid", { total: trigger.amount }),
+      cancel: (order) => transitionTo("cancelled", order.values),
+    },
+  },
+  paid: (order) => stay(order.values),
+}
+```
+
+The runtime picks the handler, so no handler opens with a branch on `trigger.type`. With a
+[trigger union](#typed-triggers) each handler receives the member its key names: `trigger.amount`
+above is a `number`, with no narrowing and no cast.
+
+**A type with no entry is refused.** A `refund` arriving while the order is `pending` never
+reaches a handler. The sender gets `UNHANDLED_TRIGGER`, the refusal is written to the instance's
+history, and the instance stays where it was. That is a different refusal from
+`UNKNOWN_TRIGGER`: the entity knows what a `refund` is, and this state has nothing to do with
+one. There is no fallback entry, because a fallback is a way to drop a trigger without saying so.
+
+**A plain handler still takes everything.** Write a state as a function when it should see
+every trigger type, including the ones it answers with `stay()`. The two forms mix freely within
+one entity, and `paid` above is the function form.
+
+**The map takes the same policy fields** a `{ handler }` state does, beside `on`:
+`{ on: { ... }, maxAttempts: 5, timeoutMs: 30_000 }`. The policy belongs to the state, not to
+one trigger type. A state cannot declare both `handler` and `on`.
+
+**Triggers the runtime delivers need an entry too.** A state under a
+[time-in-state bound, a freshness bound or a rule](./constraints.md) receives that bound's
+trigger like any other, so its `on` map lists the type: `"constraint.temporal"`,
+`"constraint.stale"` or `"rule.matched"`, or the bound's own `trigger` name. Leaving it out is
+refused when the entity is defined, where the bound names the state. A bound that applies in
+every state is not checked this way, and a state that does not list its trigger refuses it on
+arrival.
+
+`on` here is not the `on` of a [guard](./constraints.md), which names the state a guard
+protects.
+
 ## Typed triggers
 
 By default a trigger is `{ type: string }` plus arbitrary fields, all `unknown`. Give the entity
@@ -94,11 +145,12 @@ export const orders = defineEntity.withTriggers<OrderTrigger>()("orders", {
   values: { total: 0 },
   triggers: ["pay", "refund"],
   states: {
-    pending: (order, trigger) =>
-      trigger.type === "pay"
-        ? transitionTo("paid", { total: trigger.amount })
-        : stay(order.values),
-    paid: (order) => stay(order.values),
+    pending: {
+      on: { pay: (_order, trigger) => transitionTo("paid", { total: trigger.amount }) },
+    },
+    paid: (order, trigger) =>
+      trigger.type === "refund" ? transitionTo("refunded", order.values) : stay(order.values),
+    refunded: (order) => stay(order.values),
   },
 });
 ```
@@ -109,10 +161,12 @@ there does not work.
 
 What the union buys:
 
-- **Handlers narrow on `trigger.type`** and read payload fields without a cast.
+- **Handlers read payload fields without a cast.** An `on` entry receives the one member its
+  key names, and a plain handler narrows on `trigger.type`.
 - **`entities.orders.send` checks the caller.** `send("a-1", { type: "bogus" })` and a `pay` with
   no `amount` are compile errors.
-- **`triggers` is checked against the union,** so a typo in the list is a compile error too.
+- **`triggers` and the keys of `on` are checked against the union,** so a typo in either is a
+  compile error too.
 
 Two things it does not change:
 
@@ -139,17 +193,32 @@ type InvoiceTrigger = { type: "pay"; amount: number } | TemporalTrigger<State>;
 if (trigger.type === DEFAULT_TEMPORAL_TRIGGER) {
   return transitionTo(trigger.escalateTo ?? "overdue");   // a State, no cast
 }
+
+// or as an entry in the state's `on` map:
+on: {
+  [DEFAULT_TEMPORAL_TRIGGER]: (_invoice, trigger) =>
+    transitionTo(trigger.escalateTo ?? "overdue"),
+}
 ```
 
 It carries `constraint` (the bound's name), `state`, `sinceMs` and, when the bound names one,
 `escalateTo`. A bound that sets its own `trigger` name is written
 `TemporalTrigger<State, "invoice.stuck">`.
 
+The other two kinds that deliver a trigger have a type each, added to the union the same way:
+
+| Delivered by | Type | Default `type` | Carries |
+|---|---|---|---|
+| A [freshness bound](./constraints.md) | `StaleTrigger<State>` | `"constraint.stale"` (`DEFAULT_STALE_TRIGGER`) | `constraint`, `state`, `sinceMs`, and `propose` when the bound names a state |
+| A [rule](./constraints.md) | `RuleTrigger<State>` | `"rule.matched"` (`DEFAULT_RULE_TRIGGER`) | `rule`, `state`, `reason`, and `propose` when the rule names a state |
+
+Each takes the trigger's own name as a second type argument, as `TemporalTrigger` does.
+
 ## Handlers
 
 ```ts
 type Handler = (
-  instance: InstanceSnapshot,   // { key, entity, state, values, seq }
+  instance: InstanceSnapshot,   // { key, entity, state, values, seq, enteredAt, lastCommittedAt }
   trigger: Trigger,             // { type: string } plus arbitrary fields, all unknown
   ctx: HandlerContext,          // { key, entity, attempt, signal }
 ) => HandlerResult | Promise<HandlerResult>;
@@ -222,6 +291,8 @@ states: {
 },
 ```
 
+A state written with `on` takes the same fields beside the map.
+
 Settings layer runtime, then entity, then state, field by field. See [Execution](./execution.md).
 
 ## Error handlers
@@ -250,6 +321,10 @@ triggers: ["deploy", "succeeded", "failed", "rollback"],
 Omit `triggers` and any type is accepted. Declare it and the list becomes a contract: a typo in a
 message a queue is redelivering is refused with `UNKNOWN_TRIGGER` and written to the instance's
 history, rather than being handled by whatever state happened to be current.
+
+The list says what the entity recognizes at all. What one state does with a recognized type is
+the state's business: a plain handler sees it, and a state written with
+[`on`](#handling-by-trigger-type) refuses any type it has no entry for with `UNHANDLED_TRIGGER`.
 
 ```
 npm run demo:unknown    # a typo'd trigger, and a deploy that removed a state instances were in

@@ -42,10 +42,11 @@ trigger -> instance lookup (load or initialize)
         -> per-key bounded FIFO inbox
         -> dispatch on the current committed state
         -> handler, under an execution policy
-        -> result: transitionTo | stay | fail
-        -> constraints
+        -> result: transitionTo | stay | patch | fail
+        -> constraints that can refuse it (graph, guards, invariants)
         -> commit (state, values, sequence and event, atomically)
         -> persistence, then async audit fan-out
+        -> rules, asked about what was just committed
         -> memory accounting
         -> next queued trigger
 ```
@@ -53,8 +54,8 @@ trigger -> instance lookup (load or initialize)
 Four properties of that pipeline are worth stating outright, because a plausible-looking
 implementation gets them wrong.
 
-**A trigger never mutates state.** Only a committed handler result does. Time-in-state
-escalations and constraint escalations are delivered as triggers, not as writes, so every
+**A trigger never mutates state.** Only a committed handler result does. What a time bound,
+a freshness bound or a rule proposes is delivered as a trigger, not as a write, so every
 state change is attributable to a piece of your code rather than to the runtime.
 
 **Dispatch happens on the state at dequeue time,** never the state observed when the trigger
@@ -64,8 +65,10 @@ three left behind.
 **One handler runs per key at a time.** Retries keep the key occupied, so a queued trigger
 cannot slip past an attempt that is still in flight.
 
-**Unknown is never silent.** No handler for the current state, or a trigger type the entity
-never declared, goes to the entity's unknown policy. That policy has no silent-discard
+**Unknown is never silent.** No handler for the current state, a trigger type the entity
+never declared, or a declared type the current state has no entry for when it
+[names the types it handles](./entities.md#handling-by-trigger-type), goes to the entity's
+unknown policy. That policy has no silent-discard
 setting; unconfigured means refuse and record.
 
 ## Serialization is per key and nowhere else

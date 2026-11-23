@@ -1,4 +1,5 @@
 import { constraintsOf } from "./compiled";
+import type { RuntimeDeps } from "./config";
 import type { ProposedCommit } from "./constraints";
 import { checkConstraints, rejection, violationError } from "./constraints";
 import { resolveErrorHandler } from "./entity";
@@ -7,7 +8,7 @@ import type { EventCause } from "./events";
 import type { CommitToken } from "./fence";
 import { fenceReason } from "./fence";
 import type { InstanceRecord } from "./instance";
-import type { ExecutionPolicy, ResolvedPolicy } from "./policy";
+import type { ResolvedPolicy } from "./policy";
 import { backoffDelay, defaultRetryable, resolvePolicy } from "./policy";
 import type {
   HandlerResult,
@@ -16,32 +17,17 @@ import type {
   TransitionToResult,
 } from "./results";
 import { isHandlerResult, toError } from "./results";
-import type { TelemetryEvent } from "./telemetry";
 import { telemetryNow, triggerRef } from "./telemetry";
 import type {
   CommitResult,
   EntityDefinition,
   Handler,
   HandlerContext,
+  StateEntry,
   Trigger,
   Values,
 } from "./types";
 import { sealValues } from "./values";
-
-/** Everything a dispatch needs that is owned by the runtime rather than the instance. */
-export interface DispatchDeps {
-  now: () => number;
-  /** The runtime-wide execution policy, under every entity and state override. */
-  policy: ExecutionPolicy | undefined;
-  emit: (event: TelemetryEvent) => void;
-  /**
-   * Bring a record another writer has overtaken back in step with the store, through the
-   * runtime, so its indexes and the restore telemetry follow.
-   */
-  reconcile: (instance: InstanceRecord) => Promise<void>;
-  /** Aborted when the runtime begins closing, which ends any wait between attempts. */
-  closing: AbortSignal;
-}
 
 /**
  * Run one trigger against one instance, to completion.
@@ -54,7 +40,7 @@ export async function dispatch<S extends string, V extends Values>(
   instance: InstanceRecord<S, V>,
   definition: EntityDefinition<string, S, V, Trigger>,
   trigger: Trigger,
-  deps: DispatchDeps,
+  deps: RuntimeDeps,
   depth: number
 ): Promise<CommitResult<S, V>> {
   const cause: EventCause = { type: trigger.type, id: trigger.id as string };
@@ -114,6 +100,15 @@ export async function dispatch<S extends string, V extends Values>(
     );
   }
 
+  const handler = handlerFor(entry, trigger.type);
+
+  if (handler === undefined) {
+    settle("refused", 1);
+    return refuse(instance, deps, cause, "UNHANDLED_TRIGGER", () =>
+      unhandledReason(definition.name, instance.state, trigger.type, entry)
+    );
+  }
+
   const policy = resolvePolicy(
     deps.policy,
     entry.policy,
@@ -123,7 +118,7 @@ export async function dispatch<S extends string, V extends Values>(
   return await attemptLoop(instance, definition, trigger, deps, {
     cause,
     policy,
-    handler: entry.handler,
+    handler,
     depth,
     settle,
   });
@@ -160,7 +155,7 @@ async function attemptLoop<S extends string, V extends Values>(
   instance: InstanceRecord<S, V>,
   definition: EntityDefinition<string, S, V, Trigger>,
   trigger: Trigger,
-  deps: DispatchDeps,
+  deps: RuntimeDeps,
   ctx: AttemptContext<S, V>
 ): Promise<CommitResult<S, V>> {
   const { policy } = ctx;
@@ -247,9 +242,10 @@ async function attemptLoop<S extends string, V extends Values>(
  * for the state the other writer left. The policy stays the one the trigger was dispatched
  * under: a reload does not change which state's policy governs this trigger's attempts.
  *
- * A state with no handler ends the dispatch, whatever the retry predicate says. The record
- * has been reloaded by then, so a further attempt would skip the reload and run the old
- * state's handler against a state it was never written for.
+ * A state with no handler, or none for this trigger's type, ends the dispatch, whatever
+ * the retry predicate says. The record has been reloaded by then, so a further attempt
+ * would skip the reload and run the old state's handler against a state it was never
+ * written for.
  *
  * Only awaited for a record that needs it. An attempt that has nothing to reload must
  * reach its handler in the same turn, or telemetry interleaves differently with the sends
@@ -258,7 +254,7 @@ async function attemptLoop<S extends string, V extends Values>(
 async function reconciled<S extends string, V extends Values>(
   instance: InstanceRecord<S, V>,
   definition: EntityDefinition<string, S, V, Trigger>,
-  deps: DispatchDeps,
+  deps: RuntimeDeps,
   ctx: AttemptContext<S, V>
 ): Promise<Handler<S, V, Trigger>> {
   await deps.reconcile(instance as unknown as InstanceRecord);
@@ -279,7 +275,50 @@ async function reconciled<S extends string, V extends Values>(
     });
     throw new AttemptFailure(refusal, refusal, true);
   }
-  return entry.handler;
+
+  const handler = handlerFor(entry, ctx.cause.type);
+  if (handler === undefined) {
+    const reason = unhandledReason(
+      definition.name,
+      instance.state,
+      ctx.cause.type,
+      entry
+    );
+    instance.reject({
+      code: "UNHANDLED_TRIGGER",
+      reason,
+      at: deps.now(),
+      cause: ctx.cause,
+    });
+    const refusal = new EkmanError("UNHANDLED_TRIGGER", reason, {
+      key: instance.key,
+    });
+    throw new AttemptFailure(refusal, refusal, true);
+  }
+  return handler;
+}
+
+/**
+ * The handler a state has for a trigger type, or undefined when the state names its
+ * trigger types and this is not one of them.
+ */
+function handlerFor<S extends string, V extends Values>(
+  entry: StateEntry<S, V, Trigger>,
+  type: string
+): Handler<S, V, Trigger> | undefined {
+  return entry.on === undefined ? entry.handler : entry.on.get(type);
+}
+
+function unhandledReason(
+  entity: string,
+  state: string,
+  type: string,
+  entry: { readonly on?: ReadonlyMap<string, unknown> }
+): string {
+  return (
+    `entity "${entity}" state "${state}" has no handler for trigger type "${type}". ` +
+    `Handled in this state: ${[...(entry.on?.keys() ?? [])].join(", ")}`
+  );
 }
 
 /**
@@ -349,7 +388,7 @@ async function runAttempt<S extends string, V extends Values>(
   instance: InstanceRecord<S, V>,
   definition: EntityDefinition<string, S, V, Trigger>,
   trigger: Trigger,
-  deps: DispatchDeps,
+  deps: RuntimeDeps,
   ctx: AttemptContext<S, V>,
   token: CommitToken
 ): Promise<CommitResult<S, V>> {
@@ -445,7 +484,7 @@ function underTimeout<S extends string, V extends Values>(
   settled: Promise<CommitResult<S, V>>,
   instance: InstanceRecord<S, V>,
   trigger: Trigger,
-  deps: DispatchDeps,
+  deps: RuntimeDeps,
   timeoutMs: number,
   token: CommitToken,
   controller: AbortController
@@ -535,7 +574,7 @@ async function handleFailure<S extends string, V extends Values>(
   definition: EntityDefinition<string, S, V, Trigger>,
   error: Error,
   ctx: HandlerContext,
-  deps: DispatchDeps,
+  deps: RuntimeDeps,
   cause: EventCause,
   token: CommitToken,
   trigger: Trigger
@@ -616,7 +655,7 @@ function failed(
 function applyConstraints<S extends string, V extends Values>(
   instance: InstanceRecord<S, V>,
   definition: EntityDefinition<string, S, V, Trigger>,
-  deps: DispatchDeps,
+  deps: RuntimeDeps,
   args: {
     next: ProposedCommit<S, V>;
     trigger: Trigger;
@@ -711,7 +750,7 @@ async function commit<S extends string, V extends Values>(
   definition: EntityDefinition<string, S, V, Trigger>,
   result: TransitionToResult<S, V> | StayResult<V> | PatchResult<V>,
   trigger: Trigger,
-  deps: DispatchDeps,
+  deps: RuntimeDeps,
   cause: EventCause,
   token: CommitToken
 ): Promise<CommitResult<S, V>> {
@@ -777,9 +816,9 @@ async function commit<S extends string, V extends Values>(
 /** Record a refusal in the key's stream and reject the sender. */
 function refuse<S extends string, V extends Values>(
   instance: InstanceRecord<S, V>,
-  deps: DispatchDeps,
+  deps: RuntimeDeps,
   cause: EventCause,
-  code: "UNKNOWN_STATE" | "UNKNOWN_TRIGGER",
+  code: "UNKNOWN_STATE" | "UNKNOWN_TRIGGER" | "UNHANDLED_TRIGGER",
   reason: () => string
 ): never {
   const message = reason();

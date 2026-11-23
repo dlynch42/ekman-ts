@@ -22,7 +22,7 @@ written to be read by a person and will change.
 
 ## The codes
 
-There are 22, and they fall into four groups.
+There are 23, and they fall into four groups.
 
 The **Retry?** column is the contract: whether sending the same trigger again can come out
 differently. The **HTTP** column is a suggested mapping, and it does not carry that answer on its
@@ -37,7 +37,8 @@ Nothing committed, and the condition that refused it is still true.
 | `INVALID_KEY` | The key is malformed, or is too long for the store to name a file after. | no | 400 |
 | `UNKNOWN_ENTITY` | The key's first segment, or a query's `entity`, names no registered entity. | no | 404 |
 | `UNKNOWN_STATE` | The current state has no handler and the unknown policy is `reject`. | no | 409 |
-| `UNKNOWN_TRIGGER` | The trigger's type is not in the entity's declared trigger list. | no | 422 |
+| `UNKNOWN_TRIGGER` | The trigger's type is not one the entity recognizes: it is missing from the declared trigger list, or from every state's `on` map when no list is declared. | no | 422 |
+| `UNHANDLED_TRIGGER` | The entity recognizes the trigger's type, and the current state's `on` map has no entry for it. | no, unless the instance has since moved | 409 |
 | `CONSTRAINT_VIOLATED` | A result did not satisfy a constraint whose policy is `reject`. | no, unless the instance has since moved | 409 |
 | `COMMIT_FENCED` | A commit was refused because its attempt had been superseded. | only if the handler's work is safe to repeat | 409 |
 
@@ -59,7 +60,7 @@ time a sender sees one of these.
 | `TRIGGER_DROPPED` | The inbox was full and an overflow policy dropped this trigger on purpose. | no: that trigger is gone, and whether to send a new one is the producer's call | 503 |
 | `MEMORY_EXHAUSTED` | The memory budget is full and the eviction policy refuses rather than evicting. | yes, once something is released | 503 |
 | `STORE_FULL` | A store is at its retention budget and its policy refuses new instances. Instances it already holds keep committing. | not until space is reclaimed | 503 |
-| `STORE_UNAVAILABLE` | The store could not do what was asked: the commit authority could not be reached, or the file store met a filesystem failure or a corrupt log. The commit did not happen. The message names the store and the key, never a path. | yes, once the store is back | 503 |
+| `STORE_UNAVAILABLE` | The store could not do what was asked: the commit authority could not be reached, or the file store met a filesystem failure or a corrupt log. The commit did not happen. The message names the store and the key, never a path. Also raised by `forget()` when a cache layer the runtime has given up on may still hold the key. | yes, once the store is back | 503 |
 | `STORE_CONFLICT` | A conditional append found the key at a different sequence. Nothing was written. | yes: the key is reloaded, so the next send is handled on its current state | 409 |
 | `KEY_BUSY` | An operation needed the key idle and it was not: a handler was in flight, or a sweep was evaluating it. Only `forget` raises this. | yes, once the key is idle | 409 |
 | `RUNTIME_CLOSED` | The runtime has been closed, so the trigger was not accepted, or a retry that was waiting was abandoned. | not against this runtime; a replacement process is usually starting | 503 |
@@ -90,6 +91,7 @@ const STATUS: Record<string, number> = {
   UNKNOWN_ENTITY: 404,
   UNKNOWN_STATE: 409,
   UNKNOWN_TRIGGER: 422,
+  UNHANDLED_TRIGGER: 409,
   CONSTRAINT_VIOLATED: 409,
   INBOX_OVERFLOW: 503,
   TRIGGER_DROPPED: 503,

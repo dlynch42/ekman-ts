@@ -1,9 +1,11 @@
 import type { Caches } from "./caches";
 import { EkmanError } from "./errors";
 import type { TransitionEvent } from "./events";
+import type { InstanceRecord } from "./instance";
 import type { ResolvedMemoryConfig } from "./memory";
+import type { ExecutionPolicy } from "./policy";
 import type { ResolvedStack } from "./stack";
-import type { TelemetrySink } from "./telemetry";
+import type { TelemetryEvent } from "./telemetry";
 import type { InboxConfig, OnUnhandled, OverflowPolicy } from "./types";
 
 /**
@@ -29,11 +31,27 @@ export interface ResolvedInboxConfig {
   readonly recordOverflow: boolean;
 }
 
-/** Everything the instances and their inboxes need from the runtime that owns them. */
+/**
+ * Everything the runtime's parts need from the runtime that owns them: its instances and
+ * their inboxes, a dispatch, the sweeps and the queries.
+ *
+ * One bag, built once, so there is a single place each of these is defined and a part is
+ * handed the same clock and the same telemetry as every other.
+ */
 export interface RuntimeDeps {
   readonly now: () => number;
-  readonly telemetry: TelemetrySink | undefined;
+  /** Report a telemetry event to whichever sink entry takes it. */
+  readonly emit: (event: TelemetryEvent) => void;
   readonly onUnhandled: OnUnhandled;
+  /** The runtime-wide execution policy, under every entity and state override. */
+  readonly policy: ExecutionPolicy | undefined;
+  /**
+   * Bring a record another writer has overtaken back in step with the store, through the
+   * runtime, so its indexes and the restore telemetry follow.
+   */
+  readonly reconcile: (instance: InstanceRecord) => Promise<void>;
+  /** Aborted when the runtime begins closing, which ends any wait between attempts. */
+  readonly closing: AbortSignal;
   readonly inbox: ResolvedInboxConfig;
   /** Which layer owns the truth, and which are caches. */
   readonly stack: ResolvedStack;

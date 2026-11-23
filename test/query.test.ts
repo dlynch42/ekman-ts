@@ -172,6 +172,24 @@ describe("querying", () => {
     await ekman.close();
   });
 
+  it("keeps a resident instance the clock has stepped behind, when no age was asked for", async () => {
+    const time = clock(1000);
+    const ekman = new Ekman({ entities: [orders], now: time.now });
+
+    await ekman.entities.orders.send("1", { type: "t" });
+    time.advance(-100);
+
+    const found = await ekman.entities.orders.query();
+    expect(found.instances.map((match) => match.key)).toEqual(["orders:1"]);
+    expect(ekman.residentMap("orders").byState.open?.keys).toEqual([
+      "orders:1",
+    ]);
+
+    const aged = await ekman.entities.orders.query({ olderThan: "0s" });
+    expect(aged.instances).toEqual([]);
+    await ekman.close();
+  });
+
   it("reports the age of each match", async () => {
     const time = clock();
     const ekman = new Ekman({ entities: [orders], now: time.now });
@@ -929,6 +947,33 @@ describe("the state map", () => {
     await ekman.entities.services.send("c", { type: "probe" });
     return ekman;
   }
+
+  it("is built from the runtime's own query, so wrapping one changes the other", async () => {
+    const ekman = await fleet();
+    const query = ekman.query.bind(ekman);
+    const asked = vi
+      .spyOn(ekman, "query")
+      .mockImplementation(async (criteria) => {
+        const found = await query(criteria);
+        return {
+          ...found,
+          instances: found.instances.filter(
+            (instance) => instance.key !== "services:a"
+          ),
+        };
+      });
+
+    const byRuntime = await ekman.map("services");
+    const byHandle = await ekman.entities.services.map();
+
+    expect(asked).toHaveBeenCalledTimes(2);
+    expect(byRuntime.total).toBe(4);
+    expect(byRuntime.byState.healthy).toEqual({
+      count: 1,
+      keys: ["services:c"],
+    });
+    expect(byHandle).toEqual(byRuntime);
+  });
 
   it("counts and lists every instance by state, oldest in state first", async () => {
     const ekman = await fleet();

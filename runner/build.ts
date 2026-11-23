@@ -13,6 +13,7 @@ import type {
   ProposedCommit,
   ReplayedState,
   RuleConstraint,
+  StateConfig,
   Store,
   Trigger,
 } from "../src/index";
@@ -28,6 +29,7 @@ import {
 } from "../src/index";
 import type {
   AuditSpec,
+  BehaviourSpec,
   CheckSpec,
   ConstraintsSpec,
   DoSpec,
@@ -46,17 +48,7 @@ import type {
 export function buildEntity(spec: EntitySpec): AnyEntityDefinition {
   const states = statesFromEntries(
     spec.name,
-    spec.states.map(
-      (state) =>
-        [
-          state.state,
-          // A state declaring a policy compiles to the object form, which is the same
-          // choice an application author makes when a state needs its own policy.
-          state.policy === undefined
-            ? compileState(state)
-            : { handler: compileState(state), ...state.policy },
-        ] as const
-    )
+    spec.states.map((state) => [state.state, declareState(state)] as const)
   );
 
   return defineEntity(spec.name, {
@@ -357,7 +349,36 @@ export function buildClock(given: Given): ScenarioClock | undefined {
   };
 }
 
-function compileState(spec: StateSpec): Handler {
+/**
+ * Declare a state the way an application author would for what the scenario asks of it.
+ *
+ * A bare handler unless something needs the object form: a policy of the state's own, or
+ * one behaviour per trigger type. A state that declares `on` and a behaviour of its own is
+ * passed on with both, so that the refusal is the library's and a scenario can assert it.
+ */
+function declareState(spec: StateSpec): StateConfig {
+  if (spec.on === undefined) {
+    return spec.policy === undefined
+      ? compileState(spec)
+      : { handler: compileState(spec), ...spec.policy };
+  }
+
+  const on = Object.fromEntries(
+    Object.entries(spec.on).map(([type, behaviour]) => [
+      type,
+      compileState(behaviour),
+    ])
+  );
+  const alsoHandles = spec.cases !== undefined || spec.else !== undefined;
+
+  return {
+    on,
+    ...(alsoHandles ? { handler: compileState(spec) } : {}),
+    ...spec.policy,
+  } as StateConfig;
+}
+
+function compileState(spec: BehaviourSpec): Handler {
   return async (instance, trigger, ctx) => {
     // Every declared condition must match. `attempt` is what lets a scenario say
     // "fail the first time, commit the second", which is the whole of retry behaviour.

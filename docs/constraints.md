@@ -164,7 +164,7 @@ states: {
 
 | Field | What it does |
 |---|---|
-| `when` | The condition, handed the committed instance: `{ key, entity, state, values, seq }`. Return `true`, or a string saying why, when it holds, and `false` when it does not. |
+| `when` | The condition, handed the committed instance: `{ key, entity, state, values, seq, enteredAt, lastCommittedAt }`. Return `true`, or a string saying why, when it holds, and `false` when it does not. |
 | `in` | The state, or states, the rule watches. Omitted means every state. |
 | `propose` | The state the rule asks for. Carried on the trigger; the runtime never applies it. |
 | `trigger` | The type of the delivered trigger. Defaults to `rule.matched`. |

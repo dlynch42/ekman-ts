@@ -10,6 +10,7 @@ import type {
   EntityConfig,
   EntityDefinition,
   ErrorHandler,
+  Handler,
   StateConfig,
   StateEntry,
   Trigger,
@@ -76,7 +77,9 @@ export function defineEntity<
   }
 
   const triggers =
-    config.triggers === undefined ? null : new Set<string>(config.triggers);
+    config.triggers === undefined
+      ? handledEverywhere(handlers)
+      : new Set<string>(config.triggers);
 
   if (triggers !== null && triggers.size === 0) {
     throw new EkmanError(
@@ -85,6 +88,8 @@ export function defineEntity<
         "refused. Omit the field to accept any trigger type."
     );
   }
+
+  assertHandledAreRecognized(name, triggers, handlers);
 
   const errorHandlers = new Map<string, ErrorHandler<S, V>>(
     Object.entries(config.onError ?? {}) as [string, ErrorHandler<S, V>][]
@@ -114,6 +119,26 @@ export function defineEntity<
     triggers,
     "stale constraint",
     compiled?.stale ?? []
+  );
+
+  assertEscalationsHandled(name, handlers, "temporal constraint", [
+    ...(compiled?.temporal ?? []).map((bound) => ({
+      ...bound,
+      in: [bound.in],
+      proposes: undefined,
+    })),
+  ]);
+  assertEscalationsHandled(
+    name,
+    handlers,
+    "rule",
+    (compiled?.rules ?? []).map(scoped)
+  );
+  assertEscalationsHandled(
+    name,
+    handlers,
+    "stale constraint",
+    (compiled?.stale ?? []).map(scoped)
   );
 
   return Object.freeze({
@@ -185,8 +210,130 @@ function toStateEntry<
     return { handler: declared, policy: entityPolicy };
   }
 
-  const { handler, ...override } = declared;
-  return { handler, policy: { ...entityPolicy, ...override } };
+  const { handler, on, ...override } = declared as ExecutionPolicy & {
+    readonly handler?: Handler<S, V, T>;
+    readonly on?: Readonly<Record<string, Handler<S, V, T>>>;
+  };
+  const policy = { ...entityPolicy, ...override };
+
+  // Exactly one of the two is set: `assertStateConfig` refused every other shape.
+  return on === undefined
+    ? { handler: handler as Handler<S, V, T>, policy }
+    : {
+        on: new Map(Object.entries(on)),
+        policy,
+      };
+}
+
+/** As much of the states as the trigger checks read: which types each one names, if any. */
+type StatesByName = ReadonlyMap<
+  string,
+  { readonly on?: ReadonlyMap<string, unknown> }
+>;
+
+/**
+ * The trigger types an entity recognizes when it declares no `triggers` list.
+ *
+ * Null, meaning every type, as soon as one state takes any trigger. When every state names
+ * the types it handles, those names are the whole of what the entity can do anything with,
+ * so a type none of them names is unrecognized rather than merely unhandled where it landed.
+ */
+function handledEverywhere(handlers: StatesByName): Set<string> | null {
+  const handled = new Set<string>();
+  for (const entry of handlers.values()) {
+    if (entry.on === undefined) {
+      return null;
+    }
+    for (const type of entry.on.keys()) {
+      handled.add(type);
+    }
+  }
+  return handled;
+}
+
+/** Refuse a state that names a trigger type the entity's own `triggers` list leaves out. */
+function assertHandledAreRecognized(
+  entity: string,
+  triggers: ReadonlySet<string> | null,
+  handlers: StatesByName
+): void {
+  if (triggers === null) {
+    return;
+  }
+
+  for (const [state, entry] of handlers) {
+    for (const type of entry.on?.keys() ?? []) {
+      if (!triggers.has(type)) {
+        throw new EkmanError(
+          "INVALID_CONFIG",
+          `entity "${entity}" state "${state}" handles trigger type "${type}", which is ` +
+            "not in the declared triggers list, so it would be refused before it reached " +
+            "the state. Add it to `triggers`, or remove the entry."
+        );
+      }
+    }
+  }
+}
+
+interface ScopedEscalation {
+  readonly name: string;
+  readonly trigger: string;
+  readonly policy: "reject" | "warn";
+  /** The states it is asked in. Null means every state. */
+  readonly in: Iterable<string> | null;
+  /** The state it proposes, where it is never asked. */
+  readonly proposes: string | undefined;
+}
+
+function scoped(bound: {
+  readonly name: string;
+  readonly trigger: string;
+  readonly policy: "reject" | "warn";
+  readonly in: ReadonlySet<string> | null;
+  readonly propose: string | undefined;
+}): ScopedEscalation {
+  return { ...bound, proposes: bound.propose };
+}
+
+/**
+ * Refuse a time bound or a rule that delivers its trigger to a state with no handler for it.
+ *
+ * The per-state half of `assertEscalationsRecognized`. A state that names its trigger
+ * types refuses every other one, the runtime's included, and a refused escalation is
+ * final for that stay in the state: the instance being watched would sit where it was.
+ *
+ * Only states the declaration names are held to this. One that applies in every state
+ * says nothing about any state in particular, and is left to the refusal at delivery.
+ */
+function assertEscalationsHandled(
+  entity: string,
+  handlers: StatesByName,
+  what: string,
+  bounds: readonly ScopedEscalation[]
+): void {
+  for (const bound of bounds) {
+    if (bound.policy === "warn" || bound.in === null) {
+      continue;
+    }
+
+    for (const state of bound.in) {
+      const on = handlers.get(state)?.on;
+      if (
+        on === undefined ||
+        on.has(bound.trigger) ||
+        state === bound.proposes
+      ) {
+        continue;
+      }
+      throw new EkmanError(
+        "INVALID_CONFIG",
+        `entity "${entity}": ${what} "${bound.name}" delivers trigger type ` +
+          `"${bound.trigger}" in state "${state}", whose \`on\` map has no entry for it. ` +
+          `Add "${bound.trigger}" to that map, or set \`trigger\` on the ${what} to a ` +
+          "type the state handles."
+      );
+    }
+  }
 }
 
 /** Classification basis for `onError` lookup. */
@@ -315,7 +462,7 @@ const CONSTRAINT_KEYS = [
   "stale",
 ] as const;
 
-const STATE_KEYS = ["handler", ...POLICY_KEYS] as const;
+const STATE_KEYS = ["handler", "on", ...POLICY_KEYS] as const;
 
 /** The options each kind of constraint declaration takes, by the key it is declared under. */
 const DECLARATION_KEYS = {
@@ -373,11 +520,7 @@ function assertEntityConfig(
   assertPolicyKeys(config.policy, `${where} policy`);
 
   for (const [state, declared] of Object.entries(config.states ?? {})) {
-    if (typeof declared === "object" && declared !== null) {
-      const label = `${where} state "${state}"`;
-      assertKnownKeys(label, declared, STATE_KEYS);
-      assertPolicyKeys(withoutHandler(declared), label);
-    }
+    assertStateConfig(`${where} state "${state}"`, declared);
   }
 
   if (config.unknown !== undefined && config.unknown !== "reject") {
@@ -390,7 +533,71 @@ function assertEntityConfig(
   }
 }
 
-function withoutHandler(declared: object): ExecutionPolicy {
-  const { handler: _handler, ...policy } = declared as { handler?: unknown };
-  return policy;
+/**
+ * Refuse a state declared as anything but a handler, `{ handler }` or `{ on }`.
+ *
+ * A state with neither would be accepted and then fail every trigger at dispatch, as a
+ * handler failure, which says nothing about the definition being the thing at fault. One
+ * with both has two answers to which handler runs. And an empty `on` refuses everything,
+ * which is a state with no handler written the long way.
+ */
+function assertStateConfig(label: string, declared: unknown): void {
+  if (typeof declared === "function") {
+    return;
+  }
+  if (typeof declared !== "object" || declared === null) {
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      `${label} must be a handler function, or an object with \`handler\` or \`on\``
+    );
+  }
+
+  assertKnownKeys(label, declared, STATE_KEYS);
+  const { handler, on, ...policy } = declared as {
+    handler?: unknown;
+    on?: unknown;
+  };
+  assertPolicyKeys(policy, label);
+
+  if (handler !== undefined && on !== undefined) {
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      `${label} declares both \`handler\` and \`on\`. A state takes every trigger with ` +
+        "one handler, or names the types it handles under `on`, never both."
+    );
+  }
+
+  if (on === undefined) {
+    if (typeof handler !== "function") {
+      throw new EkmanError(
+        "INVALID_CONFIG",
+        `${label} declares no handler. Give it a \`handler\` function, or an \`on\` map ` +
+          "of trigger type to handler."
+      );
+    }
+    return;
+  }
+
+  if (typeof on !== "object" || on === null || Array.isArray(on)) {
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      `${label} \`on\` must be an object mapping trigger types to handlers`
+    );
+  }
+
+  const entries = Object.entries(on);
+  if (entries.length === 0) {
+    throw new EkmanError(
+      "INVALID_CONFIG",
+      `${label} declares an empty \`on\` map, so every trigger would be refused there`
+    );
+  }
+  for (const [type, entry] of entries) {
+    if (typeof entry !== "function") {
+      throw new EkmanError(
+        "INVALID_CONFIG",
+        `${label} \`on\` entry "${type}" must be a handler function`
+      );
+    }
+  }
 }

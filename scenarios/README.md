@@ -262,6 +262,29 @@ Note the difference from the unknown policy: a state with **no entry in `states`
 the unknown policy. A state that has an entry but whose cases do not match a trigger is
 ordinary handler logic, and returns whatever `else` says.
 
+A state can instead declare one behaviour per trigger type, under `on`:
+
+```json
+{
+  "state": "open",
+  "on": {
+    "sale": { "else": { "result": "stay", "values": { "sales": 1 } } },
+    "close": { "else": { "result": "transitionTo", "to": "closed" } }
+  }
+}
+```
+
+Each entry takes `cases` and `else` exactly as a state does, and runs only for triggers of its
+type. This is the unknown policy's business again: a trigger whose type the entity recognizes
+and the state has no entry for is refused with `UNHANDLED_TRIGGER`, recorded in the stream, and
+reaches no behaviour. When an entity declares no `triggers` and every one of its states uses
+`on`, the types those maps name are the ones it recognizes, and any other is `UNKNOWN_TRIGGER`.
+
+A state that declares `on` together with `cases` or `else` is refused at definition with
+`INVALID_CONFIG`, as is an empty `on`. So is a temporal constraint, a stale constraint or a rule
+whose `in` names a state that uses `on` and leaves the constraint's trigger type out, unless its
+policy is `warn`.
+
 ### The `do` object
 
 Exactly one of `result` or `throw`.
@@ -715,9 +738,11 @@ only a `type` asserts no event of that type was emitted at all.
 | `memory.refused` | A new instance was refused because the budget is full. | `residentBytes`, `maxBytes` |
 | `instance.evicted` | An instance was released to stay inside the budget. | `state`, `seq`, `bytes`, `snapshotted`, `residentBytes` |
 | `instance.restored` | An instance was rebuilt from the store. | `state`, `seq`, `from`, `replayed` |
+| `instance.forgotten` | An instance was deleted by `forget`. | `state`, `seq`, `bytes`, `resident`, `residentBytes` |
 | `audit.failed` | An audit sink could not be delivered to, after its retries. | `sink`, `error`, `seq` |
 | `store.cacheFailed` | A cache layer could not be read, written or cleared, or did not answer in time. The commit stands. | `store`, `error`, `seq` |
 | `store.cacheSuspended` | A cache layer went unanswered too many times in a row and is not used again. Carries no key. | `store`, `timeouts` |
+| `storage.swept` | A store layer finished a retention pass. Carries no key. | `store`, `logs`, `reclaimed`, `bytes`, `maxBytes`, `withinBudget` |
 | `runtime.closed` | The runtime finished closing. A `restart` step emits one. | `drained`, `pending`, `cachePending` |
 
 `memory.accounted.maxBytes` is `null` when the budget is unlimited.
@@ -946,7 +971,8 @@ Stable across implementations. A runner asserts on these strings, never on messa
 | `INVALID_KEY` | Key is malformed. |
 | `UNKNOWN_ENTITY` | The key's first segment names no registered entity. |
 | `UNKNOWN_STATE` | The current state has no handler and the unknown policy is `reject`. |
-| `UNKNOWN_TRIGGER` | The trigger type is not in the declared `triggers`. |
+| `UNKNOWN_TRIGGER` | The trigger type is not one the entity recognizes: not in the declared `triggers`, or in no state's `on` when none are declared. |
+| `UNHANDLED_TRIGGER` | The entity recognizes the trigger type and the current state's `on` has no entry for it. |
 | `HANDLER_FAILED` | The handler produced `fail`, or threw. |
 | `INBOX_OVERFLOW` | The inbox was full and the overflow policy is `reject`. |
 | `TRIGGER_DROPPED` | The inbox was full and a drop policy discarded this trigger. |
@@ -963,9 +989,8 @@ Stable across implementations. A runner asserts on these strings, never on messa
 | `MISSING_INITIAL_STATE` | No initial state declared. |
 | `INITIAL_STATE_NOT_IN_STATES` | The initial state has no handler. |
 | `INVALID_CONFIG` | Configuration is recognized but cannot be satisfied, and is refused rather than adjusted. |
-| `NOT_IMPLEMENTED` | Configuration is recognized but unimplemented at this phase. |
-
-Later phases add codes for store conflicts and memory exhaustion.
+| `NOT_IMPLEMENTED` | Something recognized was asked for that a configured store layer cannot do. Never silently ignored. |
+| `RUNTIME_CLOSED` | The runtime has begun closing, so the trigger was not accepted, or a retry waiting out its backoff was abandoned. |
 
 ## Determinism
 
@@ -990,7 +1015,7 @@ Anything that cannot be made deterministic must not be asserted.
    | `00x` | reserved |
    | `01x` | initialization and initial values |
    | `02x` | handler results: transitionTo, stay, fail, throw |
-   | `03x` | unknown policy: unrecognized state, unrecognized trigger |
+   | `03x` | unknown policy: unrecognized state, unrecognized trigger, a type the state does not handle |
    | `04x` | sequence numbering and the event stream |
    | `05x` | keys and addressing |
    | `06x` | ordering and per-key serialization |

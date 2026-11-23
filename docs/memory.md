@@ -17,9 +17,10 @@ is bytes on disk. Evicting an instance frees the first and never the second.
 
 Serialized UTF-8 byte length of **the key, the state name, and the values**, measured at commit.
 
-Values are being serialized at that moment anyway, so this costs nothing extra on the path that
-matters, and it is a number you can reason about because it is roughly what the instance costs to
-persist. It is approximate as a measure of heap. It is exact and reproducible as a measure of
+With a store, values are being serialized at that moment anyway. With no store the count is
+the only reason they are, so accounting costs one `JSON.stringify` of the values per commit,
+whether or not a budget is set. Pass `sizeOf` if you can count them more cheaply. It is a
+number you can reason about because it is roughly what the instance costs to persist. It is approximate as a measure of heap. It is exact and reproducible as a measure of
 itself, which is the property that matters for a budget you can test against.
 
 Supply your own basis if you need a different one:
@@ -55,6 +56,11 @@ keeps of a key's history depends on whether anything else holds it:
   `"memory"` layer in front of another store is outside the budget. It keeps the state of
   each key and not its stream, and holds every key it is sent unless you give it
   [`maxKeys`](./durability.md#a-memory-cache).
+- **With `store: "memory"` as the only layer**, that store is the commit authority, so it keeps
+  every event of every key for the life of the process, outside the budget. A runtime
+  configured this way holds more than `maxBytes` says, and more with every commit. It is the
+  right choice for tests and for `history()` in a short-lived process. For a long-lived one,
+  use no store, or a durable one.
 - **With no store**, the runtime's copy is the only one, so each instance keeps its most recent
   1,000 events and drops older ones. `history()` then reports `history-capped` beside
   `no-durable-store`. Current state, values and sequence are never affected. If you need the
@@ -92,8 +98,8 @@ instance from one that just came back off disk: the same `send()`, the same resu
 guarantees. The reload appears in the per-key stream as a `restored` event and in telemetry as
 `instance.restored`.
 
-A [time-in-state sweep](./constraints.md#instances-that-are-not-resident) reloads an evicted
-instance too, when it has sat past a bound and is owed an escalation. That load is counted
+A [sweep](./constraints.md#instances-that-are-not-resident) reloads an evicted instance too,
+when it has sat past a time-in-state or freshness bound and is owed an escalation. That load is counted
 against the budget like any other, and the instance is evictable again as soon as it is idle.
 Under `reject` a full budget refuses the load: the sweep reports it through `onUnhandled` and
 tries again on its next pass.

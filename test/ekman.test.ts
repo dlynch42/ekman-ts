@@ -389,6 +389,131 @@ describe("unknown policy", () => {
     expect(rejected[0]).toMatchObject({ code: "UNKNOWN_TRIGGER" });
   });
 
+  describe("a state that names its trigger types", () => {
+    const tills = defineEntity("tills", {
+      initial: "open",
+      triggers: ["sale", "close", "audit"],
+      states: {
+        open: {
+          on: {
+            sale: (till, trigger) =>
+              stay({
+                total:
+                  (till.values.total as number) + (trigger.amount as number),
+              }),
+            close: () => transitionTo("closed"),
+          },
+        },
+        closed: () => stay(),
+      },
+      values: { total: 0 },
+    });
+
+    it("runs the handler its map has for the trigger's type", async () => {
+      const ekman = new Ekman({ entities: [tills] });
+
+      const sold = await ekman.send("tills:1", { type: "sale", amount: 5 });
+      const closed = await ekman.send("tills:1", { type: "close" });
+
+      expect(sold.values).toEqual({ total: 5 });
+      expect(closed.state).toBe("closed");
+    });
+
+    it("refuses a recognized type the state has no entry for, and records it", async () => {
+      const seen: TelemetryEvent[] = [];
+      const ekman = new Ekman({
+        entities: [tills],
+        telemetry: { "*": (event) => seen.push(event) },
+      });
+
+      const refusal = await ekman
+        .send("tills:1", { type: "audit" })
+        .catch((error: unknown) => error as EkmanError);
+
+      expect(refusal).toMatchObject({ code: "UNHANDLED_TRIGGER" });
+      expect((refusal as EkmanError).message).toContain(
+        'state "open" has no handler for trigger type "audit". Handled in this state: sale, close'
+      );
+
+      const rejected = (await ekman.history("tills:1")).events.filter(
+        (event) => event.type === "rejected"
+      );
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0]).toMatchObject({
+        type: "rejected",
+        code: "UNHANDLED_TRIGGER",
+        cause: { type: "audit" },
+      });
+      expect(ekman.inspect("tills:1")).toMatchObject({ state: "open", seq: 0 });
+
+      expect(seen.some((event) => event.type === "handler.started")).toBe(
+        false
+      );
+      expect(
+        seen.find((event) => event.type === "handler.settled")
+      ).toMatchObject({ outcome: "refused", attempt: 1 });
+    });
+
+    it("still refuses an undeclared type as unknown before looking at the state", async () => {
+      const ekman = new Ekman({ entities: [tills] });
+
+      expect(await code(ekman.send("tills:1", { type: "sneak" }))).toBe(
+        "UNKNOWN_TRIGGER"
+      );
+    });
+
+    it("does not retry the refusal", async () => {
+      const ekman = new Ekman({
+        entities: [tills],
+        execution: { maxAttempts: 3, retryable: () => true },
+      });
+
+      expect(await code(ekman.send("tills:1", { type: "audit" }))).toBe(
+        "UNHANDLED_TRIGGER"
+      );
+      const rejected = (await ekman.history("tills:1")).events.filter(
+        (event) => event.type === "rejected"
+      );
+      expect(rejected).toHaveLength(1);
+    });
+
+    it("looks the type up in the state the trigger is dequeued in", async () => {
+      const ekman = new Ekman({ entities: [tills] });
+
+      const closing = ekman.send("tills:1", { type: "close" });
+      const late = ekman.send("tills:1", { type: "sale", amount: 1 });
+
+      await closing;
+      expect((await late).state).toBe("closed");
+    });
+
+    it("runs a state's own policy for the handlers in its map", async () => {
+      let attempts = 0;
+      const flaky = defineEntity("flaky", {
+        initial: "a",
+        states: {
+          a: {
+            maxAttempts: 2,
+            backoff: { kind: "fixed", delayMs: 0 },
+            on: {
+              go: () => {
+                attempts += 1;
+                if (attempts === 1) {
+                  throw new Error("first");
+                }
+                return stay();
+              },
+            },
+          },
+        },
+      });
+      const ekman = new Ekman({ entities: [flaky] });
+
+      await ekman.send("flaky:1", { type: "go" });
+      expect(attempts).toBe(2);
+    });
+  });
+
   it("accepts any trigger type when none are declared", async () => {
     const ekman = new Ekman({ entities: [orders] });
     await expect(

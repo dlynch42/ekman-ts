@@ -48,7 +48,7 @@ rejects the error goes to `onUnhandled` rather than becoming an unhandled reject
 | `inbox.rejected` | The inbox was full and the policy is `reject`. The trigger did not land. |
 | `inbox.dropped` | The inbox was full and a policy dropped a trigger on purpose. |
 | `handler.started` | An attempt began. |
-| `handler.settled` | A trigger finished being processed. Carries `durationMs`. |
+| `handler.settled` | A trigger finished being processed. Carries `durationMs` and an `outcome`: `committed`, `failed`, or `refused` for one that never reached a handler. |
 | `handler.retried` | An attempt failed and another is being made. |
 | `handler.timedOut` | An attempt ran past its timeout and was abandoned. |
 | `commit.fenced` | A superseded attempt finished and tried to commit. Its result was discarded. |
@@ -128,8 +128,8 @@ rejection with no context. The second argument says where it came from:
 |---|---|---|
 | `post` | A fire-and-forget send was refused, or its handler failed. Includes a `post()` after `close()`. | yes |
 | `telemetry` | A telemetry handler threw or rejected. | when the event has one |
-| `escalation` | A time-in-state bound fired and its trigger was refused. | yes |
-| `sweep` | An automatic time-in-state sweep failed, or a sweep could not scan the store or load an instance it found there. | when it was loading one |
+| `escalation` | A time-in-state bound, a freshness bound or a rule fired and its trigger was refused. | yes |
+| `sweep` | An automatic sweep of time-in-state and freshness bounds failed, or a sweep could not scan the store or load an instance it found there. | when it was loading one |
 | `storage-sweep` | An automatic storage sweep failed. | no |
 | `snapshot` | The snapshot written when an instance is evicted failed. The events are already stored, so this costs replay time and no state. | yes |
 | `persist` | A refusal or a violation could not be written to the store. | yes |

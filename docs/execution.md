@@ -31,7 +31,7 @@ correctness decision, so it is opted into rather than inherited.
 
 `retryable` defaults to retrying anything except a refusal, because a refusal cannot come out
 differently on a second try: the state still has no handler, the trigger type is still
-unrecognized, the token is still fenced, the constraint still does not hold.
+unrecognized or unhandled there, the token is still fenced, the constraint still does not hold.
 
 A predicate of your own receives the error your handler threw or returned in `fail()`, not the
 `HANDLER_FAILED` error the sender is given, so `(error) => error instanceof NetworkError` works

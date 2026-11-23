@@ -109,8 +109,10 @@ export type {
   StoreSnapshot,
   StoreUsage,
 } from "./store";
-// The adapter helpers below are also exported from `ekman/store`, which is where an adapter
-// should take them from. They stay here for one minor version.
+/**
+ * @deprecated Import these four from `ekman/store`, which is where an adapter should take
+ * them from. They stay on this entry point for one minor version.
+ */
 export { EMPTY_SEQ, latestSeq, replay, scanKeys } from "./store";
 export type {
   FileModeConfig,
@@ -170,6 +172,7 @@ export type {
   StateConfig,
   StateEntry,
   StateGraph,
+  StateOnConfig,
   StatePolicyConfig,
   StorageConfig,
   TemporalConfig,
