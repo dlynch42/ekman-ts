@@ -172,6 +172,24 @@ describe("querying", () => {
     await ekman.close();
   });
 
+  it("keeps a resident instance the clock has stepped behind, when no age was asked for", async () => {
+    const time = clock(1000);
+    const ekman = new Ekman({ entities: [orders], now: time.now });
+
+    await ekman.entities.orders.send("1", { type: "t" });
+    time.advance(-100);
+
+    const found = await ekman.entities.orders.query();
+    expect(found.instances.map((match) => match.key)).toEqual(["orders:1"]);
+    expect(ekman.residentMap("orders").byState.open?.keys).toEqual([
+      "orders:1",
+    ]);
+
+    const aged = await ekman.entities.orders.query({ olderThan: "0s" });
+    expect(aged.instances).toEqual([]);
+    await ekman.close();
+  });
+
   it("reports the age of each match", async () => {
     const time = clock();
     const ekman = new Ekman({ entities: [orders], now: time.now });

@@ -54,6 +54,6 @@
       ]
     },
     "resident": ["orders:1"],
-    "memory": { "instances": 1 }
+    "memory": { "instances": 1, "withinBytes": 128 }
   }
 }

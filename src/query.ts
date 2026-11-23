@@ -464,7 +464,12 @@ function* residentMatches(
   for (const state of states) {
     for (const key of residency.keysIn(entity, state)) {
       const aged = residency.ageOf(key, state, at);
-      if (aged === undefined || (olderThanMs ?? 0) > aged.elapsedMs) {
+      if (aged === undefined) {
+        continue;
+      }
+      // Only when the query asked, as with `staleFor`: a clock that steps backwards puts
+      // the entry ahead of now, and a filter nobody set must not drop the instance.
+      if (olderThanMs !== undefined && olderThanMs > aged.elapsedMs) {
         continue;
       }
 
